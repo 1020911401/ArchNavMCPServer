@@ -17,6 +17,8 @@ export function parseFileAst(filePath, baseDir) {
   const symbols = [];
   const imports = [];
   const exports = [];
+  const calls = [];      // ← 新增：调用边记录
+  let currentFunction = null;  // ← 当前所在函数的栈
 
   let ast;
   try {
@@ -48,6 +50,7 @@ export function parseFileAst(filePath, baseDir) {
       // === Function declarations ===
       case 'FunctionDeclaration': {
         if (node.id) {
+          currentFunction = node.id.name;
           symbols.push({
             id: node.id.name,
             name: node.id.name,
@@ -65,10 +68,35 @@ export function parseFileAst(filePath, baseDir) {
         break;
       }
 
+      // === Leave function scope ===
+      case 'BlockStatement': {
+        break;
+      }
+
+      // === Call expressions (record call relationships) ===
+      case 'CallExpression': {
+        let callee = null;
+        if (node.callee.type === 'Identifier') {
+          callee = node.callee.name;
+        } else if (node.callee.type === 'MemberExpression') {
+          callee = node.callee.property?.name || null;
+        }
+        if (callee && !['require'].includes(callee)) {
+          calls.push({
+            caller: currentFunction,
+            callee,
+            line: node.loc.start.line,
+            col: node.loc.start.column,
+          });
+        }
+        break;
+      }
+
       // === Arrow / Function expressions assigned to variables ===
       case 'VariableDeclarator': {
         if (node.id?.type === 'Identifier' && 
             (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) {
+          currentFunction = node.id.name;
           symbols.push({
             id: node.id.name,
             name: node.id.name,
@@ -112,6 +140,7 @@ export function parseFileAst(filePath, baseDir) {
                         (node.type === 'Property' && node.method);
         if (isMethod && node.key?.type === 'Identifier' && node.value?.type === 'FunctionExpression') {
           const methodName = node.key.name;
+          currentFunction = methodName;
           const func = node.value;
           // Only add if not already found (dedupe with full file walk)
           if (!symbols.some(s => s.name === methodName && s.file === relativePath && s.line_start === node.loc.start.line)) {
@@ -242,7 +271,7 @@ export function parseFileAst(filePath, baseDir) {
     symbols[0].imports = imports;
   }
 
-  return { symbols, imports, exports };
+  return { symbols, imports, exports, calls };
 }
 
 /**

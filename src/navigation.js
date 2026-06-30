@@ -149,6 +149,25 @@ export const archNav = {
     const imports = fileSymbols.flatMap(s => s.imports || []);
     
     const relations = [];
+    
+    // Check DEPENDS_ON edges from knowledge graph
+    const kg = index.knowledgeGraph || { edges: [] };
+    const callerId = `sym:${sym.file}::${sym.name}`;
+    const outgoingCalls = kg.edges.filter(e => e.from === callerId && e.type === 'DEPENDS_ON');
+    
+    for (const edge of outgoingCalls) {
+      const calleeName = edge.to.split('::').pop();
+      relations.push({
+        symbol: calleeName,
+        file: edge.to.split('::')[0].replace('sym:', ''),
+        line: edge.line || '?',
+        layer: index.layerMap?.[calleeName] || null,
+        confidence: 0.8,
+        source: 'call-graph',
+      });
+    }
+    
+    // Also find imports
     for (const imp of imports) {
       const resolvedName = imp.replace(/^.*[\/\\]/, '').replace(/\.[^/.]+$/, '').replace(/'/g, '');
       // Check if this resolved name matches a known symbol
@@ -191,6 +210,25 @@ export const archNav = {
     const targetFile = sym.file;
     const relations = [];
     
+    // Check incoming DEPENDS_ON edges from knowledge graph
+    const kg = index.knowledgeGraph || { edges: [] };
+    const symId = `sym:${sym.file}::${sym.name}`;
+    const incomingCalls = kg.edges.filter(e => e.to === symId && e.type === 'DEPENDS_ON');
+    
+    for (const edge of incomingCalls) {
+      const callerName = edge.from.split('::').pop();
+      const callerFile = edge.from.split('::')[0].replace('sym:', '');
+      relations.push({
+        symbol: callerName,
+        file: callerFile,
+        line: edge.line || '?',
+        layer: index.layerMap?.[callerName] || null,
+        confidence: 0.8,
+        source: 'call-graph',
+      });
+    }
+    
+    // Also check file-level imports
     for (const otherSym of index.symbols) {
       if (otherSym.file === targetFile) continue;
       if (otherSym.imports?.some(imp => targetFile.includes(imp.replace(/^.*[\/\\]/, '').replace(/'/g, '')))) {
@@ -227,10 +265,11 @@ export const archNav = {
     
     // Get callers (direct impact)
     const callerData = await this.callers(name, dirPath);
+    const callerRelations = callerData?.relations || [];
     
     // Get indirect impact (callers of callers)
     const indirectSymbols = [];
-    for (const caller of callerData.relations) {
+    for (const caller of callerRelations) {
       const subCallers = index.symbols.filter(s => 
         s.file !== caller.file && 
         s.imports?.some(imp => caller.file.includes(imp.replace(/^.*[\/\\]/, '').replace(/'/g, '')))
@@ -245,9 +284,10 @@ export const archNav = {
     }
     
     // Find test files
-    const testFiles = [...new Set(index.files.filter(f => 
+    const allFiles = [...new Set((index.symbols || []).map(s => s.file))];
+    const testFiles = allFiles.filter(f => 
       f.includes('test') || f.includes('spec') || f.includes('__tests__')
-    ))];
+    );
     
     return {
       type: 'impact',
@@ -255,7 +295,7 @@ export const archNav = {
       file: sym.file,
       line_start: sym.line_start,
       layer: index.layerMap?.[sym.id] || null,
-      direct_impact: callerData.relations.map(r => ({
+      direct_impact: callerRelations.map(r => ({
         symbol: r.symbol,
         file: r.file,
         line: r.line,

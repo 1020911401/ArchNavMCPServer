@@ -18,10 +18,12 @@ export async function analyze(dirPath, options = {}) {
   await walkDir(dirPath, files);
   
   // Parse each file
+  const allCalls = [];
   for (const file of files) {
     const result = await parseFileAsync(file, dirPath);
     const fileSymbols = result.symbols || [];
     symbols.push(...fileSymbols);
+    if (result.calls) allCalls.push(...result.calls.map(c => ({ ...c, file: path.relative(dirPath, file) })));
     
     // Track file hash for staleness
     const content = fs.readFileSync(file, 'utf-8');
@@ -48,7 +50,7 @@ export async function analyze(dirPath, options = {}) {
   }
 
   // Build knowledge graph (nodes + edges for architecture visualization)
-  const knowledgeGraph = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols);
+  const knowledgeGraph = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols, allCalls);
   
   const elapsed = Date.now() - startTime;
   
@@ -96,7 +98,7 @@ async function walkDir(dirPath, files) {
  * Build knowledge graph — file/dir/layer/community/flow nodes + edges
  * Transforms flat analysis data into a queryable graph structure
  */
-function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, depGraph, layerMap, symbols) {
+function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, depGraph, layerMap, symbols, allCalls) {
   const nodes = [];
   const edges = [];
   const nodeIds = new Set();
@@ -279,6 +281,23 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
         addEdge(relFile, `export:${relFile}`, 'DEFINES_EXPORT');
       }
     } catch {}
+  }
+
+  // 14. Call edges (DEPENDS_ON) — function-level call relationships from AST
+  for (const call of (allCalls || [])) {
+    if (call.caller && call.callee) {
+      const callerId = `sym:${call.file}::${call.caller}`;
+      const calleeId = (() => {
+        // Try to find callee in any file's symbols
+        for (const sym of (symbols || [])) {
+          if (sym.name === call.callee) return `sym:${sym.file}::${sym.name}`;
+        }
+        return `sym:${call.file}::${call.callee}`;
+      })();
+      if (callerId !== calleeId) {
+        addEdge(callerId, calleeId, 'DEPENDS_ON', { line: call.line });
+      }
+    }
   }
 
   return { nodes, edges };
