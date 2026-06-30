@@ -1,0 +1,23 @@
+{
+  "name": "archnav",
+  "version": "1.0.0",
+  "description": "ArchNav — Architecture-Aware Code Navigation for AI Agents",
+  "main": "src/index.js",
+  "bin": {
+    "archnav": "src/index.js"
+  },
+  "type": "module",
+  "dependencies": {
+    "@arborium/go": "^2.18.1",
+    "@arborium/java": "^2.18.1",
+    "@arborium/rust": "^2.18.1",
+    "@typescript-eslint/parser": "^8.62.1",
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "acorn": "^8.17.0",
+    "acorn-loose": "^8.5.2",
+    "commander": "^11.0.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "typescript": "^6.0.3",
+    "web-tree-sitter": "^0.26.10"
+  }
+}

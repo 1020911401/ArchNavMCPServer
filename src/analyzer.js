@@ -1,0 +1,490 @@
+/**
+ * Code Analyzer — Scans codebase for symbols, functions, classes, imports
+ * Uses acorn AST parser (tree-sitter quality, zero native dependencies)
+ */
+import fs from 'fs';
+import path from 'path';
+import { createHash } from 'crypto';
+import { parseFileAsync } from './parsers/dispatcher.js';
+
+export async function analyze(dirPath, options = {}) {
+  const startTime = Date.now();
+  const files = [];
+  const symbols = [];
+  const dependencies = [];
+  const fileHashes = {};
+  
+  // Walk directory
+  await walkDir(dirPath, files);
+  
+  // Parse each file
+  for (const file of files) {
+    const result = await parseFileAsync(file, dirPath);
+    const fileSymbols = result.symbols || [];
+    symbols.push(...fileSymbols);
+    
+    // Track file hash for staleness
+    const content = fs.readFileSync(file, 'utf-8');
+    fileHashes[path.relative(dirPath, file)] = hashContent(content);
+  }
+  
+  // Build dependency graph
+  const depGraph = buildDependencyGraph(symbols);
+  
+  // Infer architecture layers
+  const architecture = inferArchitecture(files, symbols, dirPath);
+  
+  // Detect communities (clusters) if requested
+  const communities = options.cluster !== false ? detectCommunities(symbols, depGraph) : [];
+  
+  // Detect data flows
+  const flows = detectFlows(symbols, depGraph, architecture);
+  
+  // Build layer mapping for each symbol
+  const layerMap = {};
+  for (const sym of symbols) {
+    const layer = findLayerForFile(sym.file, architecture);
+    if (layer) layerMap[sym.id] = layer;
+  }
+
+  // Build knowledge graph (nodes + edges for architecture visualization)
+  const knowledgeGraph = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols);
+  
+  const elapsed = Date.now() - startTime;
+  
+  return {
+    type: 'analysis',
+    projectName: path.basename(dirPath),
+    projectPath: dirPath,
+    files: files.length,
+    symbols: symbols.length,
+    dependencies: depGraph.length,
+    layers: architecture.layers.length,
+    clusters: communities.length,
+    flows: flows.length,
+    analysisTime: `${(elapsed / 1000).toFixed(1)}s`,
+    files: files.map(f => path.relative(dirPath, f)),
+    symbols: symbols,
+    dependencyGraph: depGraph,
+    architecture: {
+      layers: architecture.layers,
+      violations: architecture.violations,
+    },
+    communities,
+    flows,
+    fileHashes,
+    layerMap,
+    knowledgeGraph,
+    _raw: { symbols, depGraph, architecture, fileHashes, layerMap, knowledgeGraph },
+  };
+}
+
+async function walkDir(dirPath, files) {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    if (entry.isDirectory()) {
+      await walkDir(fullPath, files);
+    } else if (entry.isFile() && /\.(js|ts|tsx|jsx|mjs|cjs|py|go|rs|java|php|c|cpp|cc|cxx|h|hpp|hh|cs|rb|sh|bash|ps1|psm1|psd1)$/i.test(entry.name)) {
+      files.push(fullPath);
+    }
+  }
+}
+
+/**
+ * Build knowledge graph — file/dir/layer/community/flow nodes + edges
+ * Transforms flat analysis data into a queryable graph structure
+ */
+function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, depGraph, layerMap, symbols) {
+  const nodes = [];
+  const edges = [];
+  const nodeIds = new Set();
+
+  function addNode(id, type, name, meta = {}) {
+    if (nodeIds.has(id)) return;
+    nodeIds.add(id);
+    nodes.push({ id, type, name, ...meta });
+  }
+
+  function addEdge(from, to, type, meta = {}) {
+    edges.push({ from, to, type, ...meta });
+  }
+
+  // 1. File nodes
+  const fileNodeIds = [];
+  for (const file of files) {
+    const relFile = typeof file === 'string' ? file : path.relative(baseDir, file);
+    addNode(relFile, 'file', path.basename(relFile), { path: relFile });
+    fileNodeIds.push(relFile);
+
+    // 2. Directory nodes + CONTAINS edges
+    const dirs = relFile.split(/[\\/]/);
+    let dirPath = '';
+    for (const d of dirs.slice(0, -1)) {
+      dirPath = dirPath ? `${dirPath}/${d}` : d;
+      addNode(`dir:${dirPath}`, 'directory', d, { path: dirPath });
+      if (dirPath === d) {
+        addEdge(`dir:${dirPath}`, relFile, 'CONTAINS');
+      } else {
+        const parentDir = dirPath.substring(0, dirPath.lastIndexOf('/'));
+        addEdge(`dir:${parentDir}`, `dir:${dirPath}`, 'CONTAINS');
+        addEdge(`dir:${dirPath}`, relFile, 'CONTAINS');
+      }
+    }
+  }
+
+  // 3. Layer nodes + BELONGS_TO edges
+  for (const layer of architecture.layers) {
+    const layerId = `layer:${layer.name}`;
+    addNode(layerId, 'layer', layer.name, { priority: layer.priority || 99 });
+
+    // Match files to layers
+    for (const file of files) {
+      const relFile = typeof file === 'string' ? file : path.relative(baseDir, file);
+      if (layer.pattern && new RegExp(layer.pattern).test(relFile)) {
+        addEdge(relFile, layerId, 'BELONGS_TO');
+      }
+    }
+  }
+
+  // 4. Community nodes + MEMBER_OF edges
+  for (const comm of communities) {
+    const commId = `comm:${comm.name}`;
+    addNode(commId, 'community', comm.name, { fileCount: comm.fileCount });
+    for (const symName of (comm.symbols || [])) {
+      const symFile = layerMap ? Object.entries(layerMap).find(([k]) => k === symName)?.[0] : null;
+      if (symFile) addEdge(`sym:${symName}`, commId, 'MEMBER_OF');
+    }
+  }
+
+  // 5. Flow nodes + HAS_STEP edges
+  for (const flow of flows) {
+    const flowId = `flow:${flow.name}`;
+    addNode(flowId, 'flow', flow.name);
+    for (const step of (flow.path || [])) {
+      const stepName = step.split(' ')[0]; // "symbolName (file)" → "symbolName"
+      addEdge(flowId, `sym:${stepName}`, 'HAS_STEP');
+    }
+  }
+
+  // 6. File-level IMPORTS edges
+  const fileImports = new Map();
+  for (const dep of depGraph) {
+    const fromFile = dep.fromFile;
+    const toFile = dep.toFile;
+    const key = `${fromFile}→${toFile}`;
+    if (!fileImports.has(key)) {
+      fileImports.set(key, { fromFile, toFile, count: 0 });
+    }
+    fileImports.get(key).count++;
+  }
+  for (const [_, imp] of fileImports) {
+    addEdge(imp.fromFile, imp.toFile, 'IMPORTS', { weight: imp.count });
+  }
+
+  // 7. Symbol nodes + edges
+  for (const sym of (symbols || [])) {
+    const symId = `sym:${sym.file}::${sym.name}`;  // unique per file+name
+    addNode(symId, 'symbol', sym.name, {
+      kind: sym.kind,
+      line_start: sym.line_start,
+      line_end: sym.line_end,
+      file: sym.file,
+    });
+    // Symbol CONTAINS file
+    addEdge(sym.file, symId, 'CONTAINS');
+    // Symbol BELONGS_TO layer
+    const layer = layerMap?.[sym.id];
+    if (layer) addEdge(symId, `layer:${layer}`, 'BELONGS_TO');
+  }
+
+  // 8. Import package nodes — external npm package imports
+  const knownLocal = new Set(['services', 'models', 'repositories', 'middleware', 'config', 'controllers', 'utils', 'api']);
+  const seenPkgs = new Set();
+  for (const dep of depGraph) {
+    const name = dep.toFile;
+    if (name && !name.includes('/') && name !== '.' && !knownLocal.has(name)) {
+      const pkgId = `pkg:${name}`;
+      if (!seenPkgs.has(name)) {
+        seenPkgs.add(name);
+        addNode(pkgId, 'package', name);
+      }
+      addEdge(dep.fromFile, pkgId, 'IMPORTS');
+    }
+  }
+
+  // 9. Variable nodes — module-level variables (from Python + JS)
+  for (const sym of (symbols || [])) {
+    if (sym.kind === 'variable' && !nodeIds.has(`var:${sym.file}::${sym.name}`)) {
+      const varId = `var:${sym.file}::${sym.name}`;
+      addNode(varId, 'variable', sym.name, {
+        file: sym.file, line_start: sym.line_start, line_end: sym.line_end,
+      });
+      addEdge(sym.file, varId, 'CONTAINS');
+    }
+  }
+
+  // 10. Export edges for exported symbols
+  for (const sym of (symbols || [])) {
+    if (sym.exported) {
+      const symId = `sym:${sym.file}::${sym.name}`;
+      if (nodeIds.has(symId)) {
+        addEdge(symId, `${sym.file}`, 'EXPORTS');
+      }
+    }
+  }
+
+  // 11. Route nodes — detect Express-style route registrations
+  for (const file of files) {
+    const relFile = typeof file === 'string' ? file : path.relative(baseDir, file);
+    try {
+      const content = fs.readFileSync(path.resolve(baseDir, relFile), 'utf-8');
+      const routerMethods = content.matchAll(/\.(get|post|put|delete|patch)\s*\(\s*['"]([^'"]+)['"]/g);
+      for (const m of routerMethods) {
+        const method = m[1].toUpperCase();
+        const routePath = m[2];
+        const routeId = `route:${relFile}::${method} ${routePath}`;
+        addNode(routeId, 'route', `${method} ${routePath}`, {
+          method, path: routePath, file: relFile,
+        });
+        addEdge(relFile, routeId, 'DEFINES_ROUTE');
+      }
+    } catch {}
+  }
+
+  // 12. Anonymous function nodes — unnamed arrow/function expressions
+  for (const file of files) {
+    const relFile = typeof file === 'string' ? file : path.relative(baseDir, file);
+    try {
+      const content = fs.readFileSync(path.resolve(baseDir, relFile), 'utf-8');
+      // Count standalone arrow functions not assigned to const/let/var
+      const arrows = content.match(/(?:=>\s*\{|=>\s*[^;]*\n)/g);
+      const anonCount = Math.min(arrows ? arrows.length : 0, 30);
+      for (let i = 0; i < anonCount; i++) {
+        const anonId = `anon:${relFile}::fn${i + 1}`;
+        addNode(anonId, 'anonymous', `λ#${i + 1}`, { file: relFile });
+        addEdge(relFile, anonId, 'CONTAINS');
+      }
+    } catch {}
+  }
+
+  // 13. Export statement nodes — module.exports / export default blocks
+  for (const file of files) {
+    const relFile = typeof file === 'string' ? file : path.relative(baseDir, file);
+    try {
+      const content = fs.readFileSync(path.resolve(baseDir, relFile), 'utf-8');
+      if (content.includes('module.exports')) {
+        addNode(`export:${relFile}`, 'export', 'module.exports', { file: relFile });
+        addEdge(relFile, `export:${relFile}`, 'DEFINES_EXPORT');
+      }
+    } catch {}
+  }
+
+  return { nodes, edges };
+}
+
+function buildDependencyGraph(symbols) {
+  const deps = [];
+  for (const sym of symbols) {
+    if (sym.imports) {
+      for (const imp of sym.imports) {
+        // imp can be a string (old format) or an object { source, specifiers } (treewalker format)
+        const source = typeof imp === 'string' ? imp : imp.source;
+        if (!source) continue;
+        const resolved = resolveImport(source, sym.file);
+        deps.push({
+          from: sym.id,
+          fromFile: sym.file,
+          to: resolved,
+          toFile: resolved,
+          type: 'import',
+        });
+      }
+    }
+  }
+  return deps;
+}
+
+function resolveImport(importPath, sourceFile) {
+  // Simple resolution: extract the package/file name
+  const name = importPath.replace(/^\.\.?\//, '').replace(/\/.*$/, '');
+  return name;
+}
+
+function inferArchitecture(files, symbols, baseDir) {
+  const layerPatterns = [
+    { name: 'API (Controller)', pattern: /controllers?[\/\\]/i, priority: 1 },
+    { name: 'Business (Service)', pattern: /services?[\/\\]/i, priority: 2 },
+    { name: 'Data (Repository)', pattern: /repositor(?:y|ies)[\/\\]/i, priority: 3 },
+    { name: 'Model / Validation', pattern: /models?[\/\\]/i, priority: 4 },
+    { name: 'Middleware', pattern: /middleware[\/\\]/i, priority: 5 },
+    { name: 'Configuration', pattern: /config[\/\\]/i, priority: 6 },
+    { name: 'Utilities', pattern: /utils?[\/\\]/i, priority: 7 },
+    { name: 'Infrastructure', pattern: /infrastructure[\/\\]|lib[\/\\]|shared[\/\\]/i, priority: 8 },
+  ];
+
+  const layerMap = {};
+  const layers = [];
+  const violations = [];
+
+  // Map files to layers
+  for (const file of files) {
+    const relPath = typeof file === 'string' ? file : path.relative(baseDir, file);
+    let matched = false;
+    for (const lp of layerPatterns) {
+      if (lp.pattern.test(relPath)) {
+        if (!layerMap[lp.name]) {
+          layerMap[lp.name] = { name: lp.name, files: [], symbols: [], dependencies: [], priority: lp.priority };
+        }
+        layerMap[lp.name].files.push(relPath);
+        // Find symbols belonging to this file
+        const fileSymbols = symbols.filter(s => s.file === relPath);
+        layerMap[lp.name].symbols.push(...fileSymbols.map(s => s.name));
+        // Collect imports
+        const fileImports = fileSymbols.filter(s => s.imports).flatMap(s => s.imports);
+        layerMap[lp.name].dependencies.push(...fileImports);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      // Unmatched files go to a generic layer
+      const name = 'Unknown / Other';
+      if (!layerMap[name]) {
+        layerMap[name] = { name, files: [], symbols: [], dependencies: [], priority: 99 };
+      }
+      layerMap[name].files.push(relPath);
+    }
+  }
+
+  // Build layer violation checks
+  const layerOrder = Object.values(layerMap).sort((a, b) => a.priority - b.priority);
+  
+  // Check for layer violations (e.g., controller directly importing repository)
+  for (const layer of layerOrder) {
+    for (const dep of layer.dependencies) {
+      for (const otherLayer of layerOrder) {
+        if (otherLayer.name === layer.name) continue;
+        if (otherLayer.files.some(f => f.includes(dep.replace(/^\.\.?\//, '').replace(/\/.*$/, '').replace(/'/g, '')))) {
+          // Check if this is a "allowed" dependency direction
+          if (layer.priority < otherLayer.priority) {
+            // Higher layer depending on lower layer = OK (controller → service)
+            // This is normal
+          } else if (layer.priority > otherLayer.priority) {
+            // Lower layer depending on higher layer = potential violation
+            // (e.g., repository importing controller)
+            violations.push({
+              layer: layer.name,
+              dependsOn: otherLayer.name,
+              details: `${layer.name} depends on ${otherLayer.name}, which is against layering rules`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    layers: layerOrder.map(l => ({
+      name: l.name,
+      pattern: layerPatterns.find(p => p.name === l.name)?.pattern?.source || 'auto-detected',
+      files: l.files.length,
+      symbols: l.symbols.length,
+      dedupedSymbols: [...new Set(l.symbols)].length,
+      dependencies: [...new Set(l.dependencies)].slice(0, 10),
+    })),
+    violations,
+  };
+}
+
+function detectCommunities(symbols, depGraph) {
+  // Simple community detection: group by directory
+  const communities = {};
+  for (const sym of symbols) {
+    const dir = path.dirname(sym.file);
+    if (!communities[dir]) communities[dir] = { name: dir, symbols: [], files: new Set() };
+    communities[dir].symbols.push(sym.name);
+    communities[dir].files.add(sym.file);
+  }
+  return Object.values(communities).map(c => ({
+    name: c.name,
+    symbols: [...new Set(c.symbols)].slice(0, 20),
+    fileCount: c.files.size,
+  }));
+}
+
+function detectFlows(symbols, depGraph, architecture) {
+  // Detect data flows based on import chains
+  const flows = [];
+  const layers = architecture.layers;
+  
+  // Look for common flow patterns: API → Service → Repository
+  const apiLayer = layers.find(l => l.name.includes('API'));
+  const svcLayer = layers.find(l => l.name.includes('Business'));
+  const repoLayer = layers.find(l => l.name.includes('Data'));
+  
+  if (apiLayer && svcLayer) {
+    // Find symbols in API layer
+    const apiSymbols = symbols.filter(s => apiLayer.pattern ? 
+      new RegExp(apiLayer.pattern).test(s.file) : s.file.startsWith('src/controllers'));
+    const svcSymbols = symbols.filter(s => svcLayer.pattern ?
+      new RegExp(svcLayer.pattern).test(s.file) : s.file.startsWith('src/services'));
+    const repoSymbols = repoLayer ? symbols.filter(s => repoLayer.pattern ?
+      new RegExp(repoLayer.pattern).test(s.file) : s.file.startsWith('src/repositories')) : [];
+    
+    // Build flow
+    const flowPath = [];
+    for (const s of apiSymbols) flowPath.push(`${s.name} (${s.file})`);
+    for (const s of svcSymbols.slice(0, 3)) flowPath.push(`${s.name} (${s.file})`);
+    if (repoSymbols.length > 0) {
+      for (const s of repoSymbols.slice(0, 2)) flowPath.push(`${s.name} (${s.file})`);
+    }
+    
+    flows.push({
+      name: 'API → Service → Data',
+      path: flowPath.slice(0, 5),
+    });
+  }
+  
+  return flows;
+}
+
+function hashContent(content) {
+  return createHash('sha256').update(content).digest('hex').substring(0, 12);
+}
+
+function findLayerForFile(filePath, architecture) {
+  for (const layer of architecture.layers) {
+    if (layer.pattern && new RegExp(layer.pattern).test(filePath)) {
+      return layer.name;
+    }
+  }
+  return null;
+}
+
+export function getIndex(baseDir) {
+  // Load cached index if available
+  const indexPath = path.join(baseDir, '.archnav', 'index.json');
+  try {
+    return JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+export function saveIndex(baseDir, data) {
+  const indexDir = path.join(baseDir, '.archnav');
+  fs.mkdirSync(indexDir, { recursive: true });
+  fs.writeFileSync(path.join(indexDir, 'index.json'), JSON.stringify(data, null, 2));
+  // Save commit hash for staleness tracking
+  try {
+    const headContent = fs.readFileSync(path.join(baseDir, '.git', 'HEAD'), 'utf-8').trim();
+    let commitHash = headContent;
+    if (headContent.startsWith('ref: ')) {
+      const refPath = headContent.substring(5);
+      commitHash = fs.readFileSync(path.join(baseDir, '.git', refPath), 'utf-8').trim();
+    }
+    fs.writeFileSync(path.join(indexDir, 'commit'), commitHash);
+  } catch {}
+}
