@@ -1,0 +1,70 @@
+{
+  "symbol": "orderTake",
+  "targets": [
+    {
+      "name": "orderTake",
+      "kind": "function",
+      "filePath": "api/activity.js",
+      "startLine": 293,
+      "id": "function:06e7b7d396e6658b6d771ef6917acd68",
+      "qualifiedName": "orderTake",
+      "language": "javascript"
+    },
+    {
+      "name": "orderTake",
+      "kind": "function",
+      "filePath": "api/order.js",
+      "startLine": 171,
+      "id": "function:79265b600a87a775b39d15fe048bc5a3",
+      "qualifiedName": "orderTake",
+      "language": "javascript"
+    }
+  ],
+  "ambiguous": true,
+  "aggregation": "union",
+  "filteredOut": false,
+  "definitions": [
+    {
+      "definition": {
+        "name": "orderTake",
+        "kind": "function",
+        "filePath": "api/activity.js",
+        "startLine": 293,
+        "id": "function:06e7b7d396e6658b6d771ef6917acd68",
+        "qualifiedName": "orderTake",
+        "language": "javascript"
+      },
+      "roots": [
+        "function:06e7b7d396e6658b6d771ef6917acd68"
+      ],
+      "callers": [],
+      "edges": [],
+      "total": 0,
+      "limit": 20,
+      "truncated": false
+    },
+    {
+      "definition": {
+        "name": "orderTake",
+        "kind": "function",
+        "filePath": "api/order.js",
+        "startLine": 171,
+        "id": "function:79265b600a87a775b39d15fe048bc5a3",
+        "qualifiedName": "orderTake",
+        "language": "javascript"
+      },
+      "roots": [
+        "function:79265b600a87a775b39d15fe048bc5a3"
+      ],
+      "callers": [],
+      "edges": [],
+      "total": 0,
+      "limit": 20,
+      "truncated": false
+    }
+  ],
+  "callers": [],
+  "total": 0,
+  "limit": 20,
+  "truncated": false
+}

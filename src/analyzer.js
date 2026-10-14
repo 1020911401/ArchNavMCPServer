@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { parseFileAsync } from './parsers/dispatcher.js';
+import { buildResolvedEdges } from './resolver/integrate.js';
 
 export async function analyze(dirPath, options = {}) {
   const startTime = Date.now();
@@ -23,7 +24,7 @@ export async function analyze(dirPath, options = {}) {
     const result = await parseFileAsync(file, dirPath);
     const fileSymbols = result.symbols || [];
     symbols.push(...fileSymbols);
-    if (result.calls) allCalls.push(...result.calls.map(c => ({ ...c, file: path.relative(dirPath, file) })));
+    if (result.calls) allCalls.push(...result.calls.map(c => ({ ...c, file: c.file || path.relative(dirPath, file) })));
     
     // Track file hash for staleness
     const content = fs.readFileSync(file, 'utf-8');
@@ -50,7 +51,7 @@ export async function analyze(dirPath, options = {}) {
   }
 
   // Build knowledge graph (nodes + edges for architecture visualization)
-  const knowledgeGraph = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols, allCalls);
+  const knowledgeGraph = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols, allCalls, options);
   
   const elapsed = Date.now() - startTime;
   
@@ -98,7 +99,7 @@ async function walkDir(dirPath, files) {
  * Build knowledge graph — file/dir/layer/community/flow nodes + edges
  * Transforms flat analysis data into a queryable graph structure
  */
-function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, depGraph, layerMap, symbols, allCalls) {
+function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, depGraph, layerMap, symbols, allCalls, resolveOptions = {}) {
   const nodes = [];
   const edges = [];
   const nodeIds = new Set();
@@ -284,23 +285,52 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
   }
 
   // 14. Call edges (DEPENDS_ON) — function-level call relationships from AST
+  const symbolByName = new Map();
+  for (const sym of (symbols || [])) {
+    if (!symbolByName.has(sym.name)) symbolByName.set(sym.name, sym); // first match wins (previous linear-scan semantics)
+  }
   for (const call of (allCalls || [])) {
     if (call.caller && call.callee) {
       const callerId = `sym:${call.file}::${call.caller}`;
-      const calleeId = (() => {
-        // Try to find callee in any file's symbols
-        for (const sym of (symbols || [])) {
-          if (sym.name === call.callee) return `sym:${sym.file}::${sym.name}`;
-        }
-        return `sym:${call.file}::${call.callee}`;
-      })();
+      const target = symbolByName.get(call.callee);
+      const calleeId = target ? `sym:${target.file}::${target.name}` : `sym:${call.file}::${call.callee}`;
       if (callerId !== calleeId) {
-        addEdge(callerId, calleeId, 'DEPENDS_ON', { line: call.line });
+        const meta = { line: call.line };
+        if (call.source_kind) meta.source_kind = call.source_kind; // 'ast' | 'heuristic' (how the target was resolved)
+        if (call.receiver) meta.receiver = call.receiver;
+        addEdge(callerId, calleeId, 'DEPENDS_ON', meta);
       }
     }
   }
 
-  return { nodes, edges };
+  // 15. Resolver edges (DEPENDS_ON) — call sites the AST layer cannot see:
+  //     Blade templates, Vue/JS calls nested inside callbacks, alias imports.
+  //     Disable with `analyze --no-resolver` or ARCHNAV_NO_RESOLVER=1.
+  let resolverStats = { skipped: true };
+  const resolverEnabled = resolveOptions.resolver !== false && process.env.ARCHNAV_NO_RESOLVER !== '1';
+  if (resolverEnabled) {
+    try {
+      const { edges: resolvedEdges, stats } = buildResolvedEdges(baseDir, { symbols });
+      for (const e of resolvedEdges) {
+        addNode(e.from, 'file-ref', stripFilePrefix(e.from), {});
+        addEdge(e.from, e.to, e.type, {
+          line: e.line,
+          source_kind: e.source_kind,
+          confidence: e.confidence,
+          ...(e.note ? { note: e.note } : {}),
+        });
+      }
+      resolverStats = stats;
+    } catch (err) {
+      resolverStats = { error: String((err && err.message) || err) };
+    }
+  }
+
+  return { nodes, edges, resolverStats };
+}
+
+function stripFilePrefix(id) {
+  return String(id).replace(/^(sym|file):/, '').split('::')[0];
 }
 
 function buildDependencyGraph(symbols) {

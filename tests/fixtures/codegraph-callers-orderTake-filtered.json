@@ -1,0 +1,43 @@
+{
+  "symbol": "orderTake",
+  "targets": [
+    {
+      "name": "orderTake",
+      "kind": "function",
+      "filePath": "api/order.js",
+      "startLine": 171,
+      "id": "function:79265b600a87a775b39d15fe048bc5a3",
+      "qualifiedName": "orderTake",
+      "language": "javascript"
+    }
+  ],
+  "ambiguous": false,
+  "aggregation": "definition",
+  "file": "api/order.js",
+  "filteredOut": false,
+  "definitions": [
+    {
+      "definition": {
+        "name": "orderTake",
+        "kind": "function",
+        "filePath": "api/order.js",
+        "startLine": 171,
+        "id": "function:79265b600a87a775b39d15fe048bc5a3",
+        "qualifiedName": "orderTake",
+        "language": "javascript"
+      },
+      "roots": [
+        "function:79265b600a87a775b39d15fe048bc5a3"
+      ],
+      "callers": [],
+      "edges": [],
+      "total": 0,
+      "limit": 20,
+      "truncated": false
+    }
+  ],
+  "callers": [],
+  "total": 0,
+  "limit": 20,
+  "truncated": false
+}

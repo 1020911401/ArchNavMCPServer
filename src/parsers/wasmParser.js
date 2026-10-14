@@ -289,10 +289,147 @@ export async function parseWasmFile(filePath, baseDir, fileContent) {
       }
     }
 
-    return { symbols };
+    const calls = langName === 'php'
+      ? extractPhpCalls(rootNode, fileContent, path.relative(baseDir, filePath).replace(/\\/g, '/'))
+      : [];
+
+    return { symbols, calls };
   } catch (e) {
     return { symbols: [], error: e.message };
   }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  PHP call-site extraction (call graph edges)
+// ═══════════════════════════════════════════════════════════
+//
+// PHP has no type/return-type info at parse time, so a call target can only be
+// *guessed* from the receiver expression. We therefore never silently drop a
+// call: resolvable forms are tagged `source_kind: 'ast'`, receiver-dependent
+// guesses are tagged `source_kind: 'heuristic'`. Forms we cannot name at all
+// (dynamic method names, variable functions, call_user_func*) are documented in
+// the summary as known blind spots and skipped here — an edge needs a callee name.
+
+const PHP_CALL_NODE_TYPES = new Set([
+  'function_call_expression',
+  'member_call_expression',
+  'nullsafe_member_call_expression',
+  'scoped_call_expression',
+  'object_creation_expression',
+]);
+
+// Names we can never resolve to a static callee (target is a runtime value).
+const PHP_DYNAMIC_BUILTINS = new Set(['call_user_func', 'call_user_func_array']);
+
+function nodeText(content, node) {
+  return content.substring(node.startIndex, node.endIndex);
+}
+
+function lastSegment(text) {
+  const parts = String(text).split('\\');
+  return parts[parts.length - 1];
+}
+
+/**
+ * Walk a PHP AST and return call records {caller, callee, line, col, receiver, source_kind}.
+ * `caller` is the nearest enclosing named function/method (closures attribute to their parent).
+ */
+function extractPhpCalls(rootNode, content, relFile) {
+  const calls = [];
+
+  const enclosingFunctionName = (node) => {
+    let p = node.parent;
+    while (p) {
+      if (p.type === 'method_declaration' || p.type === 'function_definition') {
+        const nameNode = p.childForFieldName('name');
+        return nameNode ? nodeText(content, nameNode) : null;
+      }
+      p = p.parent;
+    }
+    return null;
+  };
+
+  const receiverOf = (objNode) => {
+    if (!objNode) return '?';
+    if (objNode.type === 'variable_name') return nodeText(content, objNode);
+    if (objNode.type === 'member_access_expression' || objNode.type === 'nullsafe_member_access_expression') {
+      const prop = objNode.childForFieldName('name');
+      return prop ? `${nodeText(content, objNode.childForFieldName('object') ?? objNode)}->${nodeText(content, prop)}` : nodeText(content, objNode);
+    }
+    return nodeText(content, objNode).replace(/\s+/g, ' ');
+  };
+
+  const emit = (node, callee, receiver, sourceKind) => {
+    if (!callee) return;
+    const caller = enclosingFunctionName(node);
+    if (!caller) return; // no enclosing named function → nothing to attach the edge to
+    calls.push({
+      caller,
+      callee,
+      line: node.startPosition.row + 1,
+      col: node.startPosition.column,
+      receiver: receiver || null,
+      source_kind: sourceKind,
+      file: relFile,
+    });
+  };
+
+  const visit = (node) => {
+    if (PHP_CALL_NODE_TYPES.has(node.type)) {
+      switch (node.type) {
+        case 'function_call_expression': {
+          const fn = node.childForFieldName('function');
+          if (fn && fn.type === 'name') {
+            const callee = nodeText(content, fn);
+            if (!PHP_DYNAMIC_BUILTINS.has(callee)) emit(node, callee, null, 'ast');
+          } else if (fn && fn.type === 'qualified_name') {
+            emit(node, lastSegment(nodeText(content, fn)), null, 'ast');
+          }
+          // variable_name (`$fn()`) → dynamic, blind spot
+          break;
+        }
+        case 'member_call_expression':
+        case 'nullsafe_member_call_expression': {
+          const nm = node.childForFieldName('name');
+          const obj = node.childForFieldName('object');
+          if (nm && nm.type === 'name') {
+            const receiver = receiverOf(obj);
+            const isThis = obj && obj.type === 'variable_name' && nodeText(content, obj) === '$this';
+            emit(node, nodeText(content, nm), receiver, isThis ? 'ast' : 'heuristic');
+          }
+          // `$this->$dyn()` → dynamic method name, blind spot
+          break;
+        }
+        case 'scoped_call_expression': {
+          const nm = node.childForFieldName('name');
+          const scope = node.childForFieldName('scope');
+          if (nm && nm.type === 'name') {
+            // self/static/parent resolve inside the class → confident; any other
+            // scope needs the class's method table, which we do not have → heuristic.
+            const resolved = scope && scope.type === 'relative_scope';
+            emit(node, nodeText(content, nm), scope ? nodeText(content, scope) : '?', resolved ? 'ast' : 'heuristic');
+          }
+          break;
+        }
+        case 'object_creation_expression': {
+          let typeNode = null;
+          for (let i = 0; i < node.childCount; i++) {
+            const c = node.child(i);
+            if (c.type !== 'new' && c.type !== 'arguments') { typeNode = c; break; }
+          }
+          if (typeNode && typeNode.type !== 'variable_name') {
+            emit(node, lastSegment(nodeText(content, typeNode)), 'new', 'ast');
+          }
+          // `new $cls()` → dynamic class, blind spot
+          break;
+        }
+      }
+    }
+    for (let i = 0; i < node.childCount; i++) visit(node.child(i));
+  };
+
+  visit(rootNode);
+  return calls;
 }
 
 function mapKind(queryKind, lang) {

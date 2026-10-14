@@ -1,0 +1,427 @@
+{
+  "symbol": "getOrderDetail",
+  "targets": [
+    {
+      "name": "getOrderDetail",
+      "kind": "function",
+      "filePath": "api/order.js",
+      "startLine": 144,
+      "id": "function:c9b87d58c85be36b368ca1e258efa299",
+      "qualifiedName": "getOrderDetail",
+      "language": "javascript"
+    },
+    {
+      "name": "getOrderDetail",
+      "kind": "method",
+      "filePath": "pages/goods/order_confirm/index.vue",
+      "startLine": 908,
+      "id": "method:d331f65550071bf6eceaabe36c5611b5",
+      "qualifiedName": "index::getOrderDetail",
+      "language": "vue"
+    }
+  ],
+  "ambiguous": true,
+  "aggregation": "union",
+  "filteredOut": false,
+  "definitions": [
+    {
+      "definition": {
+        "name": "getOrderDetail",
+        "kind": "function",
+        "filePath": "api/order.js",
+        "startLine": 144,
+        "id": "function:c9b87d58c85be36b368ca1e258efa299",
+        "qualifiedName": "getOrderDetail",
+        "language": "javascript"
+      },
+      "roots": [
+        "function:c9b87d58c85be36b368ca1e258efa299"
+      ],
+      "callers": [
+        {
+          "id": "method:44f1ed7526c18d52c4f5bed37f23db82",
+          "name": "getOrderPayInfo",
+          "kind": "method",
+          "filePath": "pages/goods/order_pay_status/index.vue",
+          "startLine": 273,
+          "relationships": [
+            "calls"
+          ]
+        },
+        {
+          "id": "method:7a694561da4a35137ff3f7a2675038ac",
+          "name": "getOrderInfo",
+          "kind": "method",
+          "filePath": "pages/goods/order_details/index.vue",
+          "startLine": 969,
+          "relationships": [
+            "calls"
+          ]
+        },
+        {
+          "id": "method:8db0a2dc7cb0edc54344adca27676203",
+          "name": "getOrderInfo",
+          "kind": "method",
+          "filePath": "pages/extension/customer_list/chat.vue",
+          "startLine": 475,
+          "relationships": [
+            "calls"
+          ]
+        },
+        {
+          "id": "method:deed99a253ac55b9f4447d5172d509f6",
+          "name": "getOrderPayInfo",
+          "kind": "method",
+          "filePath": "pages/users/payment_on_behalf/pay_status.vue",
+          "startLine": 98,
+          "relationships": [
+            "calls"
+          ]
+        },
+        {
+          "id": "file:pages/extension/customer_list/chat.vue",
+          "name": "chat.vue",
+          "kind": "file",
+          "filePath": "pages/extension/customer_list/chat.vue",
+          "startLine": 1,
+          "relationships": [
+            "imports"
+          ]
+        },
+        {
+          "id": "file:pages/goods/goods_return/index.vue",
+          "name": "index.vue",
+          "kind": "file",
+          "filePath": "pages/goods/goods_return/index.vue",
+          "startLine": 1,
+          "relationships": [
+            "imports"
+          ]
+        },
+        {
+          "id": "file:pages/goods/order_details/index.vue",
+          "name": "index.vue",
+          "kind": "file",
+          "filePath": "pages/goods/order_details/index.vue",
+          "startLine": 1,
+          "relationships": [
+            "imports"
+          ]
+        },
+        {
+          "id": "file:pages/goods/order_pay_status/index.vue",
+          "name": "index.vue",
+          "kind": "file",
+          "filePath": "pages/goods/order_pay_status/index.vue",
+          "startLine": 1,
+          "relationships": [
+            "imports"
+          ]
+        },
+        {
+          "id": "file:pages/goods/order_pay_status/payLottery.vue",
+          "name": "payLottery.vue",
+          "kind": "file",
+          "filePath": "pages/goods/order_pay_status/payLottery.vue",
+          "startLine": 1,
+          "relationships": [
+            "imports"
+          ]
+        },
+        {
+          "id": "file:pages/users/payment_on_behalf/pay_status.vue",
+          "name": "pay_status.vue",
+          "kind": "file",
+          "filePath": "pages/users/payment_on_behalf/pay_status.vue",
+          "startLine": 1,
+          "relationships": [
+            "imports"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "method:44f1ed7526c18d52c4f5bed37f23db82",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 278,
+          "column": 3,
+          "provenance": null
+        },
+        {
+          "source": "method:7a694561da4a35137ff3f7a2675038ac",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 978,
+          "column": 10,
+          "provenance": null
+        },
+        {
+          "source": "method:8db0a2dc7cb0edc54344adca27676203",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 477,
+          "column": 6,
+          "provenance": null
+        },
+        {
+          "source": "method:deed99a253ac55b9f4447d5172d509f6",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 103,
+          "column": 4,
+          "provenance": null
+        },
+        {
+          "source": "file:pages/extension/customer_list/chat.vue",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 215,
+          "column": 9,
+          "provenance": null
+        },
+        {
+          "source": "file:pages/goods/goods_return/index.vue",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 88,
+          "column": 2,
+          "provenance": null
+        },
+        {
+          "source": "file:pages/goods/order_details/index.vue",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 563,
+          "column": 9,
+          "provenance": null
+        },
+        {
+          "source": "file:pages/goods/order_pay_status/index.vue",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 111,
+          "column": 9,
+          "provenance": null
+        },
+        {
+          "source": "file:pages/goods/order_pay_status/payLottery.vue",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 52,
+          "column": 2,
+          "provenance": null
+        },
+        {
+          "source": "file:pages/users/payment_on_behalf/pay_status.vue",
+          "target": "function:c9b87d58c85be36b368ca1e258efa299",
+          "kind": "imports",
+          "metadata": {
+            "confidence": 0.5,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 24,
+          "column": 2,
+          "provenance": null
+        }
+      ],
+      "total": 10,
+      "limit": 20,
+      "truncated": false
+    },
+    {
+      "definition": {
+        "name": "getOrderDetail",
+        "kind": "method",
+        "filePath": "pages/goods/order_confirm/index.vue",
+        "startLine": 908,
+        "id": "method:d331f65550071bf6eceaabe36c5611b5",
+        "qualifiedName": "index::getOrderDetail",
+        "language": "vue"
+      },
+      "roots": [
+        "method:d331f65550071bf6eceaabe36c5611b5"
+      ],
+      "callers": [
+        {
+          "id": "file:pages/goods/order_confirm/index.vue",
+          "name": "index.vue",
+          "kind": "file",
+          "filePath": "pages/goods/order_confirm/index.vue",
+          "startLine": 1,
+          "relationships": [
+            "calls"
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "source": "file:pages/goods/order_confirm/index.vue",
+          "target": "method:d331f65550071bf6eceaabe36c5611b5",
+          "kind": "calls",
+          "metadata": {
+            "confidence": 0.7,
+            "resolvedBy": "exact-match",
+            "refName": "getOrderDetail"
+          },
+          "line": 546,
+          "column": 4,
+          "provenance": null
+        }
+      ],
+      "total": 1,
+      "limit": 20,
+      "truncated": false
+    }
+  ],
+  "callers": [
+    {
+      "name": "getOrderPayInfo",
+      "kind": "method",
+      "filePath": "pages/goods/order_pay_status/index.vue",
+      "startLine": 273,
+      "relationships": [
+        "calls"
+      ]
+    },
+    {
+      "name": "getOrderInfo",
+      "kind": "method",
+      "filePath": "pages/goods/order_details/index.vue",
+      "startLine": 969,
+      "relationships": [
+        "calls"
+      ]
+    },
+    {
+      "name": "getOrderInfo",
+      "kind": "method",
+      "filePath": "pages/extension/customer_list/chat.vue",
+      "startLine": 475,
+      "relationships": [
+        "calls"
+      ]
+    },
+    {
+      "name": "getOrderPayInfo",
+      "kind": "method",
+      "filePath": "pages/users/payment_on_behalf/pay_status.vue",
+      "startLine": 98,
+      "relationships": [
+        "calls"
+      ]
+    },
+    {
+      "name": "chat.vue",
+      "kind": "file",
+      "filePath": "pages/extension/customer_list/chat.vue",
+      "startLine": 1,
+      "relationships": [
+        "imports"
+      ]
+    },
+    {
+      "name": "index.vue",
+      "kind": "file",
+      "filePath": "pages/goods/goods_return/index.vue",
+      "startLine": 1,
+      "relationships": [
+        "imports"
+      ]
+    },
+    {
+      "name": "index.vue",
+      "kind": "file",
+      "filePath": "pages/goods/order_details/index.vue",
+      "startLine": 1,
+      "relationships": [
+        "imports"
+      ]
+    },
+    {
+      "name": "index.vue",
+      "kind": "file",
+      "filePath": "pages/goods/order_pay_status/index.vue",
+      "startLine": 1,
+      "relationships": [
+        "imports"
+      ]
+    },
+    {
+      "name": "payLottery.vue",
+      "kind": "file",
+      "filePath": "pages/goods/order_pay_status/payLottery.vue",
+      "startLine": 1,
+      "relationships": [
+        "imports"
+      ]
+    },
+    {
+      "name": "pay_status.vue",
+      "kind": "file",
+      "filePath": "pages/users/payment_on_behalf/pay_status.vue",
+      "startLine": 1,
+      "relationships": [
+        "imports"
+      ]
+    },
+    {
+      "name": "index.vue",
+      "kind": "file",
+      "filePath": "pages/goods/order_confirm/index.vue",
+      "startLine": 1,
+      "relationships": [
+        "calls"
+      ]
+    }
+  ],
+  "total": 11,
+  "limit": 20,
+  "truncated": false
+}

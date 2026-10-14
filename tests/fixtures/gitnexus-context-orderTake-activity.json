@@ -1,0 +1,22 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:api/activity.js:orderTake",
+    "name": "orderTake",
+    "kind": "Function",
+    "filePath": "api/activity.js",
+    "startLine": 292,
+    "endLine": 294
+  },
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:pages/points_mall/integral_order_details.vue:success",
+        "name": "success",
+        "filePath": "pages/points_mall/integral_order_details.vue"
+      }
+    ]
+  },
+  "outgoing": {},
+  "processes": []
+}

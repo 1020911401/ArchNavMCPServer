@@ -1,0 +1,27 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Function:api/order.js:orderTake",
+    "name": "orderTake",
+    "kind": "Function",
+    "filePath": "api/order.js",
+    "startLine": 170,
+    "endLine": 174
+  },
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:pages/goods/order_details/index.vue:success",
+        "name": "success",
+        "filePath": "pages/goods/order_details/index.vue"
+      },
+      {
+        "uid": "Function:pages/users/user_invoice_order/index.vue:success",
+        "name": "success",
+        "filePath": "pages/users/user_invoice_order/index.vue"
+      }
+    ]
+  },
+  "outgoing": {},
+  "processes": []
+}

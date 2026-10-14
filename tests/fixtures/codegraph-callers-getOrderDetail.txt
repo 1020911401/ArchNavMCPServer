@@ -1,0 +1,41 @@
+
+Callers of "getOrderDetail" — 2 distinct definitions (narrow with --file):
+
+function getOrderDetail (javascript) — api/order.js:144 (10):
+
+method      getOrderPayInfo
+  pages/goods/order_pay_status/index.vue:273
+
+method      getOrderInfo
+  pages/goods/order_details/index.vue:969
+
+method      getOrderInfo
+  pages/extension/customer_list/chat.vue:475
+
+method      getOrderPayInfo
+  pages/users/payment_on_behalf/pay_status.vue:98
+
+file        chat.vue [imports]
+  pages/extension/customer_list/chat.vue:1
+
+file        index.vue [imports]
+  pages/goods/goods_return/index.vue:1
+
+file        index.vue [imports]
+  pages/goods/order_details/index.vue:1
+
+file        index.vue [imports]
+  pages/goods/order_pay_status/index.vue:1
+
+file        payLottery.vue [imports]
+  pages/goods/order_pay_status/payLottery.vue:1
+
+file        pay_status.vue [imports]
+  pages/users/payment_on_behalf/pay_status.vue:1
+
+
+method index::getOrderDetail (vue) — pages/goods/order_confirm/index.vue:908 (1):
+
+file        index.vue
+  pages/goods/order_confirm/index.vue:1
+

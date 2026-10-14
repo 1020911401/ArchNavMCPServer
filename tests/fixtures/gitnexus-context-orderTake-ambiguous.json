@@ -1,0 +1,22 @@
+{
+  "status": "ambiguous",
+  "message": "Found 2 symbols matching 'orderTake'. Use uid, file_path, or kind to disambiguate.",
+  "candidates": [
+    {
+      "uid": "Function:api/order.js:orderTake",
+      "name": "orderTake",
+      "kind": "Function",
+      "filePath": "api/order.js",
+      "line": 170,
+      "score": 0.56
+    },
+    {
+      "uid": "Function:api/activity.js:orderTake",
+      "name": "orderTake",
+      "kind": "Function",
+      "filePath": "api/activity.js",
+      "line": 292,
+      "score": 0.56
+    }
+  ]
+}

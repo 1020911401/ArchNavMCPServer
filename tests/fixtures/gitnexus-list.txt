@@ -1,0 +1,127 @@
+
+  Indexed Repositories (16)
+
+  yh-review2
+    Path:    C:\temp\yh-review2
+    Indexed: 2026/6/28 17:05:55
+    Commit:  2bf92b7
+    Stats:   988 files, 11006 symbols, 16609 edges
+    Clusters:   488
+    Processes:  300
+
+  wxmpserver  (C:\temp\backend-review2)
+    Path:    C:\temp\backend-review2
+    Indexed: 2026/6/28 17:10:53
+    Commit:  adde2cc
+    Stats:   1187 files, 10927 symbols, 33951 edges
+    Clusters:   606
+    Processes:  300
+
+  archnav-test
+    Path:    C:\dev\archnav-test
+    Indexed: 2026/6/30 11:48:27
+    Commit:  db1b76c
+    Stats:   21 files, 161 symbols, 294 edges
+    Clusters:   11
+    Processes:  13
+
+  shop-admin  (C:\projects\shop-admin)
+    Path:    C:\projects\shop-admin
+    Indexed: 2026/8/30 18:03:15
+    Commit:  2ff664b
+    Stats:   4141 files, 67808 symbols, 134641 edges
+    Clusters:   2564
+    Processes:  300
+
+  wxmpserver  (C:\projects\mp-backend)
+    Path:    C:\projects\mp-backend
+    Indexed: 2026/8/22 16:26:55
+    Commit:  014f07f
+    Stats:   1065 files, 10243 symbols, 26805 edges
+    Clusters:   569
+    Processes:  300
+
+  shop-admin  (C:\projects\shop-admin-new)
+    Path:    C:\projects\shop-admin-new
+    Indexed: 2026/8/16 09:15:38
+    Commit:  331037b
+    Stats:   3846 files, 61431 symbols, 123793 edges
+    Clusters:   2362
+    Processes:  300
+
+  素材
+    Path:    C:\projects\content
+    Indexed: 2026/8/17 11:25:16
+    Commit:  unknown
+    Stats:   0 files, 0 symbols, 0 edges
+
+  yh
+    Path:    C:\projects\yh
+    Indexed: 2026/8/17 13:42:52
+    Commit:  2bf92b7
+    Stats:   994 files, 7285 symbols, 13582 edges
+    Clusters:   408
+    Processes:  300
+
+  mp-legacy
+    Path:    C:\projects\mp-legacy
+    Indexed: 2026/8/18 15:03:38
+    Commit:  2a64afb
+    Stats:   1509 files, 12438 symbols, 30089 edges
+    Clusters:   724
+    Processes:  300
+
+  cc
+    Path:    C:\projects\frontend-legacy
+    Indexed: 2026/8/23 14:39:58
+    Commit:  unknown
+    Stats:   0 files, 0 symbols, 0 edges
+
+  laravel12_elmentplus
+    Path:    C:\projects\laravel12-element
+    Indexed: 2026/10/14 10:37:06
+    Commit:  d0cb9aa
+    Stats:   314 files, 10972 symbols, 26053 edges
+    Clusters:   510
+    Processes:  300
+
+  laravel-shop
+    Path:    C:\projects\laravel-shop
+    Indexed: 2026/10/14 11:48:39
+    Commit:  unknown
+    Stats:   104 files, 588 symbols, 1108 edges
+    Clusters:   29
+    Processes:  44
+
+  php-app
+    Path:    C:\tmp\bench\php-app
+    Indexed: 2026/10/14 16:05:46
+    Commit:  468f1a3
+    Stats:   293 files, 1469 symbols, 2296 edges
+    Clusters:   59
+    Processes:  29
+
+  vue-app
+    Path:    C:\tmp\bench\vue-app
+    Indexed: 2026/10/14 16:08:48
+    Commit:  b09744c
+    Stats:   338 files, 6826 symbols, 16895 edges
+    Clusters:   816
+    Processes:  300
+
+  archnav-bench-php-app
+    Path:    C:\dev\archnav\bench\php-app
+    Indexed: 2026/10/14 16:33:58
+    Commit:  unknown
+    Stats:   293 files, 1469 symbols, 2296 edges
+    Clusters:   59
+    Processes:  29
+
+  ArchNavMCPServer
+    Path:    C:\dev\archnav\bench\.tmp-fusion
+    Indexed: 2026/10/14 16:35:45
+    Commit:  unknown
+    Stats:   340 files, 6838 symbols, 16906 edges
+    Clusters:   816
+    Processes:  300
+

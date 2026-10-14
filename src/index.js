@@ -67,8 +67,14 @@ program
   .option('--dir <dir>', 'Project directory', process.cwd())
   .option('--json', 'Output raw JSON')
   .option('--all', 'Show all matches, not just the best')
+  .option('--file <file>', 'Disambiguate by file path (exact, suffix or substring match)')
+  .option('--kind <kind>', 'Disambiguate by symbol kind (e.g. function, class, method)')
   .action(async (name, options) => {
-    const result = await archNav.locate(name, path.resolve(options.dir), { all: options.all });
+    const result = await archNav.locate(name, path.resolve(options.dir), {
+      all: options.all,
+      file: options.file,
+      kind: options.kind,
+    });
     outputResult(result, options.json);
   });
 
@@ -112,8 +118,13 @@ program
   .description('Show who calls a symbol (incoming dependencies)')
   .option('--dir <dir>', 'Project directory', process.cwd())
   .option('--json', 'Output raw JSON')
+  .option('--file <file>', 'Disambiguate by file path (exact, suffix or substring match)')
+  .option('--kind <kind>', 'Disambiguate by symbol kind (e.g. function, class, method)')
   .action(async (name, options) => {
-    const result = await archNav.callers(name, path.resolve(options.dir));
+    const result = await archNav.callers(name, path.resolve(options.dir), {
+      file: options.file,
+      kind: options.kind,
+    });
     outputResult(result, options.json);
   });
 
@@ -123,8 +134,13 @@ program
   .description('Analyze blast radius: what breaks if this symbol changes')
   .option('--dir <dir>', 'Project directory', process.cwd())
   .option('--json', 'Output raw JSON')
+  .option('--file <file>', 'Disambiguate by file path (exact, suffix or substring match)')
+  .option('--kind <kind>', 'Disambiguate by symbol kind (e.g. function, class, method)')
   .action(async (symbol, options) => {
-    const result = await archNav.impact(symbol, path.resolve(options.dir));
+    const result = await archNav.impact(symbol, path.resolve(options.dir), {
+      file: options.file,
+      kind: options.kind,
+    });
     outputResult(result, options.json);
   });
 
@@ -272,7 +288,17 @@ function printArchitecture(r) {
   console.log('');
 }
 
+function printAmbiguous(r) {
+  console.log(`\n⚠️  Ambiguous symbol "${r.symbol}" — ${r.candidates.length} definitions found:`);
+  for (const c of r.candidates) {
+    console.log(`   ${c.name} (${c.kind || '?'}) → ${c.file}:${c.line}`);
+  }
+  console.log(`\n   Narrow it down with --file <path> and/or --kind <kind>`);
+  console.log('');
+}
+
 function printLocate(r) {
+  if (r.ambiguous) return printAmbiguous(r);
   const s = r.symbol;
   if (r.confidence < 0.5) {
     console.log(`⚠️  Low confidence (${(r.confidence * 100).toFixed(0)}%)`);
@@ -339,6 +365,7 @@ function printTrace(r) {
 }
 
 function printCallGraph(r) {
+  if (r.ambiguous) return printAmbiguous(r);
   const direction = r.type === 'calls' ? '→ calls' : '← called by';
   const header = r.type === 'calls' ? `🔽 ${r.symbol} calls:` : `🔼 ${r.symbol} is called by:`;
   console.log(`\n${header}`);
@@ -355,6 +382,7 @@ function printCallGraph(r) {
 }
 
 function printImpact(r) {
+  if (r.ambiguous) return printAmbiguous(r);
   console.log(`\n💥 Impact Analysis: ${r.symbol}`);
   console.log(`   Layer: ${r.layer}`);
   console.log(`   File: ${r.file}:${r.line_start}`);
