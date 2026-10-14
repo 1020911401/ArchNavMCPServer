@@ -411,7 +411,11 @@ export const archNav = {
             file: otherSym.file,
             line: otherSym.line_start,
             layer: index.layerMap?.[otherSym.id] || null,
-            confidence: computeConfidence(otherSym.file, index.fileHashes, freshness, dirPath),
+            // Weak signal: "this file imports/mentions the defining file" is not
+            // proof of a call (measured: 1 false positive out of 3 on orderTake).
+            // Labeled + demoted so consumers can filter on `source`.
+            confidence: Math.min(0.4, computeConfidence(otherSym.file, index.fileHashes, freshness, dirPath)),
+            source: 'import-heuristic',
           });
         }
       }
