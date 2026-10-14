@@ -7,6 +7,11 @@
     "archnav": "src/index.js"
   },
   "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "bench": "node bench/run_bench.mjs",
+    "analyze": "node src/index.js analyze"
+  },
   "dependencies": {
     "@arborium/go": "^2.18.1",
     "@arborium/java": "^2.18.1",

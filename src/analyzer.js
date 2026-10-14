@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { parseFileAsync } from './parsers/dispatcher.js';
+import { extractLaravelRoutes } from './parsers/laravelRoutes.js';
 import { buildResolvedEdges } from './resolver/integrate.js';
 
 export async function analyze(dirPath, options = {}) {
@@ -78,7 +79,15 @@ export async function analyze(dirPath, options = {}) {
     fileHashes,
     layerMap,
     knowledgeGraph,
-    _raw: { symbols, depGraph, architecture, fileHashes, layerMap, knowledgeGraph },
+    // Laravel routes that could not be bound to a controller action — surfaced
+    // here (and in index.json) so they are visible instead of silently dropped.
+    unresolvedRoutes: knowledgeGraph?.unresolvedRoutes || [],
+    routeStats: knowledgeGraph?.routeStats || null,
+    _raw: {
+      symbols, depGraph, architecture, fileHashes, layerMap, knowledgeGraph,
+      unresolvedRoutes: knowledgeGraph?.unresolvedRoutes || [],
+      routeStats: knowledgeGraph?.routeStats || null,
+    },
   };
 }
 
@@ -303,6 +312,37 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     }
   }
 
+  // 14b. Laravel route edges (DEPENDS_ON) — `routes/*.php` → controller action.
+  //      Route files contribute no symbols, so without this step the graph had no
+  //      "HTTP entry point → handler" edge and impact() treated controller actions
+  //      as the outermost consumers. Unresolvable routes are collected loudly
+  //      (`unresolvedRoutes`) instead of being dropped.
+  let unresolvedRoutes = [];
+  let routeStats = { routes: 0, edges: 0, unresolved: 0 };
+  try {
+    const { edges: routeEdges, routes: routeNodes, unresolved } = extractLaravelRoutes(baseDir, symbols);
+    for (const r of routeNodes) {
+      addNode(r.id, 'route', r.name, {
+        method: r.method,
+        uri: r.uri,
+        file: r.file,
+        line: r.line,
+        ...(r.controller ? { controller: r.controller, action: r.action } : {}),
+      });
+    }
+    for (const e of routeEdges) {
+      addEdge(e.from, e.to, 'DEPENDS_ON', {
+        line: e.line,
+        source_kind: 'route',
+        ...(e.action ? { action: e.action } : {}),
+      });
+    }
+    unresolvedRoutes = unresolved;
+    routeStats = { routes: routeNodes.length, edges: routeEdges.length, unresolved: unresolved.length };
+  } catch (err) {
+    routeStats = { error: String((err && err.message) || err) };
+  }
+
   // 15. Resolver edges (DEPENDS_ON) — call sites the AST layer cannot see:
   //     Blade templates, Vue/JS calls nested inside callbacks, alias imports.
   //     Disable with `analyze --no-resolver` or ARCHNAV_NO_RESOLVER=1.
@@ -326,7 +366,7 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     }
   }
 
-  return { nodes, edges, resolverStats };
+  return { nodes, edges, resolverStats, unresolvedRoutes, routeStats };
 }
 
 function stripFilePrefix(id) {

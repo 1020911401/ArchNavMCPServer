@@ -18,6 +18,76 @@ const VSCODE_WASM_DIR = path.resolve(__dirname, '../../node_modules/@vscode/tree
 // WASM grammar directory
 const WASM_DIR = path.resolve(__dirname, '../../node_modules/tree-sitter-wasms/out');
 
+// ── Instrumentation ─────────────────────────────────────────────────
+// Counts how often the three expensive per-language steps actually run.
+// Used by tests/php-parse-cache.test.mjs to prove they are cached, not per-file.
+const _initStats = { initializations: 0, languageLoads: 0, queryCompilations: 0 };
+
+/** @internal test hook — snapshot of WASM init counters (cumulative for this module instance). */
+export function __getInitStats() {
+  return { ..._initStats };
+}
+
+// ── Per-language caches ─────────────────────────────────────────────
+// The tree-sitter WASM runtime, each grammar, and each compiled Query are
+// expensive yet language-invariant, so they are built once per process (per
+// language) and reused for every file. Rejections are NEVER cached: a failed
+// init/load/compile clears its slot so the next call retries — i.e. it falls
+// back to the original per-file behaviour instead of poisoning the process.
+let runtimeInitPromise = null;    // one shared runtime for every language
+const languageCache = new Map();  // langName → Promise<Language>
+const queryCache = new Map();     // `${langName}\u0000${kind}` → Promise<Query>
+
+function getRuntime() {
+  if (!runtimeInitPromise) {
+    runtimeInitPromise = (async () => {
+      const tsWasm = _require('@vscode/tree-sitter-wasm/wasm/tree-sitter.js');
+      const runtimeWasm = await readFile(path.join(VSCODE_WASM_DIR, 'tree-sitter.wasm'));
+      await tsWasm.Parser.init(runtimeWasm);
+      _initStats.initializations++;
+      return tsWasm;
+    })().catch((err) => {
+      runtimeInitPromise = null; // don't cache a rejected promise — allow retry
+      throw err;
+    });
+  }
+  return runtimeInitPromise;
+}
+
+function getLanguage(tsWasm, langName) {
+  let p = languageCache.get(langName);
+  if (!p) {
+    p = (async () => {
+      const wasmBuffer = await readFile(path.join(VSCODE_WASM_DIR, `tree-sitter-${langName}.wasm`));
+      const lang = await tsWasm.Language.load(wasmBuffer);
+      _initStats.languageLoads++;
+      return lang;
+    })().catch((err) => {
+      languageCache.delete(langName); // retry next call → per-file rebuild fallback
+      throw err;
+    });
+    languageCache.set(langName, p);
+  }
+  return p;
+}
+
+function getQuery(tsWasm, langName, kind, pattern, lang) {
+  const key = `${langName}\u0000${kind}`;
+  let p = queryCache.get(key);
+  if (!p) {
+    p = (async () => {
+      const q = new tsWasm.Query(lang, pattern);
+      _initStats.queryCompilations++;
+      return q;
+    })().catch((err) => {
+      queryCache.delete(key); // a query that fails to compile is retried per file
+      throw err;
+    });
+    queryCache.set(key, p);
+  }
+  return p;
+}
+
 // Language-specific tree-sitter query patterns for symbol extraction
 const QUERIES = {
   go: {
@@ -198,22 +268,12 @@ export async function parseWasmFile(filePath, baseDir, fileContent) {
   if (!langName) return { symbols: [], error: `Unsupported language: ${ext}` };
 
   try {
-    // Use @vscode/tree-sitter-wasm runtime (guaranteed compatible with its grammars)
-    const tsWasm = _require('@vscode/tree-sitter-wasm/wasm/tree-sitter.js');
-    const Parser = tsWasm.Parser;
-    const Language = tsWasm.Language;
-    
-    // Initialize WASM runtime with the bundled tree-sitter.wasm
-    const runtimeWasm = await readFile(path.join(VSCODE_WASM_DIR, 'tree-sitter.wasm'));
-    await Parser.init(runtimeWasm);
+    // Runtime init + grammar load are cached per process/language (built once).
+    const tsWasm = await getRuntime();
+    const lang = await getLanguage(tsWasm, langName);
 
-    // Load VS Code's compatible WASM grammar
-    const wasmPath = path.join(VSCODE_WASM_DIR, `tree-sitter-${langName}.wasm`);
-    const wasmBuffer = await readFile(wasmPath);
-    const lang = await Language.load(wasmBuffer);
-    
-    // Create parser and parse
-    const parser = new Parser();
+    // A fresh Parser per file keeps parse state isolated; it is cheap.
+    const parser = new tsWasm.Parser();
     parser.setLanguage(lang);
     const tree = parser.parse(fileContent);
     const rootNode = tree.rootNode;
@@ -224,8 +284,8 @@ export async function parseWasmFile(filePath, baseDir, fileContent) {
     
     for (const [kind, pattern] of Object.entries(queries)) {
       try {
-        const Query = tsWasm.Query;
-        const query = new Query(lang, pattern);
+        // Compiled once per (language, kind) and reused for every file.
+        const query = await getQuery(tsWasm, langName, kind, pattern, lang);
         const matches = query.matches(rootNode);
         
         for (const match of matches) {

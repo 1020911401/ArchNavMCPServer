@@ -49,6 +49,12 @@ function importStem(imp) {
  */
 function refNodeParts(id) {
   const raw = String(id || '');
+  // Route nodes (`route:GET /analysis/member`) are not files: render them as
+  // "METHOD uri" with no file, and let the caller enrich file/line from the
+  // route node's metadata when it is available.
+  if (raw.startsWith('route:')) {
+    return { name: raw.slice('route:'.length), file: '', kind: 'route' };
+  }
   const [head, ...rest] = raw.split('::');
   const file = head.replace(/^(sym|file|dir):/, '');
   const name = rest.length ? rest.join('::') : (file.split('/').pop() || file);
@@ -147,6 +153,130 @@ function dedupeRelations(relations) {
     out.push(r);
   }
   return out;
+}
+
+// ═══════════════════════════════════════════════
+//  Impact traversal over the knowledge graph
+// ═══════════════════════════════════════════════
+
+/**
+ * Reverse DEPENDS_ON adjacency: target node id → incoming edges.
+ *
+ * Node ids are used verbatim, never normalized: `sym:<file>::<name>` embeds the
+ * parser's own file string (the PHP/WASM parser emits '/' while the TS/Vue
+ * parser emits '\'), and `file:<path>` means "the call happens inside this
+ * file" (Blade view, .vue component) rather than a symbol.
+ */
+function buildDependents(edges) {
+  const dependents = new Map();
+  for (const edge of edges) {
+    if (!edge || edge.type !== 'DEPENDS_ON') continue;
+    const list = dependents.get(edge.to);
+    if (list) list.push(edge);
+    else dependents.set(edge.to, [edge]);
+  }
+  return dependents;
+}
+
+/** Confidence carried by a graph edge (explicit value wins). */
+function edgeConfidence(edge) {
+  if (typeof edge.confidence === 'number') return edge.confidence;
+  switch (edge.source_kind) {
+    case 'template': return 0.75;
+    case 'callback': return 0.85;
+    case 'heuristic': return 0.6;
+    default: return 0.8;
+  }
+}
+
+/** `source` label for a graph edge — same convention as callers(). */
+function edgeSource(edge) {
+  return edge.source_kind ? `call-graph:${edge.source_kind}` : 'call-graph';
+}
+
+/** Graph node id of a symbol definition. */
+function symbolNodeId(sym) {
+  return `sym:${sym.file}::${sym.name}`;
+}
+
+/** Turn one incoming DEPENDS_ON edge into a relation record. */
+function edgeRelation(edge, depth, via) {
+  const { name, file, kind } = refNodeParts(edge.from);
+  return {
+    symbol: name,
+    file,
+    line: edge.line ?? '?',
+    depth,
+    via: via ?? null,
+    kind: kind || 'symbol',
+    source_kind: edge.source_kind || 'graph',
+    confidence: edgeConfidence(edge),
+    source: edgeSource(edge),
+  };
+}
+
+/**
+ * Fill a route relation's file/line from the route node's metadata, so the CLI
+ * reads `GET /analysis/member → routes/web.php:98` instead of an empty file.
+ * Route nodes live in knowledgeGraph.nodes with {id, type:'route', file, line, ...}.
+ */
+function enrichRouteRelation(rel, nodeById) {
+  if (rel.kind !== 'route') return rel;
+  const meta = nodeById.get(`route:${rel.symbol}`);
+  if (!meta) return rel;
+  if (meta.file) rel.file = meta.file;
+  if (meta.line !== undefined && meta.line !== null) rel.line = meta.line;
+  return rel;
+}
+
+/**
+ * What depends on `defs`, according to the graph alone.
+ *
+ * depth 1 — every symbol/file the graph says calls into `defs` (reverse
+ *           DEPENDS_ON edge). A `file:` source is attributed to that file.
+ * depth 2 — reverse DEPENDS_ON from each depth-1 caller, so a controller
+ *           action that calls the target surfaces the action's own callers.
+ *           `via` names the intermediate caller the path went through and
+ *           `confidence` is the weakest hop of the path.
+ *
+ * No import-basename guessing: "this file imports that file" is not a call.
+ */
+function graphImpact(index, defs, { maxDepth = 2 } = {}) {
+  const dependents = buildDependents(index.knowledgeGraph?.edges || []);
+  const nodeById = new Map((index.knowledgeGraph?.nodes || []).map((n) => [n.id, n]));
+  const startIds = new Set(defs.map(symbolNodeId));
+
+  const direct = [];
+  const directSites = new Set();  // symbol|file
+  const indirect = [];
+  const indirectKeys = new Set();
+
+  for (const startId of startIds) {
+    for (const edge of dependents.get(startId) || []) {
+      const rel = enrichRouteRelation(edgeRelation(edge, 1, null), nodeById);
+      directSites.add(`${rel.symbol}|${rel.file}`);
+      direct.push(rel);
+      if (maxDepth < 2) continue;
+
+      for (const hop of dependents.get(edge.from) || []) {
+        if (startIds.has(hop.from)) continue;                     // cycle back to the target
+        const second = enrichRouteRelation(edgeRelation(hop, 2, rel.symbol), nodeById);
+        if (directSites.has(`${second.symbol}|${second.file}`)) continue;
+        if (`${second.symbol}|${second.file}` === `${rel.symbol}|${rel.file}`) continue;
+        const key = `${second.symbol}|${second.file}|${second.line}`;
+        if (indirectKeys.has(key)) continue;
+        indirectKeys.add(key);
+        second.confidence = Math.min(rel.confidence, second.confidence);
+        indirect.push(second);
+      }
+    }
+  }
+
+  return {
+    direct: dedupeRelations([...new Map(direct.map(r => [`${r.symbol}|${r.file}|${r.line}`, r])).values()]),
+    // A caller that is already reported as direct must not reappear as indirect.
+    indirect: indirect.filter(r => !directSites.has(`${r.symbol}|${r.file}`)),
+  };
 }
 
 export const archNav = {
@@ -391,15 +521,20 @@ export const archNav = {
       const incomingCalls = kg.edges.filter(e => e.to === symId && e.type === 'DEPENDS_ON');
       
       for (const edge of incomingCalls) {
-        const { name: callerName, file: callerFile } = refNodeParts(edge.from);
-        relations.push({
-          symbol: callerName,
-          file: callerFile,
-          line: edge.line || '?',
-          layer: index.layerMap?.[callerName] || null,
-          confidence: edge.confidence ?? (edge.source_kind === 'heuristic' ? 0.6 : 0.8),
-          source: edge.source_kind ? `call-graph:${edge.source_kind}` : 'call-graph',
-        });
+        const { name: callerName, file: callerFile, kind: callerKind } = refNodeParts(edge.from);
+        const rel = enrichRouteRelation(
+          {
+            symbol: callerName,
+            file: callerFile,
+            line: edge.line || '?',
+            kind: callerKind || 'symbol',
+            layer: index.layerMap?.[callerName] || null,
+            confidence: edge.confidence ?? (edge.source_kind === 'heuristic' ? 0.6 : 0.8),
+            source: edge.source_kind ? `call-graph:${edge.source_kind}` : 'call-graph',
+          },
+          new Map((index.knowledgeGraph?.nodes || []).map((n) => [n.id, n])),
+        );
+        relations.push(rel);
       }
       
       // Also check file-level imports (normalize first — elements may be objects)
@@ -456,25 +591,17 @@ export const archNav = {
     const filter = resolved.resultFilter || null;
     
     const freshness = await checkStaleness(dirPath);
-    
-    // Get callers (direct impact) — callers() applies the same result filter
-    const callerData = await this.callers(name, dirPath, options);
-    const callerRelations = callerData?.relations || [];
-    
-    // Get indirect impact (callers of callers)
-    const indirectSymbols = [];
-    for (const caller of callerRelations) {
-      const subCallers = index.symbols.filter(s => 
-        s.file !== caller.file && 
-        importStrings(s).some(imp => caller.file.includes(importBasename(imp)))
-      );
-      for (const sc of subCallers.slice(0, 3)) {
-        indirectSymbols.push({
-          symbol: sc.name,
-          file: sc.file,
-          line: sc.line_start,
-        });
-      }
+
+    // Direct *and* indirect impact are knowledge-graph queries: a reverse
+    // DEPENDS_ON walk of depth 2. The previous "this file imports the caller's
+    // file ⇒ it is affected" heuristic is gone — it produced 1 false positive
+    // out of 3 on `orderTake` and nothing at all on `departments`.
+    const { direct, indirect } = graphImpact(index, resolved.symbols, { maxDepth: 2 });
+    let directImpact = direct;
+    let indirectRelations = indirect;
+    if (filter) {
+      directImpact = applyResultFilter(directImpact, filter, index);
+      indirectRelations = applyResultFilter(indirectRelations, filter, index);
     }
     
     // Find test files
@@ -493,12 +620,10 @@ export const archNav = {
         ...(filter.kind ? { filtered_by_kind: filter.kind } : {}),
       } : {}),
       layer: index.layerMap?.[sym.id] || null,
-      direct_impact: callerRelations.map(r => ({
-        symbol: r.symbol,
-        file: r.file,
-        line: r.line,
-      })),
-      indirect_impact: indirectSymbols,
+      direct_impact: directImpact,
+      indirect_relations: indirectRelations,
+      // Legacy alias: older consumers (and the CLI renderer) read this name.
+      indirect_impact: indirectRelations,
       suggested_tests: testFiles,
       confidence: computeConfidence(sym.file, index.fileHashes, freshness, dirPath),
     };
