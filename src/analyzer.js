@@ -6,7 +6,9 @@ import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
 import { parseFileAsync } from './parsers/dispatcher.js';
+import { parseVueFile } from './parsers/vueSymbols.js';
 import { extractLaravelRoutes } from './parsers/laravelRoutes.js';
+import { extractUniPages } from './parsers/uniPages.js';
 import { buildResolvedEdges } from './resolver/integrate.js';
 
 export async function analyze(dirPath, options = {}) {
@@ -22,13 +24,20 @@ export async function analyze(dirPath, options = {}) {
   // Parse each file
   const allCalls = [];
   for (const file of files) {
-    const result = await parseFileAsync(file, dirPath);
+    const content = fs.readFileSync(file, 'utf-8');
+    // `.vue` needs the SFC-aware path: extract <script>/<script setup>, parse it,
+    // and shift line numbers by the block offset. The generic dispatcher would
+    // hand the whole file (template included) to acorn and report garbage
+    // symbols; `parseVueFile` only emits real script symbols. It contributes no
+    // `calls` — the resolver layer already owns .vue call edges.
+    const result = /\.vue$/i.test(file)
+      ? parseVueFile(file, dirPath, content)
+      : await parseFileAsync(file, dirPath);
     const fileSymbols = result.symbols || [];
     symbols.push(...fileSymbols);
     if (result.calls) allCalls.push(...result.calls.map(c => ({ ...c, file: c.file || path.relative(dirPath, file) })));
-    
+
     // Track file hash for staleness
-    const content = fs.readFileSync(file, 'utf-8');
     fileHashes[path.relative(dirPath, file)] = hashContent(content);
   }
   
@@ -83,10 +92,16 @@ export async function analyze(dirPath, options = {}) {
     // here (and in index.json) so they are visible instead of silently dropped.
     unresolvedRoutes: knowledgeGraph?.unresolvedRoutes || [],
     routeStats: knowledgeGraph?.routeStats || null,
+    // uni-app page/navigation/component structure that could not be resolved —
+    // surfaced here (and in index.json) so it is visible, not silently dropped.
+    uniPageStats: knowledgeGraph?.uniPageStats || null,
+    unresolvedPages: knowledgeGraph?.unresolvedPages || [],
     _raw: {
       symbols, depGraph, architecture, fileHashes, layerMap, knowledgeGraph,
       unresolvedRoutes: knowledgeGraph?.unresolvedRoutes || [],
       routeStats: knowledgeGraph?.routeStats || null,
+      uniPageStats: knowledgeGraph?.uniPageStats || null,
+      unresolvedPages: knowledgeGraph?.unresolvedPages || [],
     },
   };
 }
@@ -98,7 +113,7 @@ async function walkDir(dirPath, files) {
     if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
     if (entry.isDirectory()) {
       await walkDir(fullPath, files);
-    } else if (entry.isFile() && /\.(js|ts|tsx|jsx|mjs|cjs|py|go|rs|java|php|c|cpp|cc|cxx|h|hpp|hh|cs|rb|sh|bash|ps1|psm1|psd1)$/i.test(entry.name)) {
+    } else if (entry.isFile() && /\.(js|ts|tsx|jsx|mjs|cjs|vue|py|go|rs|java|php|c|cpp|cc|cxx|h|hpp|hh|cs|rb|sh|bash|ps1|psm1|psd1)$/i.test(entry.name)) {
       files.push(fullPath);
     }
   }
@@ -247,13 +262,20 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     }
   }
 
-  // 11. Route nodes — detect Express-style route registrations
+  // 11. Route nodes — detect server-side Express/Koa/Fastify route registrations.
+  //     Scoped on purpose: a bare `x.get('/y')` inside a front-end API wrapper or
+  //     a .vue component is NOT a route. Before this filter the uni-app fixture
+  //     produced 315 bogus route nodes (and they leaked an absolute path into the
+  //     node id); only server-ish files with a server-ish receiver count.
+  const SERVER_ROUTE_RE =
+    /\b(?:app|router|server|route|api|fastify)\s*\.\s*(get|post|put|delete|patch|all)\s*\(\s*['"]([^'"]+)['"]/g;
   for (const file of files) {
-    const relFile = typeof file === 'string' ? file : path.relative(baseDir, file);
+    const relFile = relPosix(baseDir, file);
+    if (!/\.(js|mjs|cjs|ts)$/i.test(relFile)) continue;
+    if (/(^|\/)(components|pages|subpackage|mixins|store|utils)\//.test(relFile)) continue;
     try {
       const content = fs.readFileSync(path.resolve(baseDir, relFile), 'utf-8');
-      const routerMethods = content.matchAll(/\.(get|post|put|delete|patch)\s*\(\s*['"]([^'"]+)['"]/g);
-      for (const m of routerMethods) {
+      for (const m of content.matchAll(SERVER_ROUTE_RE)) {
         const method = m[1].toUpperCase();
         const routePath = m[2];
         const routeId = `route:${relFile}::${method} ${routePath}`;
@@ -343,6 +365,40 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     routeStats = { error: String((err && err.message) || err) };
   }
 
+  // 14c. uni-app page/component edges (DEPENDS_ON) — `pages.json` page nodes and
+  //      the `page: → file:` edges that map them onto their .vue file, plus the
+  //      `file: → page:` navigation edges (uni.navigateTo/… , <navigator url>)
+  //      and `file: → file:` component edges (`@/components/…` imports).
+  //      Without these, a `.vue` call site is a `file:` node with **zero incoming
+  //      edges**, so a depth-2 reverse DEPENDS_ON walk (impact()) was
+  //      structurally empty on the Vue side. Unresolvable references are kept in
+  //      `unresolvedPages` instead of being dropped.
+  let uniPageStats = { skipped: true };
+  let unresolvedPages = [];
+  try {
+    const { edges: uniEdges, nodes: uniNodes, stats, unresolved } = extractUniPages(baseDir, symbols);
+    for (const n of uniNodes) {
+      addNode(n.id, n.type, n.name, {
+        file: n.file,
+        line: n.line,
+        source: n.source,
+        ...(n.sources ? { sources: n.sources } : {}),
+        ...(n.path ? { path: n.path } : {}),
+      });
+    }
+    for (const e of uniEdges) {
+      addEdge(e.from, e.to, 'DEPENDS_ON', {
+        line: e.line,
+        source_kind: e.source_kind,
+        ...(e.confidence !== undefined ? { confidence: e.confidence } : {}),
+      });
+    }
+    unresolvedPages = unresolved;
+    uniPageStats = stats;
+  } catch (err) {
+    uniPageStats = { error: String((err && err.message) || err) };
+  }
+
   // 15. Resolver edges (DEPENDS_ON) — call sites the AST layer cannot see:
   //     Blade templates, Vue/JS calls nested inside callbacks, alias imports.
   //     Disable with `analyze --no-resolver` or ARCHNAV_NO_RESOLVER=1.
@@ -366,11 +422,21 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     }
   }
 
-  return { nodes, edges, resolverStats, unresolvedRoutes, routeStats };
+  return { nodes, edges, resolverStats, unresolvedRoutes, routeStats, uniPageStats, unresolvedPages };
 }
 
 function stripFilePrefix(id) {
   return String(id).replace(/^(sym|file):/, '').split('::')[0];
+}
+
+/**
+ * Repo-relative POSIX path for a file entry (which may already be relative or
+ * absolute). Node ids must never carry an absolute path or a backslash — both
+ * leaked into `route:` ids before this helper existed.
+ */
+function relPosix(baseDir, file) {
+  const rel = typeof file === 'string' ? file : path.relative(baseDir, file);
+  return String(rel).replace(/\\/g, '/');
 }
 
 function buildDependencyGraph(symbols) {

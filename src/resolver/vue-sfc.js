@@ -52,14 +52,18 @@ export function extractScriptBlocks(filePath) {
     const attrs = m[1] || '';
     const openTagLen = m[0].indexOf('>') + 1;
     const bodyStart = m.index + openTagLen;
+    const bodyEnd = bodyStart + m[2].length;
     blocks.push({
       attrs,
       setup: /\bsetup\b/.test(attrs),
       jsx: /(?:babel|jsx)/i.test(attrs) || /\.(jsx|tsx)$/i.test(filePath),
       lang: (attrs.match(/lang\s*=\s*['"]?([\w-]+)/i) || [])[1] || 'js',
       body: m[2],
-      // 1-based line of the block body's first character
+      // 1-based line of the block body's first character …
       startLine: lineOf(raw, bodyStart),
+      // … and of its last character (inclusive), so consumers can report a
+      // block's full line range. An empty body collapses onto startLine.
+      endLine: lineOf(raw, Math.max(bodyStart, bodyEnd - 1)),
     });
   }
   if (!blocks.length && !isSfc(filePath)) {
@@ -70,6 +74,7 @@ export function extractScriptBlocks(filePath) {
       lang: (filePath.split('.').pop() || 'js'),
       body: raw,
       startLine: 1,
+      endLine: lineOf(raw, Math.max(0, raw.length - 1)),
     });
   }
   return blocks;

@@ -55,6 +55,13 @@ function refNodeParts(id) {
   if (raw.startsWith('route:')) {
     return { name: raw.slice('route:'.length), file: '', kind: 'route' };
   }
+  // Page nodes (`page:pages/goods/order_details/index`) are uni-app page
+  // entry points. Render them as `PAGE /pages/…` so the CLI reads a page like a
+  // route reads `GET /uri`; file/line come from the node's pages.json metadata.
+  if (raw.startsWith('page:')) {
+    const p = raw.slice('page:'.length).replace(/^\/+/, '');
+    return { name: `PAGE /${p}`, file: '', kind: 'page' };
+  }
   const [head, ...rest] = raw.split('::');
   const file = head.replace(/^(sym|file|dir):/, '');
   const name = rest.length ? rest.join('::') : (file.split('/').pop() || file);
@@ -200,9 +207,9 @@ function symbolNodeId(sym) {
 }
 
 /** Turn one incoming DEPENDS_ON edge into a relation record. */
-function edgeRelation(edge, depth, via) {
+function edgeRelation(edge, depth, via, nodeById) {
   const { name, file, kind } = refNodeParts(edge.from);
-  return {
+  const rel = {
     symbol: name,
     file,
     line: edge.line ?? '?',
@@ -213,16 +220,19 @@ function edgeRelation(edge, depth, via) {
     confidence: edgeConfidence(edge),
     source: edgeSource(edge),
   };
+  return nodeById ? enrichEntryRelation(rel, edge.from, nodeById) : rel;
 }
 
 /**
- * Fill a route relation's file/line from the route node's metadata, so the CLI
- * reads `GET /analysis/member → routes/web.php:98` instead of an empty file.
- * Route nodes live in knowledgeGraph.nodes with {id, type:'route', file, line, ...}.
+ * Fill a route/page relation's file/line from the node's own metadata, so the
+ * CLI reads `GET /analysis/member → routes/web.php:98` or
+ * `PAGE /pages/goods/order_details/index → pages.json:66` instead of an empty
+ * file. `nodeId` is the raw graph node id the relation came from; route/page
+ * nodes live in knowledgeGraph.nodes with { id, type, file, line, ... }.
  */
-function enrichRouteRelation(rel, nodeById) {
-  if (rel.kind !== 'route') return rel;
-  const meta = nodeById.get(`route:${rel.symbol}`);
+function enrichEntryRelation(rel, nodeId, nodeById) {
+  if (rel.kind !== 'route' && rel.kind !== 'page') return rel;
+  const meta = nodeById.get(nodeId);
   if (!meta) return rel;
   if (meta.file) rel.file = meta.file;
   if (meta.line !== undefined && meta.line !== null) rel.line = meta.line;
@@ -230,12 +240,68 @@ function enrichRouteRelation(rel, nodeById) {
 }
 
 /**
+ * The file node(s) a graph node "belongs to" — the basis of the owner-file hop.
+ *
+ * Semantics (explicit, no guessing):
+ *   `sym:<file>::<name>` → [`file:<file>`]   the symbol is defined inside <file>
+ *   `file:<path>`        → [`file:<path>`]   a file belongs to itself
+ *   `page:…`             → []                a page is its own top-level entry
+ *   `route:…` / anything else → []           routes/other nodes do not hop
+ *
+ * `<file>` is the symbol's *own* file string, used verbatim (the TS/.vue parsers
+ * emit '\' where the analyzer's uni-app parser and the resolver emit '/'). The
+ * same file therefore exists in the graph under both spellings — a `.vue`
+ * symbol is `sym:components\payment\index.vue::goPay` while the component edge
+ * points at `file:components/payment/index.vue`. Both are returned so the hop
+ * finds the edges regardless of which layer produced the id. This is a path
+ * *spelling* bridge, never an import-name guess.
+ */
+function ownerFileIds(nodeId) {
+  const raw = String(nodeId || '');
+  let file = null;
+  if (raw.startsWith('sym:')) file = raw.slice('sym:'.length).split('::')[0];
+  else if (raw.startsWith('file:')) file = raw.slice('file:'.length);
+  if (!file) return [];
+  const ids = [`file:${file}`];
+  const posix = file.split('\\').join('/');
+  if (posix !== file) ids.push(`file:${posix}`);
+  return ids;
+}
+
+/**
+ * Incoming DEPENDS_ON edges of `nodeId`, with the owner-file hop applied.
+ *
+ * The hop is what makes component-internal symbols reachable: nothing "calls"
+ * a method promoted through a component, but the file that defines it is
+ * referenced by every page that renders the component. So besides the node's own
+ * incoming edges we also take the incoming edges of the file the node belongs to.
+ */
+function incomingWithOwner(dependents, nodeId) {
+  const out = [];
+  const seen = new Set();
+  const add = (id) => {
+    for (const edge of dependents.get(id) || []) {
+      const key = `${edge.from}|${edge.to}|${edge.line}|${edge.source_kind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(edge);
+    }
+  };
+  add(nodeId);
+  for (const owner of ownerFileIds(nodeId)) add(owner);
+  return out;
+}
+
+/**
  * What depends on `defs`, according to the graph alone.
  *
- * depth 1 — every symbol/file the graph says calls into `defs` (reverse
- *           DEPENDS_ON edge). A `file:` source is attributed to that file.
- * depth 2 — reverse DEPENDS_ON from each depth-1 caller, so a controller
- *           action that calls the target surfaces the action's own callers.
+ * depth 1 — every symbol/file the graph says depends on `defs` (reverse
+ *           DEPENDS_ON edge), i.e. callers **plus the owner-file hop**: for the
+ *           target symbol we also take the incoming edges of the file it lives
+ *           in. A `file:` source is attributed to that file.
+ * depth 2 — the same reverse walk from each depth-1 node, again with the
+ *           owner-file hop, so a call site whose file is itself referenced
+ *           (a page → file edge, a component → file edge) climbs to the page.
  *           `via` names the intermediate caller the path went through and
  *           `confidence` is the weakest hop of the path.
  *
@@ -252,15 +318,25 @@ function graphImpact(index, defs, { maxDepth = 2 } = {}) {
   const indirectKeys = new Set();
 
   for (const startId of startIds) {
-    for (const edge of dependents.get(startId) || []) {
-      const rel = enrichRouteRelation(edgeRelation(edge, 1, null), nodeById);
+    // depth 1 — every node the graph says depends on the target, i.e. its own
+    // incoming DEPENDS_ON edges *plus the owner-file hop*. The hop matters for
+    // symbols that nothing calls directly but whose file is referenced: a
+    // component method (`goPay`) is used through its component, and the pages
+    // that render that component are its direct dependents. For a symbol whose
+    // file has no incoming edges (`orderTake` in api/order.js) the hop adds
+    // nothing, so depth 1 stays exactly the real call-site files.
+    for (const edge of incomingWithOwner(dependents, startId)) {
+      const rel = edgeRelation(edge, 1, null, nodeById);
       directSites.add(`${rel.symbol}|${rel.file}`);
       direct.push(rel);
       if (maxDepth < 2) continue;
 
-      for (const hop of dependents.get(edge.from) || []) {
+      // depth 2 — expand each depth-1 node the same way (own incoming edges
+      // plus the owner-file hop), so a call site whose file is itself
+      // referenced climbs one more level (page file → PAGE entry point).
+      for (const hop of incomingWithOwner(dependents, edge.from)) {
         if (startIds.has(hop.from)) continue;                     // cycle back to the target
-        const second = enrichRouteRelation(edgeRelation(hop, 2, rel.symbol), nodeById);
+        const second = edgeRelation(hop, 2, rel.symbol, nodeById);
         if (directSites.has(`${second.symbol}|${second.file}`)) continue;
         if (`${second.symbol}|${second.file}` === `${rel.symbol}|${rel.file}`) continue;
         const key = `${second.symbol}|${second.file}|${second.line}`;
@@ -512,6 +588,7 @@ export const archNav = {
     
     // Compute callers for every resolved definition (1 normally; >1 only when
     // --file/--kind named a caller file rather than a definition).
+    const callerNodeById = new Map((index.knowledgeGraph?.nodes || []).map((n) => [n.id, n]));
     for (const sym of defs) {
       // Find all files that import the file containing this symbol
       const targetFile = sym.file;
@@ -522,7 +599,7 @@ export const archNav = {
       
       for (const edge of incomingCalls) {
         const { name: callerName, file: callerFile, kind: callerKind } = refNodeParts(edge.from);
-        const rel = enrichRouteRelation(
+        const rel = enrichEntryRelation(
           {
             symbol: callerName,
             file: callerFile,
@@ -532,27 +609,34 @@ export const archNav = {
             confidence: edge.confidence ?? (edge.source_kind === 'heuristic' ? 0.6 : 0.8),
             source: edge.source_kind ? `call-graph:${edge.source_kind}` : 'call-graph',
           },
-          new Map((index.knowledgeGraph?.nodes || []).map((n) => [n.id, n])),
+          edge.from,
+          callerNodeById,
         );
         relations.push(rel);
       }
       
-      // Also check file-level imports (normalize first — elements may be objects)
-      for (const otherSym of index.symbols) {
-        if (otherSym.file === targetFile) continue;
-        if (importStrings(otherSym).some(imp => targetFile.includes(importBasename(imp)))) {
-          relations.push({
-            symbol: otherSym.name,
-            file: otherSym.file,
-            line: otherSym.line_start,
-            layer: index.layerMap?.[otherSym.id] || null,
-            // Weak signal: "this file imports/mentions the defining file" is not
-            // proof of a call (measured: 1 false positive out of 3 on orderTake).
-            // Labeled + demoted so consumers can filter on `source`.
-            confidence: Math.min(0.4, computeConfidence(otherSym.file, index.fileHashes, freshness, dirPath)),
-            source: 'import-heuristic',
-          });
+      // Also check file-level imports (normalize first — elements may be objects).
+      // This is a WEAK fallback only: "this file imports/mentions the defining
+      // file" is not proof of a call. It used to be appended unconditionally, which
+      // produced 40 rows of noise for `orderPay` once .vue files gained symbols.
+      // Now: only when the graph found nothing, capped, and clearly labelled.
+      if (relations.length === 0) {
+        const weak = [];
+        for (const otherSym of index.symbols) {
+          if (otherSym.file === targetFile) continue;
+          if (importStrings(otherSym).some(imp => targetFile.includes(importBasename(imp)))) {
+            weak.push({
+              symbol: otherSym.name,
+              file: otherSym.file,
+              line: otherSym.line_start,
+              layer: index.layerMap?.[otherSym.id] || null,
+              confidence: Math.min(0.4, computeConfidence(otherSym.file, index.fileHashes, freshness, dirPath)),
+              source: 'import-heuristic',
+            });
+            if (weak.length >= 5) break;
+          }
         }
+        relations.push(...weak);
       }
     }
     
