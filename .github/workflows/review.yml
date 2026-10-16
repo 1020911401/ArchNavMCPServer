@@ -62,11 +62,16 @@ jobs:
           set -o pipefail
           if [ -n "$BASE_REF" ]; then
             SCOPE_ARGS="--scope compare --base origin/$BASE_REF"   # PR: diff against the base branch
+          elif git rev-parse -q --verify HEAD~1 >/dev/null; then
+            # push to main: review the pushed commit, not a (clean) empty tree —
+            # --scope all on a fresh checkout reports "0 files changed"
+            SCOPE_ARGS="--scope compare --base HEAD~1"
           else
-            SCOPE_ARGS="--scope all"                               # push/dispatch: uncommitted + HEAD
+            SCOPE_ARGS="--scope all"
           fi
           node scripts/review-rules.mjs . $SCOPE_ARGS \
             --impact --impact-depth 4 \
+            --deep \
             --duplication --dup-kinds renamed,similar \
             --dup-baseline-from-ref "origin/${BASE_REF:-HEAD}" \
             --dup-max-new-clones 0 \

@@ -1061,6 +1061,9 @@ function parseArgs(argv) {
     else if (a === '--no-checklist') out.checklist = false;
     else if (a === '--duplication') out.duplication = true;
     else if (a === '--impact') out.impact = true;
+    else if (a === '--deep') out.deep = true;
+    else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deep = true; }
+    else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deep = true; }
     else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impact = true; }
     else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impact = true; }
     else if (a === '--dup-kinds') out.dupKinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
@@ -1140,6 +1143,24 @@ async function main() {
     }
   }
   const checklist = buildChecklist({ findings, meta });
+  // ── optional: repo-level deep analysis (flows / clusters / module risk) ────
+  let deepResult = null;
+  if (opts.deep) {
+    const d = await import('./deep.mjs');
+    const run = d.runDeep({ index, clusterLevel: opts.deepClusterLevel || 'files' });
+    const deepChecklist = d.buildDeepChecklist({ flows: run.flows, clusters: run.clusters, risk: run.risk, cycles: run.cycles, clusterLevel: run.clusterLevel });
+    deepResult = { ...run, checklist: deepChecklist };
+    const worst = run.risk[0];
+    if (worst && worst.level !== 'LOW') {
+      findings.push({
+        rule: 'deep-module-risk', severity: worst.level === 'HIGH' ? 'error' : 'warn',
+        file: worst.members?.[0] || null, line: null, source: 'deep',
+        message: `仓库最高风险模块 ${worst.level}（${worst.score}）：${worst.name}`,
+        why: `模块风险是加总出来的：${worst.reasons.map((r) => `${r.label} +${r.points}`).join('，')}。改动落到这个模块时按 HIGH/MEDIUM 对待。`,
+        evidence: `module=${worst.name}, files=${worst.files}, externalEdges=${worst.externalEdges}, cycles=${run.cycles.length}`,
+      });
+    }
+  }
   // ── optional: impact analysis (entry points, flows, risk) in the same sheet ─
   let impactResult = null;
   const changedSymbolsRaw = (changes.changed_symbols || []).map((s) => ({ symbol: s.symbol, file: norm(s.file), line_start: s.line_start }));
@@ -1181,8 +1202,9 @@ async function main() {
       });
     }
   }
-  if (dupResult?.checklist || impactResult?.checklist) {
+  if (dupResult?.checklist || impactResult?.checklist || deepResult?.checklist) {
     if (dupResult?.checklist) checklist.rows.push(...dupResult.checklist.rows);
+    if (deepResult?.checklist) checklist.rows.push(...deepResult.checklist.rows);
     checklist.summary = {
       total: checklist.rows.length,
       hit: checklist.rows.filter((r) => r.status === 'hit').length,
@@ -1229,6 +1251,10 @@ async function main() {
     const order = { LOW: 0, MEDIUM: 1, HIGH: 2 };
     if (opts.impactMaxRisk && impactResult && order[impactResult.risk.level] >= (order[opts.impactMaxRisk] ?? 2)) {
       console.error(`risk ${impactResult.risk.level} >= --impact-max-risk ${opts.impactMaxRisk} → gate failed`);
+      process.exit(1);
+    }
+    if (opts.moduleMaxRisk && deepResult?.risk?.[0] && order[deepResult.risk[0].level] >= (order[opts.moduleMaxRisk] ?? 2)) {
+      console.error(`module risk ${deepResult.risk[0].level} (${deepResult.risk[0].name}) >= --module-max-risk ${opts.moduleMaxRisk} → gate failed`);
       process.exit(1);
     }
   }
