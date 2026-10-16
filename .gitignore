@@ -16,3 +16,4 @@ bench/report.md
 bench/multi_dim_report.json
 bench/multi_dim_report.md
 bench.err
+bench/deep_recall_report.json
