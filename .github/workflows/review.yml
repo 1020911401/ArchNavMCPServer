@@ -32,8 +32,22 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
-      - name: Unit tests (ArchNav itself)
-        run: npm test
+      # The bench/ fixtures are customer-code copies and stay out of git, so the
+      # tests that need them (impact, routes, resolver, vue-symbols, …) cannot run
+      # here. This is the fixture-independent subset; the full suite runs locally.
+      - name: Unit tests (fixture-independent subset)
+        run: |
+          node --test \
+            tests/changes.test.mjs \
+            tests/duplication.test.mjs \
+            tests/impact-analysis.test.mjs \
+            tests/navigation.test.mjs \
+            tests/review-rules.test.mjs \
+            tests/test-select.test.mjs \
+            tests/engines/codegraph.test.mjs \
+            tests/engines/fusion.test.mjs \
+            tests/engines/mcp-tools.test.mjs \
+            tests/resolver/alias.test.mjs
 
       - name: Build index
         run: node src/index.js analyze .
