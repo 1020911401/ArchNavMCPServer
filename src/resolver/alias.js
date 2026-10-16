@@ -34,7 +34,11 @@ function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
+let _cfgCache = null;
 function loadConfig(repoDir, fromFile) {
+  if (!_cfgCache) {
+    _cfgCache = { dirs: [], map: new Map(), signature: null };
+  }
   const dirs = [];
   if (fromFile) {
     let d = path.dirname(fromFile);
@@ -46,6 +50,16 @@ function loadConfig(repoDir, fromFile) {
     }
   }
   if (repoDir) dirs.push(repoDir);
+
+  const sig = dirs.join('\0') + '|' + repoDir;
+  if (_cfgCache.signature !== sig) {
+    _cfgCache.signature = sig;
+    _cfgCache.dirs = dirs;
+    _cfgCache.map.clear();
+  } else {
+    return { baseUrl: null, paths: {}, cached: true };
+  }
+
   const seen = new Set();
   for (const d of dirs) {
     if (seen.has(d)) continue;
@@ -56,7 +70,9 @@ function loadConfig(repoDir, fromFile) {
       const json = readJson(p);
       const co = json && json.compilerOptions;
       if (co && (co.paths || co.baseUrl)) {
-        return { baseUrl: path.resolve(d, co.baseUrl || '.'), paths: co.paths || {} };
+        const resolved = { baseUrl: path.resolve(d, co.baseUrl || '.'), paths: co.paths || {} };
+        _cfgCache.map.set(d, resolved);
+        return resolved;
       }
     }
   }

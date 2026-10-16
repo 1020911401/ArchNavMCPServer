@@ -248,13 +248,17 @@ export function parseVueFile(filePath, baseDir, content) {
   const imports = [];
 
   let blocks;
-  try { blocks = extractScriptBlocks(filePath); } catch { return { symbols: [], imports: [] }; }
+  try {
+    // `raw` is already in hand — hand it over so the file is not read twice.
+    blocks = extractScriptBlocks(filePath, raw);
+  } catch { return { symbols: [], imports: [] }; }
 
   for (const block of blocks) {
     let ast = parseModule(block.body, { jsx: block.jsx });
     if (!ast) {
-      // Error-tolerant fallback: uni-app conditional compilation can leave a
-      // hard syntax error the strict parser refuses to recover from.
+      // Belt and braces: parseModule already falls back to acorn-loose for
+      // blocks no strict parser recovers (uni-app `// #ifdef`), so this only
+      // runs if that fallback itself threw.
       try {
         ast = looseParse(block.body, {
           ecmaVersion: 'latest',

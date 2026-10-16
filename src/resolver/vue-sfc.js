@@ -22,11 +22,30 @@
  *
  * `extractScriptBlocks` returns the raw script blocks of any file (a plain
  * .js/.jsx/.mjs file is treated as one block) so callers can share the parse.
+ *
+ * Both `extractScriptBlocks` and `parseModule` are memoised through
+ * `src/parsers/vueCache.js`: one `analyze` run reads every `.vue` file twice
+ * (symbols + call edges) and both passes hand the very same script body here.
  */
-import fs from 'fs';
 import { parse } from '@typescript-eslint/parser';
+import * as acornLoose from 'acorn-loose';
+
+import { getCachedAst, getCachedBlocks } from '../parsers/vueCache.js';
 
 const SCRIPT_RE = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+
+/** acorn-loose = the error-tolerant fallback parser (also used by vueSymbols). */
+const looseParse = acornLoose?.parse || acornLoose?.default?.parse;
+/** acorn-loose marks every filler node with the name `✖`. */
+const isDummy = acornLoose?.isDummy || acornLoose?.default?.isDummy || (() => false);
+/**
+ * True for anything acorn-loose invented while recovering a syntax error: a
+ * filler identifier (`name === '✖'`) or a filler literal (`value`/`raw === '✖'`).
+ * Such nodes are not code, so no call may be attributed to them.
+ */
+function isFiller(node) {
+  return !!node && (isDummy(node) || node.value === '✖' || node.raw === '✖');
+}
 
 function lineOf(src, pos) {
   let line = 1;
@@ -42,9 +61,17 @@ function isSfc(filePath) {
 /**
  * All `<script>` blocks of a file. For a non-.vue file the whole file is one
  * block (a plain JS module has no SFC wrapper).
+ *
+ * @param {string} filePath
+ * @param {string} [content] the file's text, when the caller already read it —
+ *        avoids a second read of the same file within one run.
  */
-export function extractScriptBlocks(filePath) {
-  const raw = fs.readFileSync(filePath, 'utf8');
+export function extractScriptBlocks(filePath, content) {
+  return getCachedBlocks(filePath, content, splitScriptBlocks);
+}
+
+/** The actual splitter (memoised by getCachedBlocks per path+size+mtime). */
+function splitScriptBlocks(filePath, raw) {
   const blocks = [];
   let m;
   SCRIPT_RE.lastIndex = 0;
@@ -80,8 +107,26 @@ export function extractScriptBlocks(filePath) {
   return blocks;
 }
 
-/** Parse a script source into an ESTree-ish AST, or null on failure. */
+/**
+ * Parse a script source into an ESTree-ish AST, or null on failure.
+ *
+ * Memoised by content (see src/parsers/vueCache.js), so the analyzer pass and
+ * the resolver pass share one parse of the same `<script>` body.
+ *
+ * Strict first — `@typescript-eslint/parser` with `errorRecovery`. When that
+ * still throws, the block is one no strict parser can recover: uni-app
+ * conditional compilation (`// #ifdef H5` … `// #endif`) can leave two object
+ * properties with no comma between them, which is a hard syntax error. Those
+ * blocks used to contribute **zero** call edges; acorn-loose (already the
+ * tolerant fallback in parsers/vueSymbols.js) recovers the surrounding
+ * expressions so their real calls are indexed. `collectCalls` drops everything
+ * acorn-loose had to invent, so the recovery cannot leak fake callees.
+ */
 export function parseModule(source, { jsx = false } = {}) {
+  return getCachedAst(source, !!jsx, parseModuleUncached);
+}
+
+function parseModuleUncached(source, jsx) {
   const opts = {
     ecmaVersion: 'latest',
     sourceType: 'module',
@@ -98,7 +143,17 @@ export function parseModule(source, { jsx = false } = {}) {
     try {
       return parse(source, { ...opts, errorRecovery: true });
     } catch {
-      return null;
+      try {
+        // Error-tolerant recovery — `locations` so call sites keep real lines.
+        return looseParse(source, {
+          ecmaVersion: 'latest',
+          sourceType: 'module',
+          allowReturnOutsideFunction: true,
+          locations: true,
+        });
+      } catch {
+        return null;
+      }
     }
   }
 }
@@ -184,12 +239,15 @@ export function collectCalls(ast, opts = {}) {
 
   function walk(node, parent, scopes) {
     if (!node || typeof node.type !== 'string') return;
+    // A node acorn-loose invented while recovering a syntax error is not code:
+    // walking into it would report its filler name as a callee.
+    if (isFiller(node)) return;
     let next = scopes;
     if (isFunctionNode(node)) {
       next = scopes.concat([{ name: fnName(node, parent), hint: hintFor(node, parent) }]);
     }
     if (node.type === 'CallExpression') {
-      const callee = calleeName(node.callee);
+      const callee = isFiller(node.callee) ? null : calleeName(node.callee);
       if (callee) {
         out.push({
           callee,
