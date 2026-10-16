@@ -127,7 +127,12 @@ export function compareBoundary(frontCalls, routes, { pairingFloor = 0.2 } = {})
 const SARIF_LEVEL = { error: 'error', warn: 'warning', info: 'note' };
 
 export function toSarif(findings, { toolName = 'archnav-review-rules', toolVersion = '1.0.0' } = {}) {
-  const ruleIds = [...new Set(findings.map((f) => f.rule))];
+  // Code scanning rejects a result without a location ("locationFromSarifResult:
+  // expected at least one location" — measured on a real run). Findings that have
+  // no file (repo-level ones like fe-be-pairing-suspect) cannot be annotated, so
+  // they stay in --json/--markdown and are counted here instead.
+  const located = findings.filter((f) => f.file);
+  const ruleIds = [...new Set(located.map((f) => f.rule))];
   return {
     version: '2.1.0',
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
@@ -140,13 +145,12 @@ export function toSarif(findings, { toolName = 'archnav-review-rules', toolVersi
           rules: ruleIds.map((id) => ({ id, shortDescription: { text: id } })),
         },
       },
-      results: findings.map((f) => ({
+      properties: { droppedWithoutLocation: findings.length - located.length },
+      results: located.map((f) => ({
         ruleId: f.rule,
         level: SARIF_LEVEL[f.severity] || 'note',
         message: { text: `${f.message} | why: ${f.why} | evidence: ${f.evidence}` },
-        locations: f.file
-          ? [{ physicalLocation: { artifactLocation: { uri: f.file }, ...(f.line ? { region: { startLine: f.line } } : {}) } }]
-          : [],
+        locations: [{ physicalLocation: { artifactLocation: { uri: f.file }, ...(f.line ? { region: { startLine: f.line } } : {}) } }],
       })),
     }],
   };

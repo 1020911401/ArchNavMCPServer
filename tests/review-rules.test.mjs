@@ -364,14 +364,19 @@ test('SARIF output is 2.1.0 with rules, levels and physical locations', () => {
   const sarif = toSarif(findings);
   assert.equal(sarif.version, '2.1.0');
   const run = sarif.runs[0];
-  assert.deepEqual(run.tool.driver.rules.map((r) => r.id), ['php-route-unknown-action', 'vue-nav-dynamic-url', 'fe-be-pairing-suspect']);
-  assert.equal(run.results.length, 3);
-  assert.deepEqual(run.results.map((r) => r.level), ['error', 'note', 'warning']);
+  assert.deepEqual(run.tool.driver.rules.map((r) => r.id), ['php-route-unknown-action', 'vue-nav-dynamic-url']);
+  assert.equal(run.results.length, 2);
+  assert.deepEqual(run.results.map((r) => r.level), ['error', 'note']);
   assert.equal(run.results[0].locations[0].physicalLocation.artifactLocation.uri, 'routes/web.php');
   assert.equal(run.results[0].locations[0].physicalLocation.region.startLine, 85);
   assert.equal(run.results[1].locations[0].physicalLocation.region, undefined);
-  assert.deepEqual(run.results[2].locations, []);
   assert.match(run.results[0].message.text, /why: w \| evidence: e/);
+  // code scanning refuses a result with zero locations (measured on a real run:
+  // "locationFromSarifResult: expected at least one location"), so a finding that
+  // has no file must not become a result — it is counted instead.
+  assert.equal(run.results.every((r) => r.locations.length >= 1), true, 'every result must carry a location');
+  assert.equal(run.properties.droppedWithoutLocation, 1);
+  assert.equal(run.results.some((r) => r.ruleId === 'fe-be-pairing-suspect'), false);
   // must survive a JSON round-trip (it is written to a file for code scanning)
   assert.deepEqual(JSON.parse(JSON.stringify(sarif)), sarif);
 });
