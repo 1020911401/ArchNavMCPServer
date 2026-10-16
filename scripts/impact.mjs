@@ -166,6 +166,69 @@ export function fileLayerMap(index) {
   return out;
 }
 
+/**
+ * Impact half of the review task sheet — same row shape as the rule registry, so
+ * `review-rules.mjs --impact` can print one checklist instead of two reports.
+ * `available` says which entry kinds this repo/index even has (a Laravel index has
+ * routes but no pages; uni-app is the other way round), so an empty section reads
+ * as 不适用 with a reason rather than a silent pass.
+ */
+export function buildImpactChecklist({ summary, risk, available = {}, changedCount = 0 }) {
+  const row = (id, title, hits, naReason, extraReason = null) => {
+    if (naReason) return { id, group: '影响面', family: 'impact', title, status: 'na', hits: 0, reason: naReason };
+    return { id, group: '影响面', family: 'impact', title, status: hits ? 'hit' : 'pass', hits, reason: extraReason };
+  };
+  const rows = [
+    row('impact.blast', '爆炸半径（直接 + 间接受影响符号）',
+      summary.direct + summary.indirect,
+      changedCount ? null : '本次没有改动符号',
+      `直接 ${summary.direct} · 间接 ${summary.indirect} · 最深 ${summary.deepest} 跳`),
+    row('impact.routes', '受影响的 HTTP 路由入口', summary.routes.length,
+      available.routes ? null : '本仓索引里没有路由节点（非 Laravel/Express 风格）'),
+    row('impact.pages', '受影响的页面入口', summary.pages.length,
+      available.pages ? null : '本仓索引里没有页面节点（非 uni-app）'),
+    row('impact.flows', '受影响的执行流程',
+      summary.flows.length,
+      available.flows ? null : '索引里没有流程节点（detectFlows 只在 API→Service→Repository 分层齐全时才产出）'),
+    row('impact.commands', '命令/任务/事件入口', summary.commands.length, null),
+    {
+      id: 'impact.risk', group: '影响面', family: 'impact', title: '风险等级（可解释加总）',
+      status: risk.level === 'LOW' ? 'pass' : 'hit',
+      hits: risk.score,
+      reason: `${risk.level}（${risk.reasons.map((r) => `${r.label} +${r.points}`).join('，') || '无风险因子'}）`,
+    },
+    row('impact.layers', '波及的架构层', summary.layers.length, null, summary.layers.join(' / ') || '—'),
+  ];
+  const summaryOut = {
+    total: rows.length,
+    hit: rows.filter((r) => r.status === 'hit').length,
+    pass: rows.filter((r) => r.status === 'pass').length,
+    na: rows.filter((r) => r.status === 'na').length,
+    findings: 0,
+  };
+  return { rows, summary: summaryOut, risk };
+}
+
+/** One call to get rows + summary + risk for a set of seed nodes. */
+export function runImpact({ index, seedNodes, depth = 4, extras = { errors: 0, uncovered: 0, newClones: 0 }, changedCount = 0 }) {
+  const rows = buildImpact({ index, seedNodes, depth });
+  const summary = summarizeImpact({ rows, changedSymbols: new Array(changedCount).fill(null), fileLayers: fileLayerMap(index), depth });
+  const risk = scoreRisk({
+    direct: summary.direct, indirect: summary.indirect,
+    routes: summary.routes.length, pages: summary.pages.length, flows: summary.flows.length,
+    commands: summary.commands.length, layers: summary.layers.length,
+    errors: extras.errors || 0, uncovered: extras.uncovered || 0, newClones: extras.newClones || 0,
+    maxDepth: summary.deepest,
+  });
+  const nodeIds = new Set((index?.knowledgeGraph?.nodes || []).map((n) => norm(n.id)));
+  const available = {
+    routes: [...nodeIds].some((id) => id.startsWith('route:')),
+    pages: [...nodeIds].some((id) => id.startsWith('page:')),
+    flows: [...nodeIds].some((id) => id.startsWith('flow:')),
+  };
+  return { rows, summary, risk, available };
+}
+
 function renderImpact(summary, { changedSymbols = [], meta = {} } = {}) {
   const L = [];
   L.push(`\n💥 影响分析 — ${meta.dir || '.'}（深度 ${summary.depth}）`);

@@ -940,8 +940,32 @@ export function renderMarkdown(checklist, findings = [], meta = {}, extra = {}) 
   L.push('');
   L.push(`**改动** ${meta.changedTotal} 文件（PHP ${meta.changedPhp || 0} / 前端 ${meta.changedFront || 0} / 其他 ${meta.changedOther || 0}）`
     + ` · **索引** ${meta.symbols ?? '?'} 符号 · **后端索引** ${meta.hasBackend ? '已提供' : '未提供'}`
-    + (extra.dupPercent !== undefined ? ` · **仓库重复率** ${extra.dupPercent}%` : ''));
+    + (extra.dupPercent !== undefined ? ` · **仓库重复率** ${extra.dupPercent}%` : '')
+    + (extra.risk ? ` · **风险** ${extra.risk.level}（${extra.risk.score}）` : ''));
   L.push('');
+  if (extra.impact) {
+    const i = extra.impact;
+    L.push(`**影响面** 直接 ${i.direct} · 间接 ${i.indirect} · 路由 ${i.routes.length} · 页面 ${i.pages.length} · 流程 ${i.flows.length} · 命令 ${i.commands.length} · 波及层 ${i.layers.join('/') || '—'}`);
+    L.push('');
+    const entries = [
+      ...i.routes.slice(0, 10).map((r) => `🛣️ \`${r.node.replace(/^route:/, '')}\` — ${r.entryFile}:${r.entryLine}`),
+      ...i.pages.slice(0, 10).map((r) => `📄 \`${r.node.replace(/^page:/, '')}\`（depth ${r.depth}）`),
+      ...i.flows.slice(0, 10).map((r) => `🔗 \`${r.node.replace(/^flow:/, '')}\``),
+      ...i.commands.slice(0, 10).map((c) => `⚙️ [${c.kind}] \`${c.node}\``),
+    ];
+    if (entries.length) {
+      L.push('<details><summary>受影响入口</summary>');
+      L.push('');
+      for (const e of entries) L.push(`- ${e}`);
+      L.push('');
+      L.push('</details>');
+      L.push('');
+    }
+    if (extra.risk?.reasons?.length) {
+      L.push(`> 风险因子：${extra.risk.reasons.map((r) => `${r.label} +${r.points}`).join('，')}`);
+      L.push('');
+    }
+  }
   L.push(`**规则** ${checklist.summary.total} 条：✅ 通过 ${checklist.summary.pass} · ⚠️ 命中 ${checklist.summary.hit} · ➖ 不适用 ${checklist.summary.na}（findings ${checklist.summary.findings}）`);
   L.push('');
   L.push('| 状态 | 条目 | 检查内容 | 命中 |');
@@ -1036,6 +1060,9 @@ function parseArgs(argv) {
     else if (a === '--gate') out.gate = true;
     else if (a === '--no-checklist') out.checklist = false;
     else if (a === '--duplication') out.duplication = true;
+    else if (a === '--impact') out.impact = true;
+    else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impact = true; }
+    else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impact = true; }
     else if (a === '--dup-kinds') out.dupKinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--dup-min-lines') out.dupMinLines = Number(argv[++i]);
     else if (a === '--dup-min-tokens') out.dupMinTokens = Number(argv[++i]);
@@ -1113,8 +1140,49 @@ async function main() {
     }
   }
   const checklist = buildChecklist({ findings, meta });
-  if (dupResult?.checklist) {
-    checklist.rows.push(...dupResult.checklist.rows);
+  // ── optional: impact analysis (entry points, flows, risk) in the same sheet ─
+  let impactResult = null;
+  const changedSymbolsRaw = (changes.changed_symbols || []).map((s) => ({ symbol: s.symbol, file: norm(s.file), line_start: s.line_start }));
+  if (opts.impact) {
+    const imp = await import('./impact.mjs');
+    const seedNodes = [];
+    for (const cs of changedSymbolsRaw) {
+      seedNodes.push(`sym:${norm(cs.file)}::${cs.symbol}`);
+      seedNodes.push(norm(cs.file));
+    }
+    const emptySummary = { direct: 0, indirect: 0, deepest: 0, routes: [], pages: [], flows: [], commands: [], layers: [], depth: opts.impactDepth || 4 };
+    const hasSeeds = seedNodes.length > 0;
+    if (!hasSeeds) console.error('⚠️  impact: 本次改动没有落到符号上（只改了无符号文件/行）');
+    const run = hasSeeds
+      ? imp.runImpact({
+        index, seedNodes, depth: opts.impactDepth || 4,
+        extras: { errors: findings.filter((f) => f.severity === 'error').length, uncovered: 0, newClones: 0 },
+        changedCount: changedSymbolsRaw.length,
+      })
+      : {
+        rows: [], summary: emptySummary, risk: imp.scoreRisk({}),
+        available: {
+          routes: (index.knowledgeGraph?.nodes || []).some((n) => String(n.id).startsWith('route:')),
+          pages: (index.knowledgeGraph?.nodes || []).some((n) => String(n.id).startsWith('page:')),
+          flows: (index.knowledgeGraph?.nodes || []).some((n) => String(n.id).startsWith('flow:')),
+        },
+      };
+    impactResult = run;
+    const impChecklist = imp.buildImpactChecklist({ summary: run.summary, risk: run.risk, available: run.available, changedCount: changedSymbolsRaw.length });
+    impactResult.checklist = impChecklist;
+    checklist.rows.push(...impChecklist.rows);
+    if (hasSeeds && run.risk.level !== 'LOW') {
+      findings.push({
+        rule: 'impact-risk', severity: run.risk.level === 'HIGH' ? 'error' : 'warn',
+        file: null, line: null, source: 'impact',
+        message: `本次改动风险 ${run.risk.level}（score ${run.risk.score}）`,
+        why: `风险是加总出来的：${run.risk.reasons.map((r) => `${r.label} +${r.points}`).join('，')}。先看入口点（路由/页面/命令）再读代码。`,
+        evidence: `direct=${run.summary.direct}, indirect=${run.summary.indirect}, routes=${run.summary.routes.length}, pages=${run.summary.pages.length}, flows=${run.summary.flows.length}, deepest=${run.summary.deepest}`,
+      });
+    }
+  }
+  if (dupResult?.checklist || impactResult?.checklist) {
+    if (dupResult?.checklist) checklist.rows.push(...dupResult.checklist.rows);
     checklist.summary = {
       total: checklist.rows.length,
       hit: checklist.rows.filter((r) => r.status === 'hit').length,
@@ -1134,7 +1202,11 @@ async function main() {
     else console.log(sarif);
   }
   if (opts.markdown) {
-    const md = renderMarkdown(checklist, findings, meta, { dupPercent: dupResult?.summary?.percent });
+    const md = renderMarkdown(checklist, findings, meta, {
+      dupPercent: dupResult?.summary?.percent,
+      risk: impactResult?.risk,
+      impact: impactResult?.summary,
+    });
     if (opts.markdown === '-') console.log(md);
     else { fs.writeFileSync(path.resolve(opts.markdown), md); console.error(`Markdown written to ${path.resolve(opts.markdown)}`); }
   }
@@ -1154,6 +1226,11 @@ async function main() {
   if (opts.gate) {
     if (findings.some((f) => f.severity === 'error')) process.exit(1);
     if (opts.dupMaxNewClones !== null && dupResult && (dupResult.summary.new_clones || 0) > opts.dupMaxNewClones) process.exit(1);
+    const order = { LOW: 0, MEDIUM: 1, HIGH: 2 };
+    if (opts.impactMaxRisk && impactResult && order[impactResult.risk.level] >= (order[opts.impactMaxRisk] ?? 2)) {
+      console.error(`risk ${impactResult.risk.level} >= --impact-max-risk ${opts.impactMaxRisk} → gate failed`);
+      process.exit(1);
+    }
   }
 }
 

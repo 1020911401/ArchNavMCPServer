@@ -65,6 +65,7 @@ jobs:
             SCOPE_ARGS="--scope all"                               # push/dispatch: uncommitted + HEAD
           fi
           node scripts/review-rules.mjs . $SCOPE_ARGS \
+            --impact --impact-depth 4 \
             --duplication --dup-kinds renamed,similar \
             --dup-baseline-from-ref "origin/${BASE_REF:-HEAD}" \
             --dup-max-new-clones 0 \

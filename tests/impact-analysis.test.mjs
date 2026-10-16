@@ -5,7 +5,55 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyNode, classifyFile, scoreRisk, buildImpact, summarizeImpact, fileLayerMap } from '../scripts/impact.mjs';
+import { classifyNode, classifyFile, scoreRisk, buildImpact, summarizeImpact, fileLayerMap, buildImpactChecklist, runImpact } from '../scripts/impact.mjs';
+
+test('impact checklist rows mark 通过 / 命中 / 不适用 with reasons', () => {
+  const summary = {
+    direct: 6, indirect: 2, deepest: 3,
+    routes: [{ node: 'route:GET /x', entryFile: 'routes/web.php', entryLine: 3 }],
+    pages: [], flows: [], commands: [{ node: 'file:app/Console/Commands/Sync.php', kind: 'command', file: 'app/Console/Commands/Sync.php' }],
+    layers: ['API (Controller)'],
+  };
+  const risk = scoreRisk({ direct: 6, indirect: 2, routes: 1, commands: 1, layers: 1 });
+  const { rows, summary: sum } = buildImpactChecklist({ summary, risk, available: { routes: true, pages: true, flows: true }, changedCount: 1 });
+
+  assert.deepEqual(rows.map((r) => r.id), ['impact.blast', 'impact.routes', 'impact.pages', 'impact.flows', 'impact.commands', 'impact.risk', 'impact.layers']);
+  assert.equal(rows.find((r) => r.id === 'impact.blast').status, 'hit');
+  assert.equal(rows.find((r) => r.id === 'impact.blast').hits, 8);
+  assert.match(rows.find((r) => r.id === 'impact.blast').reason, /直接 6 · 间接 2 · 最深 3 跳/);
+  assert.equal(rows.find((r) => r.id === 'impact.pages').status, 'pass', 'pages exist in this index but none affected');
+  assert.equal(rows.find((r) => r.id === 'impact.layers').status, 'hit');
+  assert.equal(rows.find((r) => r.id === 'impact.risk').status, 'hit', 'MEDIUM risk is a 命中 row');
+  assert.match(rows.find((r) => r.id === 'impact.risk').reason, /^MEDIUM（直接影响面 \+12/);
+  assert.equal(sum.hit, 5, 'blast + routes + commands + risk + layers');
+  assert.equal(sum.na, 0);
+
+  // a Laravel index has no page nodes → that row is 不适用, not a silent pass
+  const noAvailability = buildImpactChecklist({ summary, risk, available: { routes: true, pages: false, flows: false }, changedCount: 1 });
+  assert.match(noAvailability.rows.find((r) => r.id === 'impact.pages').reason, /没有页面节点/);
+  assert.match(noAvailability.rows.find((r) => r.id === 'impact.flows').reason, /detectFlows/);
+  assert.equal(noAvailability.summary.na, 2);
+});
+
+test('runImpact derives availability from the index and grades the change', () => {
+  const run = runImpact({ index, seedNodes: ['sym:app/A.php::foo'], depth: 4, changedCount: 1 });
+  assert.equal(run.available.routes, true);
+  assert.equal(run.available.pages, false);
+  assert.equal(run.available.flows, true);
+  assert.deepEqual(run.summary.routes.map((r) => r.node), ['route:GET /x']);
+  assert.equal(run.risk.level, 'LOW');
+  const cl = buildImpactChecklist({ summary: run.summary, risk: run.risk, available: run.available, changedCount: 1 });
+  assert.equal(cl.rows.find((r) => r.id === 'impact.routes').status, 'hit');
+  assert.equal(cl.rows.find((r) => r.id === 'impact.pages').status, 'na');
+
+  // no changed symbols → no blast radius, and the row says why
+  const empty = buildImpactChecklist({
+    summary: { direct: 0, indirect: 0, deepest: 0, routes: [], pages: [], flows: [], commands: [], layers: [] },
+    risk: scoreRisk({}), available: run.available, changedCount: 0,
+  });
+  assert.equal(empty.rows.find((r) => r.id === 'impact.blast').status, 'na');
+  assert.match(empty.rows.find((r) => r.id === 'impact.blast').reason, /没有改动符号/);
+});
 
 const index = {
   symbols: [
