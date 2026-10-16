@@ -493,8 +493,14 @@ function inferArchitecture(files, symbols, baseDir) {
           layerMap[lp.name] = { name: lp.name, files: [], symbols: [], dependencies: [], priority: lp.priority };
         }
         layerMap[lp.name].files.push(relPath);
-        // Find symbols belonging to this file
-        const fileSymbols = symbols.filter(s => s.file === relPath);
+        // Find symbols belonging to this file. `relPath` may be absolute while
+        // symbol paths are repo-relative (and one parser emits backslashes,
+        // another posix), so compare separator-normalised suffixes.
+        const norm = (p) => String(p).replace(/\\/g, '/');
+        const fileSymbols = symbols.filter((s) => {
+          const sf = norm(s.file);
+          return sf === norm(relPath) || norm(relPath).endsWith(`/${sf}`);
+        });
         layerMap[lp.name].symbols.push(...fileSymbols.map(s => s.name));
         // Collect imports
         const fileImports = fileSymbols.filter(s => s.imports).flatMap(s => s.imports);
@@ -519,9 +525,14 @@ function inferArchitecture(files, symbols, baseDir) {
   // Check for layer violations (e.g., controller directly importing repository)
   for (const layer of layerOrder) {
     for (const dep of layer.dependencies) {
+      // `imports` entries are strings in the legacy shape but `{source,line}`
+      // objects in the current parsers — calling .replace() on those throws and
+      // takes the whole analyze() down, so normalise before matching.
+      const depStr = typeof dep === 'string' ? dep : (dep && typeof dep === 'object' ? (dep.source || dep.from || '') : '');
+      if (!depStr) continue;
       for (const otherLayer of layerOrder) {
         if (otherLayer.name === layer.name) continue;
-        if (otherLayer.files.some(f => f.includes(dep.replace(/^\.\.?\//, '').replace(/\/.*$/, '').replace(/'/g, '')))) {
+        if (otherLayer.files.some(f => f.includes(depStr.replace(/^\.\.?\//, '').replace(/\/.*$/, '').replace(/'/g, '')))) {
           // Check if this is a "allowed" dependency direction
           if (layer.priority < otherLayer.priority) {
             // Higher layer depending on lower layer = OK (controller → service)
@@ -611,7 +622,12 @@ function hashContent(content) {
 
 function findLayerForFile(filePath, architecture) {
   for (const layer of architecture.layers) {
-    if (layer.pattern && new RegExp(layer.pattern).test(filePath)) {
+    // The layer patterns are written case-insensitive (`/controllers?[\/\\]/i`),
+    // but the /i flag is NOT carried by `pattern.source` — recompiling without it
+    // silently fails on every capitalized layer directory (Laravel: app/Http/
+    // Controllers, app/Models, app/Repositories), leaving `layerMap` empty and
+    // `impact` reporting `Layer: null` for the whole repo.
+    if (layer.pattern && new RegExp(layer.pattern, 'i').test(filePath)) {
       return layer.name;
     }
   }

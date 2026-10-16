@@ -372,7 +372,11 @@ function normSep(p) {
  * caller then falls back to content drift.
  */
 function changedLinesFromGit(dirPath, scope = 'unstaged', baseRef = null, timeoutMs = 20000) {
-  const args = ['diff', '--unified=0', '--no-color', '--no-ext-diff'];
+  // `core.quotepath=false` keeps non-ASCII paths verbatim: git otherwise emits
+  // them octal-escaped and quoted ("b/app/.../\345\211\257\346\234\254.php"),
+  // which never matches a symbol path — Chinese file names (副本/复制) silently
+  // fell out of every change-impact report.
+  const args = ['-c', 'core.quotepath=false', 'diff', '--unified=0', '--no-color', '--no-ext-diff'];
   if (scope === 'staged') args.push('--cached');
   else if (scope === 'all') args.push('HEAD');
   else if (scope === 'compare') {
@@ -410,6 +414,20 @@ function changedLinesFromGit(dirPath, scope = 'unstaged', baseRef = null, timeou
     // A pure deletion (count 0) has no new-side line; anchor it at the join point
     // so the symbol containing the seam is still reported as touched.
     files.get(current).push(count === 0 ? [start, start] : [start, start + count - 1]);
+  }
+
+  // `git diff` never lists untracked files, and those are exactly the ones an AI
+  // assistant adds. Without this, a brand-new file was invisible to the whole
+  // review path (measured before the fix: 3 changed files instead of 6, all
+  // new files missing). Ranges stay null → the file counts as wholly changed.
+  const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard'], {
+    cwd: dirPath, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+  });
+  if (!untracked.error && untracked.status === 0) {
+    for (const f of String(untracked.stdout || '').split(/\r?\n/)) {
+      const p = f.trim();
+      if (p && !files.has(p)) files.set(p, null);
+    }
   }
   return { ok: true, files, scope, base: baseRef };
 }
