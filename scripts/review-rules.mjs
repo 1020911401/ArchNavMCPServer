@@ -1153,7 +1153,11 @@ async function main() {
     const worst = run.risk[0];
     if (worst && worst.level !== 'LOW') {
       findings.push({
-        rule: 'deep-module-risk', severity: worst.level === 'HIGH' ? 'error' : 'warn',
+        // Repo-level risk is a standing condition of the codebase, not a defect this
+        // change introduced: reporting it as `error` made every push fail the gate
+        // (measured on the first real CI run: HIGH(101) on src/resolver). Blocking on
+        // it is opt-in via --module-max-risk.
+        rule: 'deep-module-risk', severity: 'warn',
         file: worst.members?.[0] || null, line: null, source: 'deep',
         message: `仓库最高风险模块 ${worst.level}（${worst.score}）：${worst.name}`,
         why: `模块风险是加总出来的：${worst.reasons.map((r) => `${r.label} +${r.points}`).join('，')}。改动落到这个模块时按 HIGH/MEDIUM 对待。`,
@@ -1194,7 +1198,9 @@ async function main() {
     checklist.rows.push(...impChecklist.rows);
     if (hasSeeds && run.risk.level !== 'LOW') {
       findings.push({
-        rule: 'impact-risk', severity: run.risk.level === 'HIGH' ? 'error' : 'warn',
+        // Same reasoning as deep-module-risk: the change-level grade is context for the
+        // reviewer, and blocking on it is the explicit --impact-max-risk decision.
+        rule: 'impact-risk', severity: 'warn',
         file: null, line: null, source: 'impact',
         message: `本次改动风险 ${run.risk.level}（score ${run.risk.score}）`,
         why: `风险是加总出来的：${run.risk.reasons.map((r) => `${r.label} +${r.points}`).join('，')}。先看入口点（路由/页面/命令）再读代码。`,

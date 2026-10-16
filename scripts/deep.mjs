@@ -26,6 +26,22 @@ import { extractFrontCalls, backendRoutes, pathMatches } from './review-rules.mj
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
 const topDir = (file, segs = 2) => norm(file).split('/').slice(0, segs).join('/');
 
+/**
+ * `sym:<file>::<name>` / `file:<path>` → repo-relative file path. Every analysis
+ * below needs this mapping; keeping one implementation is also what removed the
+ * 13-line copy that our own duplication gate flagged inside this file.
+ */
+function makeFileResolver(index) {
+  const byId = new Map((index?.knowledgeGraph?.nodes || []).map((n) => [norm(n.id), n]));
+  return (id) => {
+    const s = norm(id);
+    if (s.startsWith('sym:')) return s.slice(4).split('::')[0];
+    if (s.startsWith('file:')) return s.slice(5);
+    const n = byId.get(s);
+    return n ? norm(n.file || '') : null;
+  };
+}
+
 /** Entry nodes: graph entries first, then file-level heuristics. */
 export function entryPoints(index) {
   const kg = index?.knowledgeGraph || {};
@@ -75,13 +91,7 @@ export function extractFlows(index, { maxDepth = 6, maxSteps = 40, maxFlows = 50
     if (!outgoing.has(from)) outgoing.set(from, []);
     outgoing.get(from).push(e);
   }
-  const fileOf = (id) => {
-    const s = norm(id);
-    if (s.startsWith('sym:')) return s.slice(4).split('::')[0];
-    if (s.startsWith('file:')) return s.slice(5);
-    const n = nodes.get(s);
-    return n ? norm(n.file || '') : '';
-  };
+  const fileOf = makeFileResolver(index);
   const flows = [];
   for (const entry of entryPoints(index)) {
     if (flows.length >= maxFlows) break;
@@ -135,13 +145,7 @@ export function extractFlows(index, { maxDepth = 6, maxSteps = 40, maxFlows = 50
 export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6, level = 'files' } = {}) {
   const kg = index?.knowledgeGraph || {};
   const nodes = kg.nodes || [];
-  const fileOf = (id) => {
-    const s = norm(id);
-    if (s.startsWith('sym:')) return s.slice(4).split('::')[0];
-    if (s.startsWith('file:')) return s.slice(5);
-    const n = nodes.find((x) => norm(x.id) === s);
-    return n ? norm(n.file || '') : null;
-  };
+  const fileOf = makeFileResolver(index);
   // `files` is the coarse level (a module = a directory-ish group of files);
   // `symbols` is the fine level GitNexus reports (their 816 clusters vs our 28 on
   // the same uni-app repo) — same Louvain, different node set.
@@ -283,14 +287,7 @@ export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6, level = 'fi
 export function findCycles(index) {
   const kg = index?.knowledgeGraph || {};
   const adj = new Map();
-  const nodes = kg.nodes || [];
-  const fileOf = (id) => {
-    const s = norm(id);
-    if (s.startsWith('sym:')) return s.slice(4).split('::')[0];
-    if (s.startsWith('file:')) return s.slice(5);
-    const n = nodes.find((x) => norm(x.id) === s);
-    return n ? norm(n.file || '') : null;
-  };
+  const fileOf = makeFileResolver(index);
   for (const e of kg.edges || []) {
     const a = fileOf(e.from);
     const b = fileOf(e.to);
