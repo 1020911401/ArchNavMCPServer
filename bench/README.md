@@ -254,3 +254,44 @@ literally contains the symbol string* (route names, comments and templates
 included), so `mentions` is an **upper bound** and the recall percentage is
 conservative. It is a smoke metric, not a precision measure; `run_bench.mjs`'s
 ground truth (call-site detection) remains the authoritative number.
+
+---
+
+## `deep_recall.mjs` — depth-2 (indirect) recall
+
+`impact` was only ever compared by row count, so the content of the indirect
+layer went unverified. This harness builds an independent 2-hop truth from the
+working tree and checks each engine's depth-2 output against it.
+
+```bash
+node bench/deep_recall.mjs --json < /dev/null
+```
+
+Truth:
+
+1. `depth1 = groundTruth(repo, sym).callSites`
+2. for each call site, scan upward to the nearest definition line → the
+   **enclosing symbol** that makes the call. Control-flow keywords must be
+   blacklisted: `if (...) {` matches the method-shorthand branch, the scan then
+   returns `if`, and the depth-2 truth degenerates into "callers of if"
+   (measured: 272 junk files).
+3. `depth2` = **route hops** (a `routes/*.php` line whose controller+action
+   resolves to a file that is a depth-1 caller) ∪ **component hops** (files
+   importing the file that defines a depth-1 caller).
+   uni-app writes `import payment from '@/components/payment'` for
+   `components/payment/index.vue` — the `/index` suffix is dropped, so both stems
+   must be emitted or the hop is invisible. The route-hop file label must be the
+   *route* file (`routes/web.php`), not the controller file; getting that wrong
+   makes every engine score 0/2 against a wrong expectation.
+
+Engine depth-2 extraction: ArchNav `indirect_impact[].depth === 2`; GitNexus
+`byDepth["2"]`; **CodeGraph has no depth labels** — its `affected[]` is a flat
+closure, so it is compared against depth1 ∪ depth2 and reported as unlabelled
+(it also lists the definition file itself as affected — a false positive).
+
+Results (2026-10-16):
+
+| case | truth | ArchNav | CodeGraph | GitNexus |
+| --- | --- | --- | --- | --- |
+| php-app `departments` | `routes/web.php` (2 route lines, via member / transfer) | 1/1 | 1/1 + self-inclusion | 1/1 |
+| vue-app `orderPay` | 5 pages importing the payment component | **5/5** | 0/5 | 0 rows |
