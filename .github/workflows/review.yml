@@ -39,6 +39,7 @@ jobs:
         run: |
           node --test \
             tests/changes.test.mjs \
+            tests/deep.test.mjs \
             tests/duplication.test.mjs \
             tests/impact-analysis.test.mjs \
             tests/navigation.test.mjs \
