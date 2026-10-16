@@ -170,7 +170,7 @@ PDG data flow. Those stay reachable through the fused entry.
 
 ```
 ├── src/
-│   ├── index.js              # CLI entry (14 commands)
+│   ├── index.js              # CLI entry (17 commands)
 │   ├── mcp-server.js         # MCP Server (10 fused tools)
 │   ├── analyzer.js           # Code analysis + knowledge graph
 │   ├── navigation.js         # Navigation commands
@@ -193,7 +193,7 @@ PDG data flow. Those stay reachable through the fused entry.
 
 - **Node.js** 18+ (for native JS/WASM parsers)
 - **Python** 3.10+ (optional, for Python file parsing)
-- **GitNexus** (optional, for dual-engine mode) `npm install -g gitnexus`
+- **GitNexus** (optional — enables the fused engines) `npm install -g gitnexus`
 
 ---
 
@@ -355,7 +355,7 @@ GitNexus 仍然赢、ArchNav 有意不比的：执行流程、社区聚类、变
 
 ```
 ├── src/
-│   ├── index.js              # CLI 入口（14 个命令）
+│   ├── index.js              # CLI 入口（17 个命令）
 │   ├── mcp-server.js         # MCP Server（10 个融合工具）
 │   ├── analyzer.js           # 代码分析 + 知识图谱
 │   ├── navigation.js         # 导航命令
@@ -378,7 +378,7 @@ GitNexus 仍然赢、ArchNav 有意不比的：执行流程、社区聚类、变
 
 - **Node.js** 18+ (用于原生 JS/WASM 解析器)
 - **Python** 3.10+ (可选，用于 Python 文件解析)
-- **GitNexus** (可选，用于双引擎模式) `npm install -g gitnexus`
+- **GitNexus** (可选 —— 融合引擎所需) `npm install -g gitnexus`
 
 ---
 
