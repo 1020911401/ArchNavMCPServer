@@ -173,6 +173,18 @@ const TOOLS = [
     },
   },
   {
+    name: 'archnav_changes',
+    description: '[ArchNav] Change-impact: map a git diff (or content drift) to the touched symbols and everything that breaks — the pre-commit question.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectDir: { type: 'string' },
+        scope: { type: 'string', description: 'unstaged | staged | all | compare', enum: ['unstaged', 'staged', 'all', 'compare'] },
+        base: { type: 'string', description: 'base ref for scope=compare (e.g. main)' },
+      },
+    },
+  },
+  {
     name: 'archnav_trace',
     description: '[ArchNav] Trace the shortest call path between two symbols across layers.',
     inputSchema: {
@@ -357,6 +369,35 @@ async function handleToolCall(name, args) {
       if (!fused.symbol) fused.symbol = args.name;
       const notes = describeErrors(results);
       return mkText(formatFusedCallers(args.name, fused, name === 'archnav_fusion_calls', notes));
+    }
+
+    case 'archnav_changes': {
+      const r = await archNav.changes(dir, { scope: args.scope || 'unstaged', base: args.base });
+      if (r.error) return mkErr(r.error);
+      let text = `🔀 Change impact — ${r.summary.changed_files} file(s) via ${r.via === 'git' ? `git diff (${r.scope})` : 'content drift'}\n`;
+      if (r.note) text += `⚠️  ${r.note}\n`;
+      if (r.changed_symbols.length) {
+        text += '\n📝 Changed symbols:\n';
+        for (const s of r.changed_symbols) text += `   ${s.symbol} (${s.kind || '?'}) → ${s.file}:${s.line_start ?? '?'}\n`;
+      } else {
+        text += '\n📝 No indexed symbol falls inside the changed lines.\n';
+      }
+      text += `\n🔴 Direct impact (${r.summary.direct}):\n`;
+      for (const x of r.direct_impact) text += `   ${x.symbol} → ${x.file}:${x.line ?? '?'}${x.via ? ` (via ${x.via})` : ''}\n`;
+      if (!r.summary.direct) text += '   (none)\n';
+      text += `\n🟡 Indirect impact (${r.summary.indirect}):\n`;
+      for (const x of r.indirect_impact.slice(0, 20)) text += `   ${x.symbol} → ${x.file}:${x.line ?? '?'} (depth ${x.depth}, via ${x.via ?? '?'})\n`;
+      if (r.summary.indirect > 20) text += `   … ${r.summary.indirect - 20} more\n`;
+      if (!r.summary.indirect) text += '   (none)\n';
+      if (r.affected_routes.length) {
+        text += `\n🛣️  Routes (${r.affected_routes.length}):\n`;
+        for (const x of r.affected_routes) text += `   ${x.symbol} → ${x.file}:${x.line ?? '?'}\n`;
+      }
+      if (r.unmapped_files.length) {
+        text += `\n⚪ Changed but unmapped (${r.unmapped_files.length}):\n`;
+        for (const f of r.unmapped_files) text += `   ${f}\n`;
+      }
+      return { content: [{ type: 'text', text }] };
     }
 
     case 'archnav_impact': {

@@ -17,6 +17,7 @@ const SERVER = path.join(root, 'src', 'mcp-server.js');
 const EXPECTED_TOOLS = [
   'archnav_analyze',
   'archnav_callers',
+  'archnav_changes',
   'archnav_explore',
   'archnav_fusion_calls',
   'archnav_impact',

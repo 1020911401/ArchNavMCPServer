@@ -3,6 +3,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { spawnSync } from 'child_process';
 import { analyze, getIndex } from './analyzer.js';
 import { checkStaleness, computeConfidence } from './confidence.js';
 
@@ -353,6 +354,71 @@ function graphImpact(index, defs, { maxDepth = 2 } = {}) {
     // A caller that is already reported as direct must not reappear as indirect.
     indirect: indirect.filter(r => !directSites.has(`${r.symbol}|${r.file}`)),
   };
+}
+
+/** POSIX-normalise a repo-relative path so index keys and git paths agree.
+ *  The index stores Windows separators (`app\\Console\\X.php`) while `git diff`
+ *  emits forward slashes — comparing them raw silently maps nothing. */
+function normSep(p) {
+  return String(p || '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
+ * Parse `git diff --unified=0` into changed line ranges per file.
+ *
+ * scope: 'unstaged' | 'staged' | 'all' | 'compare' (needs baseRef)
+ * Returns { ok, files: Map<posixPath, [[start,end],…]>, error?, scope, base }
+ * `ok:false` means git was unusable (not a repo, no git binary, bad ref) — the
+ * caller then falls back to content drift.
+ */
+function changedLinesFromGit(dirPath, scope = 'unstaged', baseRef = null, timeoutMs = 20000) {
+  const args = ['diff', '--unified=0', '--no-color', '--no-ext-diff'];
+  if (scope === 'staged') args.push('--cached');
+  else if (scope === 'all') args.push('HEAD');
+  else if (scope === 'compare') {
+    if (!baseRef) return { ok: false, files: new Map(), error: 'scope "compare" needs --base <ref>', scope, base: null };
+    args.push(`${baseRef}...HEAD`);
+  } else if (scope !== 'unstaged') {
+    return { ok: false, files: new Map(), error: `unknown scope "${scope}" (use unstaged|staged|all|compare)`, scope, base: null };
+  }
+
+  const res = spawnSync('git', args, {
+    cwd: dirPath, encoding: 'utf8', timeout: timeoutMs,
+    stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
+    windowsHide: true,
+  });
+  if (res.error || res.status !== 0) {
+    const msg = res.error ? res.error.message : `${(res.stderr || '').trim().split('\n')[0]}`;
+    return { ok: false, files: new Map(), error: msg || 'git diff failed', scope, base: baseRef };
+  }
+
+  const files = new Map();
+  let current = null;
+  for (const line of String(res.stdout || '').split(/\r?\n/)) {
+    if (line.startsWith('+++ ')) {
+      const p = line.slice(4).trim();
+      current = p === '/dev/null' ? null : p.replace(/^[ab]\//, '');
+      if (current && !files.has(current)) files.set(current, []);
+      continue;
+    }
+    if (line.startsWith('--- ')) continue;
+    if (!current) continue;
+    const m = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (!m) continue;
+    const start = parseInt(m[1], 10);
+    const count = m[2] === undefined ? 1 : parseInt(m[2], 10);
+    // A pure deletion (count 0) has no new-side line; anchor it at the join point
+    // so the symbol containing the seam is still reported as touched.
+    files.get(current).push(count === 0 ? [start, start] : [start, start + count - 1]);
+  }
+  return { ok: true, files, scope, base: baseRef };
+}
+
+/** Do [a1,a2] and [b1,b2] overlap (inclusive, 1-based)? */
+function rangesOverlap(a1, a2, b1, b2) {
+  const lo1 = Math.min(a1, a2), hi1 = Math.max(a1, a2);
+  const lo2 = Math.min(b1, b2), hi2 = Math.max(b1, b2);
+  return lo1 <= hi2 && lo2 <= hi1;
 }
 
 export const archNav = {
@@ -710,6 +776,154 @@ export const archNav = {
       indirect_impact: indirectRelations,
       suggested_tests: testFiles,
       confidence: computeConfidence(sym.file, index.fileHashes, freshness, dirPath),
+    };
+  },
+
+  /**
+   * Change-impact analysis — map a change set (git diff, or content drift when
+   * the directory is not a git repo) to the symbols it touches and everything
+   * that breaks because of them.
+   *
+   * This is the diff-driven entry point: `impact <symbol>` starts from a symbol,
+   * `changes` starts from "what did I actually edit" — the question an agent asks
+   * before running tests or committing.
+   *
+   * options.scope: 'unstaged' | 'staged' | 'all' | 'compare'
+   * options.base:  base ref for scope 'compare' (e.g. 'main')
+   */
+  async changes(dirPath, options = {}) {
+    const index = getIndex(dirPath);
+    if (!index) return { type: 'changes', error: 'No index', scope: options.scope || 'unstaged' };
+
+    const scope = options.scope || 'unstaged';
+    const base = options.base || null;
+
+    // Invalid input must fail loudly. Without this, a typo'd --scope fell through
+    // to the drift fallback and silently answered a different question.
+    const VALID_SCOPES = new Set(['unstaged', 'staged', 'all', 'compare']);
+    if (!VALID_SCOPES.has(scope)) {
+      return { type: 'changes', error: `Unknown scope "${scope}" (use unstaged | staged | all | compare)`, scope };
+    }
+    if (scope === 'compare' && !base) {
+      return { type: 'changes', error: 'Scope "compare" requires --base <ref> (e.g. --base main)', scope, base: null };
+    }
+
+    const git = changedLinesFromGit(dirPath, scope, base);
+
+    let changedFiles; // Map<posixPath, ranges[]|null>  (null = unknown ranges)
+    let via;
+    let note = null;
+    if (git.ok) {
+      via = 'git';
+      changedFiles = new Map([...git.files].map(([f, r]) => [normSep(f), r]));
+    } else {
+      // No git (or unusable ref): fall back to the index's own content-drift
+      // signal. Line ranges are unknown, so a changed file counts as a whole.
+      via = 'drift';
+      note = `git diff unavailable (${git.error}); fell back to content drift vs the index — line ranges unknown, whole files are treated as changed.`;
+      const freshness = await checkStaleness(dirPath);
+      changedFiles = new Map();
+      for (const d of freshness.changedDetails || []) {
+        if (d.change === 'deleted') continue;
+        changedFiles.set(normSep(d.file), null);
+      }
+    }
+
+    const symbols = index.symbols || [];
+    const byFile = new Map();
+    for (const s of symbols) {
+      const f = normSep(s.file);
+      if (!byFile.has(f)) byFile.set(f, []);
+      byFile.get(f).push(s);
+    }
+
+    const changedSymbols = [];
+    const changedFileRows = [];
+    const unmappedFiles = [];
+    for (const [file, ranges] of changedFiles) {
+      const inFile = byFile.get(file) || [];
+      let hit;
+      if (ranges === null) {
+        hit = inFile;
+      } else if (ranges.length === 0) {
+        hit = [];
+      } else {
+        hit = inFile.filter((s) =>
+          ranges.some(([a, b]) => rangesOverlap(s.line_start || 1, s.line_end || s.line_start || 1, a, b))
+        );
+      }
+      if (!hit.length) {
+        unmappedFiles.push(file);
+        changedFileRows.push({ file, ranges: ranges || null, symbols: [] });
+        continue;
+      }
+      changedFileRows.push({ file, ranges: ranges || null, symbols: hit.map((s) => s.name) });
+      for (const s of hit) changedSymbols.push(s);
+    }
+
+    // A changed symbol must not be reported as "affected by" itself.
+    const selfKeys = new Set(changedSymbols.map((s) => `${normSep(s.file)}::${s.line_start}`));
+
+    const merged = new Map();
+    for (const cs of changedSymbols) {
+      const { direct, indirect } = graphImpact(index, [cs], { maxDepth: 2 });
+      for (const r of [...direct, ...indirect]) {
+        if (r.kind === 'symbol' && selfKeys.has(`${normSep(r.file)}::${r.line}`)) continue;
+        const key = `${normSep(r.file)}::${r.line ?? ''}::${r.symbol}`;
+        const prev = merged.get(key);
+        if (!prev) {
+          merged.set(key, { ...r, from_changed: cs.name });
+        } else if ((r.depth ?? 99) < (prev.depth ?? 99)) {
+          merged.set(key, { ...r, from_changed: cs.name });
+        }
+      }
+    }
+
+    const impacted = [...merged.values()].sort(
+      (a, b) => (a.depth ?? 9) - (b.depth ?? 9) || String(a.file).localeCompare(String(b.file))
+    );
+    const freshness2 = await checkStaleness(dirPath);
+    const changedConfidence = changedSymbols.length
+      ? Math.min(...changedSymbols.map((s) => computeConfidence(s.file, index.fileHashes, freshness2, dirPath)))
+      : 1;
+
+    const direct = impacted.filter((r) => (r.depth ?? 1) === 1);
+    const indirect = impacted.filter((r) => (r.depth ?? 1) > 1);
+
+    return {
+      type: 'changes',
+      scope,
+      base,
+      via,
+      ...(note ? { note } : {}),
+      changed_files: changedFileRows.sort((a, b) => String(a.file).localeCompare(String(b.file))),
+      changed_symbols: changedSymbols
+        .map((s) => ({
+          symbol: s.name,
+          kind: s.kind || null,
+          file: normSep(s.file),
+          line_start: s.line_start ?? null,
+          line_end: s.line_end ?? null,
+          layer: index.layerMap?.[s.id] || null,
+          confidence: computeConfidence(s.file, index.fileHashes, freshness2, dirPath),
+        }))
+        .sort((a, b) => String(a.file).localeCompare(String(b.file)) || (a.line_start || 0) - (b.line_start ?? 0)),
+      impacted,
+      direct_impact: direct,
+      indirect_impact: indirect,
+      affected_routes: impacted.filter((r) => r.kind === 'route'),
+      affected_pages: impacted.filter((r) => r.kind === 'page'),
+      unmapped_files: unmappedFiles.sort(),
+      summary: {
+        changed_files: changedFileRows.length,
+        changed_symbols: changedSymbols.length,
+        direct: direct.length,
+        indirect: indirect.length,
+        affected_routes: impacted.filter((r) => r.kind === 'route').length,
+        affected_pages: impacted.filter((r) => r.kind === 'page').length,
+        unmapped_files: unmappedFiles.length,
+      },
+      confidence: changedConfidence,
     };
   },
 

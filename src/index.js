@@ -169,6 +169,22 @@ program
     outputResult(result, options.json);
   });
 
+// === changes ===
+program
+  .command('changes [dir]')
+  .description('Change-impact analysis: map a diff (or content drift) to the symbols it touches and what breaks')
+  .option('--scope <scope>', 'unstaged | staged | all | compare', 'unstaged')
+  .option('--base <ref>', 'Base ref for --scope compare (e.g. main)')
+  .option('--json', 'Output raw JSON')
+  .action(async (dir, options) => {
+    const target = dir || process.cwd();
+    const result = await archNav.changes(path.resolve(target), {
+      scope: options.scope,
+      base: options.base,
+    });
+    outputResult(result, options.json);
+  });
+
 // === mcp ===
 program
   .command('mcp')
@@ -256,6 +272,8 @@ function printFormatted(result) {
     printStatus(result);
   } else if (result.type === 'compare') {
     printComparison(result);
+  } else if (result.type === 'changes') {
+    printChanges(result);
   } else {
     console.log(JSON.stringify(result, null, 2));
   }
@@ -284,6 +302,52 @@ function printArchitecture(r) {
     for (const flow of r.flows) {
       console.log(`      ${flow.name}: ${flow.path.join(' → ')}`);
     }
+  }
+  console.log('');
+}
+
+function printChanges(r) {
+  const viaLabel = r.via === 'git' ? `git diff (${r.scope}${r.base ? ` vs ${r.base}` : ''})` : 'content drift vs index';
+  console.log(`\n🔀 Change impact — ${r.summary.changed_files} file(s) changed via ${viaLabel}`);
+  if (r.note) console.log(`   ⚠️  ${r.note}`);
+
+  if (r.changed_symbols.length) {
+    console.log('\n   📝 Changed symbols:');
+    for (const s of r.changed_symbols) {
+      const conf = typeof s.confidence === 'number' ? ` ${Math.round(s.confidence * 100)}%` : '';
+      console.log(`      ${s.symbol} (${s.kind || '?'}) → ${s.file}:${s.line_start ?? '?'}${s.layer ? ` [${s.layer}]` : ''}${conf}`);
+    }
+  } else {
+    console.log('\n   📝 No indexed symbol falls inside the changed lines.');
+  }
+
+  const direct = r.direct_impact || [];
+  console.log(`\n   🔴 Direct impact (${direct.length}) — will break:`);
+  for (const x of direct) {
+    console.log(`      ${x.symbol} → ${x.file}:${x.line ?? '?'}${x.via ? ` (via ${x.via})` : ''}${x.kind && x.kind !== 'symbol' ? ` [${x.kind}]` : ''}`);
+  }
+  if (!direct.length) console.log('      (none)');
+
+  const indirect = r.indirect_impact || [];
+  console.log(`\n   🟡 Indirect impact (${indirect.length}) — may break:`);
+  for (const x of indirect.slice(0, 20)) {
+    const conf = typeof x.confidence === 'number' ? ` ${Math.round(x.confidence * 100)}%` : '';
+    console.log(`      ${x.symbol} → ${x.file}:${x.line ?? '?'} (depth ${x.depth}, via ${x.via ?? '?'}) [${x.source_kind || x.kind || '?'}]${conf}`);
+  }
+  if (indirect.length > 20) console.log(`      … ${indirect.length - 20} more`);
+  if (!indirect.length) console.log('      (none)');
+
+  if (r.affected_routes?.length) {
+    console.log(`\n   🛣️  Affected routes (${r.affected_routes.length}):`);
+    for (const x of r.affected_routes) console.log(`      ${x.symbol} → ${x.file}:${x.line ?? '?'}`);
+  }
+  if (r.affected_pages?.length) {
+    console.log(`\n   📄 Affected pages (${r.affected_pages.length}):`);
+    for (const x of r.affected_pages) console.log(`      ${x.symbol} → ${x.file}:${x.line ?? '?'}`);
+  }
+  if (r.unmapped_files?.length) {
+    console.log(`\n   ⚪ Changed but unmapped (${r.unmapped_files.length}) — no symbol covers these lines:`);
+    for (const f of r.unmapped_files) console.log(`      ${f}`);
   }
   console.log('');
 }
