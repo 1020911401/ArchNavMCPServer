@@ -4,3 +4,15 @@ graphify-out/
 .DS_Store
 *.log
 bench/
+
+# bench: keep the harness in git, ignore the fixtures and generated output.
+# php-app/ and vue-app/ are copies of customer projects (see bench/README.md).
+!bench/
+bench/php-app/
+bench/vue-app/
+bench/tools/
+bench/report.json
+bench/report.md
+bench/multi_dim_report.json
+bench/multi_dim_report.md
+bench.err
