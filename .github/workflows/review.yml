@@ -1,0 +1,102 @@
+name: review
+
+# Change-scoped review gate:
+#   analyze  -> build the index the rules need
+#   review-rules --duplication  -> one task sheet (rules + clone kinds), gates on error findings
+#   test-select  -> which tests this change actually reaches
+# SARIF goes to code scanning, the markdown task sheet to the step summary (and a PR comment).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # --baseline-from-ref needs the base branch
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Unit tests (ArchNav itself)
+        run: npm test
+
+      - name: Build index
+        run: node src/index.js analyze .
+
+      - name: Review task sheet (rules + duplication)
+        id: review
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref || '' }}
+        run: |
+          set -o pipefail
+          if [ -n "$BASE_REF" ]; then
+            SCOPE_ARGS="--scope compare --base origin/$BASE_REF"   # PR: diff against the base branch
+          else
+            SCOPE_ARGS="--scope all"                               # push/dispatch: uncommitted + HEAD
+          fi
+          node scripts/review-rules.mjs . $SCOPE_ARGS \
+            --duplication --dup-kinds renamed,similar \
+            --dup-baseline-from-ref "origin/${BASE_REF:-HEAD}" \
+            --dup-max-new-clones 0 \
+            --markdown review.md \
+            --sarif review.sarif \
+            --json > review.json \
+            --gate | tee review.txt
+          echo "exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Step summary
+        if: always()
+        run: |
+          {
+            echo "### Review task sheet"
+            if [ -f review.md ]; then cat review.md; else echo "_(review.md not produced — see job log)_"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('review.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: review.sarif
+          category: archnav-review
+
+      - name: Which tests this change reaches
+        if: always()
+        run: node scripts/test-select.mjs . --json | head -c 4000 || true
+
+      - name: Comment the task sheet on the PR
+        if: always() && github.event_name == 'pull_request' && hashFiles('review.md') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file review.md
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-report
+          path: |
+            review.md
+            review.json
+            review.sarif
+
+      - name: Fail the job when the gate failed
+        if: steps.review.outcome == 'failure' || steps.review.outputs.exit != '0'
+        run: |
+          echo "review-rules --gate reported blocking findings; see the task sheet above." >&2
+          exit 1

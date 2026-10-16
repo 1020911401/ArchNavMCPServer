@@ -1036,6 +1036,7 @@ function parseArgs(argv) {
     else if (a === '--dup-min-lines') out.dupMinLines = Number(argv[++i]);
     else if (a === '--dup-min-tokens') out.dupMinTokens = Number(argv[++i]);
     else if (a === '--dup-max-new-clones') out.dupMaxNewClones = Number(argv[++i]);
+    else if (a === '--dup-baseline-from-ref') { out.dupBaselineFromRef = argv[++i]; out.duplication = true; }
     else if (a === '--markdown') out.markdown = argv[++i] === undefined ? '-' : argv[i];
     else if (a === '--backend') out.backend = argv[++i];
     else if (a === '--sarif') out.sarif = argv[++i];
@@ -1095,13 +1096,14 @@ async function main() {
     const r = dup.runDuplication(dir, {
       minLines: opts.dupMinLines, minTokens: opts.dupMinTokens,
       kinds: opts.dupKinds,
-      changed: isGit,                                   // native: 只报与改动相关的克隆
+      changed: isGit && !opts.dupBaselineFromRef,
+      baselineFromRef: isGit ? (opts.dupBaselineFromRef || null) : null,
       changedFiles: isGit ? null : changedFiles,        // 非 git 仓退回图谱口径
     });
     if (!r.ok) console.error(`⚠️  duplication skipped: ${r.error}`);
     else {
       dupResult = r;
-      const dupChecklist = dup.buildDupChecklist({ summary: r.summary, opts: { kinds: opts.dupKinds, changed: isGit } });
+      const dupChecklist = dup.buildDupChecklist({ summary: r.summary, opts: { kinds: opts.dupKinds, changed: isGit && !opts.dupBaselineFromRef, baselineFromRef: opts.dupBaselineFromRef || null } });
       dupResult.checklist = dupChecklist;
       findings.push(...r.findings.map((f) => ({ ...f, source: 'duplication' })));
     }

@@ -17,3 +17,10 @@ bench/multi_dim_report.json
 bench/multi_dim_report.md
 bench.err
 bench/deep_recall_report.json
+
+# review run artifacts (CI writes these too)
+review.md
+review.json
+review.sarif
+review.txt
+.jscpd-baseline.json

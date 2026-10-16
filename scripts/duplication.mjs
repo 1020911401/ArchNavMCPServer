@@ -65,7 +65,11 @@ export function normalizeJscpd(report, { changedFiles = null, minLines = 0 } = {
   }
   const total = report?.statistics?.total || {};
   const byKind = {};
-  for (const c of dup) byKind[c.kind || 'exact'] = (byKind[c.kind || 'exact'] || 0) + 1;
+  const newByKind = {};
+  for (const c of dup) {
+    byKind[c.kind || 'exact'] = (byKind[c.kind || 'exact'] || 0) + 1;
+    if (c.isNew) newByKind[c.kind || 'exact'] = (newByKind[c.kind || 'exact'] || 0) + 1;
+  }
   return {
     findings: out,
     summary: {
@@ -73,6 +77,7 @@ export function normalizeJscpd(report, { changedFiles = null, minLines = 0 } = {
       reported: out.length,
       new_clones: dup.filter((c) => c.isNew).length,
       by_kind: byKind,
+      new_by_kind: newByKind,
       duplicated_lines: total.duplicatedLines ?? null,
       total_lines: total.lines ?? null,
       percent: total.percentage ?? null,
@@ -115,13 +120,22 @@ export function buildJscpdFlags(opts = {}) {
  */
 export function buildDupChecklist({ summary = {}, opts = {} } = {}) {
   const kinds = new Set((opts.kinds || []).map((k) => String(k).toLowerCase()));
-  const byKind = summary.by_kind || {};
-  const hits = (k) => byKind[k] || 0;
+  const baselineGate = Boolean(opts.changed || opts.baseline || opts.baselineFromRef);
+  // With a baseline gate the number that matters is what *this change* introduced;
+  // pre-existing clones stay as context in the reason, not as a 命中 count.
+  const counts = baselineGate ? (summary.new_by_kind || {}) : (summary.by_kind || {});
+  const allKinds = summary.by_kind || {};
+  const hits = (k) => counts[k] || 0;
   const kindRow = (id, kind, title, flag, naReason) => {
     if (!flag) return { id, group: '重复代码', family: 'dup', title, status: 'na', hits: 0, reason: naReason };
-    return { id, group: '重复代码', family: 'dup', title, status: hits(kind) ? 'hit' : 'pass', hits: hits(kind), reason: null };
+    const stale = baselineGate ? (allKinds[kind] || 0) - hits(kind) : 0;
+    return {
+      id, group: '重复代码', family: 'dup', title,
+      status: hits(kind) ? 'hit' : 'pass',
+      hits: hits(kind),
+      reason: stale > 0 ? `另有 ${stale} 个存量克隆（非本次引入）` : null,
+    };
   };
-  const baselineGate = Boolean(opts.changed || opts.baseline || opts.baselineFromRef);
   const rows = [
     kindRow('dup.exact', 'exact', '字节级复制（Type-1）', true),
     kindRow('dup.renamed', 'renamed', '改名/改字面量的克隆（Type-2）', kinds.has('renamed') || kinds.has('all'),
@@ -152,7 +166,7 @@ export function buildDupChecklist({ summary = {}, opts = {} } = {}) {
     na: rows.filter((r) => r.status === 'na').length,
     findings: summary.reported || 0,
   };
-  return { rows, summary: summaryOut, meta: { percent: summary.percent, new_clones: summary.new_clones, by_kind: byKind } };
+  return { rows, summary: summaryOut, meta: { percent: summary.percent, new_clones: summary.new_clones, by_kind: allKinds, new_by_kind: summary.new_by_kind || {} } };
 }
 
 /** Run jscpd + normalise, so other scripts can reuse this without spawning twice. */

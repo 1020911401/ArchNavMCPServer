@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeJscpd, exceedsThreshold, buildJscpdFlags } from '../scripts/duplication.mjs';
+import { normalizeJscpd, exceedsThreshold, buildJscpdFlags, buildDupChecklist } from '../scripts/duplication.mjs';
 
 test('buildJscpdFlags maps our kinds onto jscpd flags (no home-grown similarity)', () => {
   assert.deepEqual(buildJscpdFlags({}), []);
@@ -114,4 +114,25 @@ test('clone kind and baseline novelty are carried into the finding', () => {
   assert.equal(fresh.severity, 'warn', 'a clone the baseline never saw is this change’s duplication');
   assert.match(fresh.message, /\[similar\/new\]/);
   assert.match(fresh.why, /本次改动新引入/);
+  assert.equal(normalizeJscpd(kinded).summary.new_by_kind.similar, 1, 'new clones are also counted per kind');
+});
+
+test('with a baseline gate the checklist counts only new clones; pre-existing ones become context', () => {
+  const summary = {
+    by_kind: { renamed: 103, exact: 1, similar: 1 }, new_by_kind: { renamed: 2 }, new_clones: 2,
+    percent: 14.27, duplicated_lines: 2674, total_lines: 18734, clones: 105, reported: 105,
+  };
+  const gated = buildDupChecklist({ summary, opts: { kinds: ['renamed'], baselineFromRef: 'origin/main' } });
+  const renamed = gated.rows.find((r) => r.id === 'dup.renamed');
+  assert.equal(renamed.hits, 2, 'must not report 103 pre-existing clones as this change’s hits');
+  assert.equal(renamed.status, 'hit');
+  assert.match(renamed.reason, /另有 101 个存量克隆/);
+  assert.equal(gated.rows.find((r) => r.id === 'dup.new').status, 'hit');
+  assert.equal(gated.rows.find((r) => r.id === 'dup.similar').status, 'na', 'similar not enabled → 不适用');
+
+  const ungated = buildDupChecklist({ summary, opts: { kinds: ['renamed'] } });
+  assert.equal(ungated.rows.find((r) => r.id === 'dup.renamed').hits, 103, 'without a baseline the whole repo count is shown');
+  assert.equal(ungated.rows.find((r) => r.id === 'dup.new').status, 'na');
+  assert.match(ungated.rows.find((r) => r.id === 'dup.new').reason, /--changed\/--baseline/);
+  assert.equal(ungated.rows.find((r) => r.id === 'dup.semantic').status, 'na');
 });
