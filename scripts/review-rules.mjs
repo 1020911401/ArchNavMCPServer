@@ -650,6 +650,138 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyD
   return out;
 }
 
+/**
+ * Laravel Blade `{!! !!}` prints raw, unescaped HTML — the classic XSS hole in a
+ * Blade view when the value can come from a request. One finding per file (with a
+ * count) instead of one per occurrence.
+ */
+export function bladeRawOutputFindings(file, src) {
+  if (!/\.blade\.php$/i.test(file)) return [];
+  const matches = [...src.matchAll(/\{!!([\s\S]{0,300}?)!!\}/g)];
+  if (!matches.length) return [];
+  const first = matches[0];
+  const line = src.slice(0, first.index).split(/\r?\n/).length;
+  return [{
+    rule: 'php-blade-unescaped-output', severity: 'warn', file: norm(file), line,
+    message: `${file} 有 ${matches.length} 处 \`{!! !!}\` 原样输出：\`${first[0].replace(/\s+/g, ' ').slice(0, 60)}\``,
+    why: '`{!! !!}` 不做转义（`{{ }}` 的反面）：只要内容可能来自用户/请求，就是 XSS。确认来源可信（富文本白名单），否则改用 `{{ }}`。',
+    evidence: `occurrences=${matches.length}, first=@${line}`,
+  }];
+}
+
+/** Count top-level arguments starting at the index of an opening paren. */
+export function countArgs(src, openIdx) {
+  let depth = 0;
+  let count = 0;
+  let sawContent = false;
+  for (let i = openIdx; i < src.length; i++) {
+    const c = src[i];
+    if (c === '(' || c === '[' || c === '{') {
+      // Content *inside* a nested literal is still content: `f({a: 1})` passes one
+      // argument. Missing this made the rule report `orderPay({…})` as 0 args —
+      // caught by checking the finding against the source.
+      if (depth >= 1 && !/\s/.test(c)) sawContent = true;
+      depth++;
+      continue;
+    }
+    if (c === ')' || c === ']' || c === '}') {
+      depth--;
+      if (depth === 0) return sawContent ? count + 1 : 0;
+      if (!/\s/.test(c)) sawContent = true;
+      continue;
+    }
+    if (depth >= 1) {
+      if (c === ',' && depth === 1) { count++; sawContent = true; continue; }
+      if (!/\s/.test(c)) sawContent = true;
+    }
+  }
+  return null; // unbalanced → do not guess
+}
+
+/** Required / total parameter counts from a `name(a, b = 1, ...rest)` signature. */
+export function parseSignature(signature) {
+  const s = String(signature || '');
+  const open = s.indexOf('(');
+  if (open === -1) return { required: null, total: null, variadic: false };
+  const close = s.lastIndexOf(')');
+  const inner = s.slice(open + 1, close === -1 ? s.length : close);
+  const parts = [];
+  let depth = 0;
+  let cur = '';
+  for (const c of inner) {
+    if ('([{'.includes(c)) depth++;
+    if (')]}'.includes(c)) depth--;
+    if (c === ',' && depth === 0) { parts.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  if (cur.trim()) parts.push(cur);
+  const cleaned = parts.map((p) => p.trim()).filter(Boolean);
+  const variadic = cleaned.some((p) => p.includes('...'));
+  const required = cleaned.filter((p) => !p.includes('=') && !p.startsWith('?') && !p.includes('...')).length;
+  return { required, total: cleaned.length, variadic };
+}
+
+/**
+ * Call-site arity vs definition. Deliberately narrow, because every relaxation here
+ * produces false positives:
+ *   - only names with **exactly one** definition in the index (no dynamic dispatch);
+ *   - never method calls (`->` / `.` / `::`), keywords, or definition sites;
+ *   - JS/TS/Vue only: the PHP WASM parser flattens default values into the param list
+ *     (`fetch($a,$b,$c,$d, 0)`), so "required" is unknowable there — the rule stays
+ *     silent for `.php` rather than guessing.
+ */
+export function arityFindings(file, src, { symbols = [] } = {}) {
+  const f = norm(file);
+  if (!/\.(js|ts|mjs|cjs|jsx|tsx|vue)$/i.test(file)) return [];
+  const out = [];
+  const byName = new Map();
+  for (const s of symbols) {
+    if (!s || typeof s.name !== 'string') continue;
+    if (!byName.has(s.name)) byName.set(s.name, []);
+    byName.get(s.name).push(s);
+  }
+  const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'function', 'return', 'typeof', 'instanceof', 'new', 'await', 'else', 'do', 'constructor', 'super', 'delete', 'void', 'yield', 'in', 'of', 'case', 'with', 'throw']);
+  // Measured noise control (333-file uni-app fixture: 144 findings without these):
+  // vendored/minified trees define look-alike helpers (makeMap, B, …) that shadow
+  // the app's own names, and one- and two-letter names are minified identifiers.
+  const VENDORED = /(^|\/)(plugin|vendor|node_modules|uni_modules|dist|static|libs?)\//i;
+  if (VENDORED.test(f) || /\.min\.[cm]?js$/i.test(f)) return [];
+  const scrubbed = blankTemplateLiterals(blankLiterals(src));
+  for (const m of scrubbed.matchAll(/(?<![\w.$>])([A-Za-z_$][\w$]*)\s*\(/g)) {
+    const name = m[1];
+    if (KEYWORDS.has(name)) continue;
+    const defs = byName.get(name);
+    if (!defs || defs.length !== 1) continue;
+    if (name.length < 3) continue;                                  // minified identifier
+    if (VENDORED.test(norm(defs[0].file))) continue;                // definition is vendored code
+    const before = src.slice(Math.max(0, m.index - 20), m.index);
+    if (/(?:function|=>)\s*$/.test(before)) continue;          // definition site
+    if (/(?:->|\.|::)\s*$/.test(before)) continue;             // method / property call
+    const argCount = countArgs(src, m.index + m[0].length - 1);
+    if (argCount === null) continue;
+    const def = defs[0];
+    const { required, total, variadic } = parseSignature(def.signature);
+    if (required === null || !total) continue;
+    const line = src.slice(0, m.index).split(/\r?\n/).length;
+    if (argCount < required) {
+      out.push({
+        rule: 'arity-mismatch', severity: 'warn', file: f, line,
+        message: `${f}:${line} 调用 ${name}(${argCount} 个参数)，而 ${norm(def.file)} 的定义至少需要 ${required} 个（共 ${total}）。`,
+        why: '少传必填参数：JS 里会变成 undefined（悄悄算错，或在更深的地方炸）。',
+        evidence: `call=${name}(${argCount}), required=${required}, total=${total}, def=${norm(def.file)}:${def.line_start ?? '?'}`,
+      });
+    } else if (!variadic && argCount > total) {
+      out.push({
+        rule: 'arity-mismatch', severity: 'info', file: f, line,
+        message: `${f}:${line} 调用 ${name}(${argCount} 个参数)，而定义只有 ${total} 个。`,
+        why: '多传参数通常无害（被忽略），但常说明调用的是"记忆里的另一个签名"——AI 生成代码里很常见。',
+        evidence: `call=${name}(${argCount}), total=${total}, def=${norm(def.file)}`,
+      });
+    }
+  }
+  return out;
+}
+
 export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null, tier = 'all' }) {
   const findings = [];
   const read = readFile || ((rel) => {
@@ -896,6 +1028,8 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     const src = read(file);
     if (!src) continue;
     findings.push(...scanContent(file, src));
+    findings.push(...bladeRawOutputFindings(file, src));
+    findings.push(...arityFindings(file, src, { symbols }));
   }
 
   // ── AI-code hallucinations: imports that resolve to nothing ────────────────
@@ -1065,6 +1199,8 @@ export const RULE_REGISTRY = [
   { id: 'php-loose-comparison', group: 'PHP', family: 'php', title: '松散比较 == / !=（类型杂耍）' },
   { id: 'php-debug-left-on', group: 'PHP', family: 'php', title: 'dd()/dump() 调试残留' },
   { id: 'php-blade-unverified-calls', group: 'PHP', family: 'php', title: 'Blade 模板调用无法绑定（证据边界）' },
+  { id: 'php-blade-unescaped-output', group: 'PHP·安全', family: 'php', title: 'Blade `{!! !!}` 原样输出（XSS）' },
+  { id: 'arity-mismatch', group: '结构', family: 'front', title: '调用点参数数与定义签名不符（JS/Vue）' },
   { id: 'php-n-plus-one', group: 'PHP·性能', family: 'php', title: '循环体内查库（N+1 启发式）' },
   { id: 'php-unbounded-query', group: 'PHP·性能', family: 'php', title: '无分页全量取数' },
   // ── Python ───────────────────────────────────────────────────────────────

@@ -9,11 +9,65 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks } from '../scripts/review-rules.mjs';
+import { bladeRawOutputFindings, arityFindings, countArgs, parseSignature, reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks } from '../scripts/review-rules.mjs';
 
 // a directory that deliberately does not exist: stack detection must then rely on
 // index node kinds alone (which is exactly what it does for a fresh clone)
 const ROOT_FIX = path.resolve('__no_such_dir__');
+
+test('blade {!! !!} raw output is reported once per file', () => {
+  const raw = '<div>{!! $user->bio !!}</div>' + '\n' + '{!! $x !!}';
+  const f = bladeRawOutputFindings('views/patients/show.blade.php', raw);
+  assert.equal(f.length, 1, 'one finding per file, not per occurrence');
+  assert.equal(f[0].rule, 'php-blade-unescaped-output');
+  assert.equal(f[0].severity, 'warn');
+  assert.match(f[0].evidence, /occurrences=2/);
+  assert.equal(f[0].line, 1);
+  // escaped output and non-Blade files stay silent
+  assert.deepEqual(bladeRawOutputFindings('views/a.blade.php', '<div>{{ $user->bio }}</div>'), []);
+  assert.deepEqual(bladeRawOutputFindings('app/Http/Controllers/A.php', '{!! $x !!}'), []);
+});
+
+test('countArgs counts a single object literal as one argument', () => {
+  assert.equal(countArgs('f()', 1), 0);
+  assert.equal(countArgs('f(a)', 1), 1);
+  assert.equal(countArgs('f(a, b)', 1), 2);
+  // the case that made the rule lie: `orderPay({ ... })` is one argument
+  assert.equal(countArgs('f({\n  a: 1,\n  b: 2,\n})', 1), 1);
+  assert.equal(countArgs('f(a, [1, 2], c)', 1), 3);
+  assert.equal(countArgs('f(', 1), null, 'unbalanced input must not be guessed');
+});
+
+test('parseSignature separates required from optional params', () => {
+  assert.deepEqual(parseSignature('getNavigation(data)'), { required: 1, total: 1, variadic: false });
+  assert.deepEqual(parseSignature('f(a, b = 1)'), { required: 1, total: 2, variadic: false });
+  assert.deepEqual(parseSignature('f(...rest)'), { required: 0, total: 1, variadic: true });
+  assert.deepEqual(parseSignature('noParens'), { required: null, total: null, variadic: false });
+});
+
+test('arity: missing required args warn, extra args are info, ambiguity stays silent', () => {
+  const symbols = [
+    { name: 'getNavigation', file: 'api/public.js', line_start: 250, signature: 'getNavigation(data)' },
+    { name: 'paginate', file: 'utils/page.js', line_start: 3, signature: 'paginate(list, size = 10)' },
+    { name: 'orderTake', file: 'api/order.js', line_start: 171, signature: 'orderTake(uni)' },
+    { name: 'orderTake', file: 'api/activity.js', line_start: 293, signature: 'orderTake(data)' },
+  ];
+  const few = arityFindings('pages/index/index.vue', 'getNavigation().then(() => {});', { symbols });
+  assert.equal(few.length, 1);
+  assert.equal(few[0].severity, 'warn');
+  assert.match(few[0].evidence, /required=1/);
+  assert.equal(few[0].line, 1);
+  // extra args: info, not a gate
+  const many = arityFindings('utils/a.js', "import { paginate } from './page';\npaginate(list, 10, 'x');", { symbols });
+  assert.equal(many[0].severity, 'info');
+  // exact match, optional-only omission, ambiguity and method calls: silent
+  assert.deepEqual(arityFindings('utils/a.js', 'paginate(list);', { symbols }), []);
+  assert.deepEqual(arityFindings('utils/a.js', 'orderTake(uni);', { symbols }), [], 'two definitions → ambiguous, not our business');
+  assert.deepEqual(arityFindings('utils/a.js', 'that.getNavigation();', { symbols }), [], 'method call');
+  assert.deepEqual(arityFindings('utils/a.js', 'if (getNavigation) {}', { symbols }), [], 'keyword/condition');
+  // PHP is out of scope (default values are flattened into the param list by the parser)
+  assert.deepEqual(arityFindings('app/A.php', 'getNavigation();', { symbols }), []);
+});
 
 test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原因)', () => {
   const metaFull = {
