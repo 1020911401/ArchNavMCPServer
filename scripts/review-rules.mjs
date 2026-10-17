@@ -515,7 +515,7 @@ export function scanContent(file, src) {
  * (8.1–40% of LLM answers use library features that do not exist). We can only
  * check what the index knows: local paths and the project's own dependency lists.
  */
-export function hallucinationFindings(file, src, { indexedFiles, deps, psr4 }) {
+export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyDeps = null }) {
   const out = [];
   if (!src) return out;
   const f = norm(file);
@@ -581,6 +581,45 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4 }) {
           evidence: `class=${cls}, expected=${mapped[0] || rel}`,
         });
       }
+    }
+  }
+  if (/\.py$/i.test(f)) {
+    // relative imports: `from .mod import x` / `from ..pkg.mod import y`
+    for (const m of src.matchAll(/^[ \t]*from[ \t]+(\.+)([\w.]*)[ \t]+import[ \t]+/gm)) {
+      const dots = m[1].length;
+      const mod = m[2];
+      let base = dir;
+      for (let i = 1; i < dots; i++) base = base.includes('/') ? base.slice(0, base.lastIndexOf('/')) : '';
+      const target = mod ? mod.replace(/\./g, '/') : '';
+      const candidates = target
+        ? [joinPosix(base, `${target}.py`), joinPosix(base, target, '__init__.py')]
+        : [joinPosix(base, '__init__.py')];
+      if (!candidates.some(exists)) {
+        out.push({
+          rule: 'py-unresolved-local-import', severity: 'warn', file: f, line: lineOf(m.index),
+          message: `${f} 的相对 import \`from ${'.'.repeat(dots)}${mod} import …\` 找不到对应模块。`,
+          why: '相对 import 写错层数或模块名（AI 生成代码里"看起来对"的包结构）在运行期直接 ImportError。',
+          evidence: `tried: ${candidates.join(', ')}`,
+        });
+      }
+    }
+    // absolute imports: only judged when the project's dependencies are known
+    for (const m of src.matchAll(/^[ \t]*(?:from|import)[ \t]+([A-Za-z_][\w.]*)/gm)) {
+      const mod = m[1];
+      const top = mod.split('.')[0];
+      if (PY_STDLIB.has(top)) continue;
+      const asPath = mod.replace(/\./g, '/');
+      if ([...indexedFiles].some((p) => p === `${asPath}.py` || p.startsWith(`${asPath}/`))) continue;
+      if (deps && deps.has(top)) continue;
+      if (!pyDeps) continue; // no requirements.txt/pyproject → cannot judge, stay silent
+      // declared names differ from import names (`python-dotenv` → `import dotenv`)
+      if ([...pyDeps].some((d) => d === top || d.includes(top) || top.includes(d))) continue;
+      out.push({
+        rule: 'hallucinated-dependency', severity: 'warn', file: f, line: lineOf(m.index),
+        message: `${f} 依赖了 \`${top}\`，但它既不在 requirements.txt/pyproject 里，也不是标准库。`,
+        why: '幻觉依赖/漏加依赖：本地可能因为某个已装包侥幸跑通，CI 或换机器就 ImportError。',
+        evidence: `module=${top}, declared=${pyDeps.size}`,
+      });
     }
   }
   return out;
@@ -850,10 +889,28 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
       if (Object.keys(map).length) psr4 = map;
     } catch { /* malformed composer.json: skip */ }
   }
+  let pyDeps = null;
+  const reqSrc = read('requirements.txt');
+  const pyprojSrc = read('pyproject.toml');
+  if (reqSrc || pyprojSrc) {
+    const set = new Set();
+    if (reqSrc) {
+      for (const line of reqSrc.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t || t.startsWith('#') || t.startsWith('-')) continue;
+        const m = /^([A-Za-z_][\w.-]*)/.exec(t);
+        if (m) set.add(m[1].toLowerCase().replace(/-/g, '_'));
+      }
+    }
+    if (pyprojSrc) {
+      for (const m of pyprojSrc.matchAll(/^\s*"?([A-Za-z_][\w.-]*)"?\s*[<>=~!\[]/gm)) set.add(m[1].toLowerCase().replace(/-/g, '_'));
+    }
+    if (set.size) pyDeps = set;
+  }
   for (const file of changedFiles) {
     const src = read(file);
     if (!src) continue;
-    findings.push(...hallucinationFindings(file, src, { indexedFiles, deps: deps.size ? deps : null, psr4 }));
+    findings.push(...hallucinationFindings(file, src, { indexedFiles, deps: deps.size ? deps : null, psr4, pyDeps }));
   }
 
   // ── front-end / back-end boundary (needs the other repo's index) ───────────
