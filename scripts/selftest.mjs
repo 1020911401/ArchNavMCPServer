@@ -191,7 +191,7 @@ check('test-select：改动 → 该跑哪些测试（含 depth 排序）', () =>
 // ── 5. review-rules：任务书 + 规则命中 + SARIF + markdown ───────────────────
 const sarifPath = path.join(TMP, 'review.sarif');
 const mdPath = path.join(TMP, 'review.md');
-const rr = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--impact', '--deep', '--duplication',
+const rr = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--mode', 'deep', '--impact', '--deep', '--duplication',
   '--dup-kinds', 'renamed,similar', '--markdown', mdPath, '--sarif', sarifPath, '--json'], TMP);
 let rrJson = {};
 try { rrJson = JSON.parse(rr.stdout); } catch { /* reported below */ }
@@ -277,6 +277,18 @@ check('deep：跨仓接口匹配（前端 request ↔ 后端路由）', () => {
 check('review-rules：--gate 在 error 级发现时 exit 1', () => {
   const r = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--gate'], TMP);
   return { ok: r.status === 1, evidence: `exit=${r.status}（注入了 raw SQL/dangerous 等 error 级）` };
+});
+check('review-rules：默认 brief 便宜、standard 更全（模式切换生效）', () => {
+  const brief = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged'], TMP);
+  const std = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--standard'], TMP);
+  const briefJson = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--json'], TMP);
+  let compact = {};
+  try { compact = JSON.parse(briefJson.stdout); } catch { /* below */ }
+  const ok = brief.stdout.length < std.stdout.length && compact.mode === 'brief' && compact.tier === 'core';
+  return {
+    ok,
+    evidence: `brief=${brief.stdout.length}B standard=${std.stdout.length}B mode=${compact.mode} tier=${compact.tier} findings=${compact.findings?.length}`,
+  };
 });
 check('package.json：test 脚本用 tests/**/*.test.mjs（避免把 scripts 当测试）', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
