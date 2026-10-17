@@ -171,6 +171,7 @@ git clone https://github.com/1020911401/ArchNavMCPServer.git
 cd ArchNavMCPServer && npm install
 
 node src/index.js analyze /path/to/your-project      # build the index
+node src/index.js analyze . --ignore "bench/**,**/vendor/**"   # keep fixtures/vendored code out
 node src/index.js locate "getOrderById"              # symbol → file:line + confidence
 node src/index.js arch                               # architecture layers
 node src/index.js callers "showSelectOptions" \

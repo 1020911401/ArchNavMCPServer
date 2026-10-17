@@ -226,8 +226,15 @@ const TOOLS = [
   },
   {
     name: 'archnav_analyze',
-    description: '[ArchNav] Build or update the architecture knowledge graph index.',
-    inputSchema: { type: 'object', properties: { projectDir: { type: 'string' } }, required: ['projectDir'] },
+    description: '[ArchNav] Build or update the architecture knowledge graph index. `ignore` takes gitignore-ish globs (comma-separated) so vendored trees, fixtures or generated code stay out of the index; the patterns are recorded in the index so `status` honours them too.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectDir: { type: 'string' },
+        ignore: { type: 'string', description: 'Comma-separated globs to exclude, e.g. "bench/**,**/vendor/**,**/node_modules/**"' },
+      },
+      required: ['projectDir'],
+    },
   },
   {
     name: 'archnav_fusion_calls',
@@ -475,9 +482,10 @@ async function handleToolCall(name, args) {
     }
 
     case 'archnav_analyze': {
-      const result = await analyze(dir, {});
+      const result = await analyze(dir, { ignore: args.ignore });
       saveIndex(dir, result._raw || result);
-      return mkText(`✅ ${result.files} files, ${result.symbols} symbols, ${result.layers} layers`);
+      const ignored = (result.ignore || []).length;
+      return mkText(`✅ ${result.files} files, ${result.symbols} symbols, ${result.layers} layers${ignored ? `, ${ignored} ignore pattern(s)` : ''}`);
     }
   }
 
