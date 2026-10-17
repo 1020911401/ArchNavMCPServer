@@ -18,6 +18,33 @@ ArchNav is an **architecture-aware code navigation** system for AI agents (Herme
 - **Graph-only impact** — `impact` walks real `DEPENDS_ON` edges 1–2 hops backwards (no filename guessing): a controller method surfaces its route, a component method surfaces the pages that render it.
 - **Fused multi-engine** — optional adapters for **CodeGraph** and **GitNexus**; `callers` / `fusion_calls` fan out to `auto | codegraph | gitnexus | archnav` and merge, deduplicate and re-score the results. GitNexus starts lazily and is only needed for the deeper ops (flows, clusters, risk grading).
 
+### 🔍 Review pipeline (diff-scoped)
+
+The same index powers a review layer that answers *what did this change touch, which
+rules does it break, which tests must run, how risky is it* — one command, one checklist:
+
+```bash
+node scripts/review-rules.mjs . --scope staged \
+  --impact --deep --duplication --dup-kinds renamed,similar \
+  --markdown review.md --sarif review.sarif --gate
+```
+
+- **Task sheet** — 40 rules rendered as 通过 / 命中(N) / 不适用(+原因), plus 影响面
+  (entry points, blast radius, explainable risk), 重复代码 (exact/renamed/similar/gap
+  clone kinds) and 代码库深查 (flows, clusters, cycles, module risk). `--json` for tooling.
+- **Gates** — `--gate` (error-severity findings), `--impact-max-risk`,
+  `--module-max-risk`, `--dup-max-new-clones` (only clones *this* change introduces,
+  measured against a jscpd baseline).
+- **Outputs** — SARIF 2.1.0 for GitHub code scanning, `::error file=…,line=…`
+  annotations for the job log, and a markdown task sheet for the PR comment /
+  step summary.
+- **Test selection** — `node scripts/test-select.mjs . --scope staged` lists the tests
+  the change actually reaches (graph edges, depth ordered, uncovered symbols named).
+- **Self-check** — `node scripts/selftest.mjs` exercises 25 designed behaviours on a
+  throwaway repo and prints ✅/❌ with the evidence it used.
+
+CI runs the whole thing on pull requests and pushes: [`.github/workflows/review.yml`](.github/workflows/review.yml).
+
 ### ✨ Features
 
 Measured on two real fixtures (Laravel 286 PHP + 76 Blade; uni-app 269 Vue + 64 JS) — see [`bench/README.md`](bench/README.md) for the harness and raw numbers.
