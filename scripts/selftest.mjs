@@ -286,8 +286,10 @@ check('review-rules：默认 brief 便宜、standard 更全（模式切换生效
   let compact = {};
   try { compact = JSON.parse(briefJson.stdout); } catch { /* below */ }
   // boundary constraint #5: the default path must not carry the deep analysis
-  const noDeepInBrief = !brief.stdout.includes('代码库深查') && !brief.stdout.includes('影响面');
-  const deepPresent = deepOut.stdout.includes('代码库深查');
+  // (match the checklist *group markers*, not the words: rule messages mention
+  // "影响面" in prose, which is legitimate)
+  const noDeepInBrief = !brief.stdout.includes('── 影响面 ──') && !brief.stdout.includes('── 代码库深查 ──');
+  const deepPresent = deepOut.stdout.includes('── 代码库深查 ──');
   const ok = brief.stdout.length < std.stdout.length && compact.mode === 'brief' && compact.tier === 'core' && noDeepInBrief && deepPresent;
   return {
     ok,
