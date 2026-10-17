@@ -272,6 +272,16 @@ const VALIDATION_PRESENT_RE = /(->validate\s*\(|extends\s+FormRequest|validate\s
 const TAG_RE = /<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
 
 /**
+ * Blank *template literal* contents (backticks only, length preserved). Our own
+ * scripts write source code into template strings (fixture builders, rule tables,
+ * regex sources); scanning those as if they were code produced false findings —
+ * e.g. `tests/selftest.mjs` "imports" a controller file it only writes out.
+ */
+export function blankTemplateLiterals(src) {
+  return src.replace(/`(?:\\[\s\S]|[^\\`])*`/g, (m) => '`' + ' '.repeat(Math.max(0, m.length - 2)) + '`');
+}
+
+/**
  * Blank out string/comment *contents* (length preserved, so offsets stay valid)
  * before matching operator-level traps: `where('x', '!=', 'y')` and `'a' == 'b'`
  * are operators inside literals, not loose comparisons.
@@ -464,8 +474,11 @@ export function scanContent(file, src) {
     }
   }
 
-  if (JS_OR_VUE) {
-    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|\bdebugger\b/.exec(src);
+  // A shebang means this file *is* a CLI: console.log is its interface, not a
+  // leftover debug statement (this is how the checker flagged its own scripts).
+  const isCli = /^#!/.test(src);
+  if (JS_OR_VUE && !isCli) {
+    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(src);
     if (dbg) {
       findings.push({
         rule: 'js-debug-left-on', severity: 'warn', file: f, line: lineOf(dbg.index),
@@ -487,7 +500,10 @@ export function scanContent(file, src) {
     }
   }
 
-  const emptyCatch = /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(src);
+  // "empty catch" and TODO stubs are code smells — scanning prose (README, rule
+  // tables that *describe* `catch {}`) flagged the documentation instead.
+  const isCode = /\.(php|js|ts|mjs|cjs|jsx|tsx|vue|py)$/i.test(file);
+  const emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(src) : null;
   if (emptyCatch) {
     findings.push({
       rule: 'empty-catch', severity: 'warn', file: f, line: lineOf(emptyCatch.index),
@@ -497,7 +513,9 @@ export function scanContent(file, src) {
     });
   }
 
-  const todo = /\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|先这样|临时方案|not implemented/.exec(src);
+  // TODO/FIXME only counts in a comment — the rule's own pattern lives in source
+  // code, and matching that made the checker flag itself.
+  const todo = isCode ? /(?:\/\/|#|\/\*|<!--|\*)[^\n]{0,80}?\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|先这样|临时方案|not implemented/.exec(src) : null;
   if (todo) {
     findings.push({
       rule: 'ai-todo-left', severity: 'info', file: f, line: lineOf(todo.index),
@@ -519,6 +537,13 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyD
   const out = [];
   if (!src) return out;
   const f = norm(file);
+  // Only code is scanned: a Markdown file (or a template string inside a script)
+  // is prose *about* code, and treating it as an import/dependency source produced
+  // false findings on this repo's own docs and fixture builders.
+  const isCodeFile = /\.(js|ts|mjs|cjs|jsx|tsx|vue|py|php)$/i.test(f);
+  if (!isCodeFile) return out;
+  const isJsLike = /\.(js|ts|mjs|cjs|jsx|tsx|vue)$/i.test(f);
+  const srcScan = isJsLike ? blankTemplateLiterals(src) : src;
   const dir = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '';
   const lineOf = (idx) => src.slice(0, idx).split(/\r?\n/).length;
   const exists = (p) => indexedFiles.has(norm(p));
@@ -529,7 +554,7 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyD
   const ASSET_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|mp3|mp4|wav|avi|css|scss|sass|less|styl|ttf|woff2?|eot|otf|md|txt|html?)$/i;
   const tryResolve = (spec) => [...EXT.map((e) => `${spec}${e}`), ...INDEX.map((e) => `${spec}${e}`)].filter(exists);
 
-  for (const m of src.matchAll(/(?:import|export)[^'"\n]*?from\s*['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)|import\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+  for (const m of srcScan.matchAll(/^[ \t]*(?:import|export)[^'"\n]*?from\s*['"]([^'"]+)['"]|(?<![\w.])require\(\s*['"]([^'"]+)['"]\s*\)|(?<![\w.])import\(\s*['"]([^'"]+)['"]\s*\)/gm)) {
     const spec = m[1] || m[2] || m[3];
     if (!spec) continue;
     if (ASSET_RE.test(spec)) continue; // images/styles/fonts are not code-index entries
@@ -649,11 +674,18 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
       .map((e) => norm(e.to).slice(5))
   );
   const defsByName = new Map();
+  const exportedByName = new Map();
   for (const s of symbols) {
     const k = s.name;
     if (!defsByName.has(k)) defsByName.set(k, []);
     defsByName.get(k).push(norm(s.file));
+    if (s.exported) exportedByName.set(k, (exportedByName.get(k) || 0) + 1);
   }
+  // Same-name is only real ambiguity when the *exported* definitions collide: every
+  // script here has its own local `parseArgs`/`main`/`norm`, and flagging those
+  // buried the real cases (measured: 11 findings, ~2 of them meaningful).
+  const hasExportInfo = symbols.some((s) => typeof s.exported === 'boolean');
+  const ambiguous = (name) => defsByName.get(name)?.length >= 2 && (!hasExportInfo || (exportedByName.get(name) || 0) >= 2);
   const classFile = new Map();
   for (const s of symbols) if ((s.kind || '').includes('class') || /^[A-Z]/.test(s.name || '')) {
     if (!classFile.has(s.name)) classFile.set(s.name, norm(s.file));
@@ -725,7 +757,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     if (r.kind !== 'symbol') continue;
     const n = r.symbol || '';
     const defs = defsByName.get(n) || [];
-    if (defs.length < 2 || LIFECYCLE_NAME_RE.test(n)) continue;
+    if (!ambiguous(n) || LIFECYCLE_NAME_RE.test(n)) continue;
     const lang = norm(r.file).endsWith('.php') ? 'php' : null;
     const id = lang === 'php' ? 'php-same-name-method' : 'js-same-name-method';
     if (seenSameName.has(`${id}:${n}`)) continue;
@@ -739,7 +771,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   }
   for (const s of changedSymbols) {
     const defs = defsByName.get(s.symbol) || [];
-    if (defs.length < 2 || LIFECYCLE_NAME_RE.test(s.symbol)) continue;
+    if (!ambiguous(s.symbol) || LIFECYCLE_NAME_RE.test(s.symbol)) continue;
     const isPhp = norm(s.file).endsWith('.php');
     const id = isPhp ? 'php-same-name-method' : 'js-same-name-method';
     if (seenSameName.has(`${id}:${s.symbol}`)) continue;
