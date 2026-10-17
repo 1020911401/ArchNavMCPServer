@@ -86,6 +86,12 @@ export default {
 };
 </script>
 `,
+  'internal/store/store.go': `package store
+
+func Load(id string) {
+    return fetch(id)
+}
+`,
   'tests/demo.test.mjs': `import test from 'node:test';
 import assert from 'node:assert/strict';
 import { index } from '../app/Http/Controllers/DemoController.php';
@@ -116,6 +122,12 @@ const vue = path.join(TMP, 'pages/demo/index.vue');
 fs.writeFileSync(vue, fs.readFileSync(vue, 'utf8').replace(
   '    <view v-for="item in list">{{ item.name }}</view>\n',
   '    <view v-for="item in list">{{ item.name }}</view>\n    <view v-html="raw"></view>\n',
+));
+// Go: discarded return value + panic outside main + SQL built by concatenation
+const goFile = path.join(TMP, 'internal/store/store.go');
+fs.writeFileSync(goFile, fs.readFileSync(goFile, 'utf8').replace(
+  '    return fetch(id)',
+  '    rows, _ := db.Query("select * from t where id = " + id)\n    if rows == nil {\n        panic("no rows")\n    }\n    return rows',
 ));
 // a fresh untracked file that copies a block (duplication + untracked detection)
 const copied = fs.readFileSync(path.join(TMP, 'app/Http/Controllers/OtherController.php'), 'utf8');
@@ -205,6 +217,13 @@ check('review-rules：命中设计中的规则（raw SQL / dd / v-html / 未校�
   const need = ['php-raw-sql-interpolation', 'php-debug-left-on', 'vue-v-html', 'php-unvalidated-mass-input', 'backup-file-changed'];
   const got = need.filter((n) => ids.has(n));
   return { ok: got.length === need.length, evidence: `命中 ${got.length}/${need.length}：${got.join(', ')}` };
+});
+check('review-rules：Go 规则在真实 Go 源上命中（值丢弃/panic/拼接 SQL）', () => {
+  const ids = new Set((rrJson.findings || []).map((f) => f.rule));
+  const need = ['go-ignored-error', 'go-panic-in-library', 'go-sql-injection'];
+  const got = need.filter((n) => ids.has(n));
+  const row = (rrJson.checklist?.rows || []).find((r) => r.id === 'go-sql-injection');
+  return { ok: got.length === 3 && row?.status === 'hit', evidence: `命中 ${got.join(', ')}；任务书 Go 行 status=${row?.status}` };
 });
 check('review-rules：不适用条目都带原因', () => {
   const na = (rrJson.checklist?.rows || []).filter((r) => r.status === 'na');

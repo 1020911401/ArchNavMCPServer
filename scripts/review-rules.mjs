@@ -619,26 +619,28 @@ export function scanContent(file, src) {
 
   // ── Go: the two mistakes that cost real money in services ───────────────────
   if (/\.go$/i.test(file)) {
-    const ignored = /,\s*_\s*:?=\s*\w|\(\s*_\s*\)/.exec(src);
+    const ignoredMatches = [...src.matchAll(/,\s*_\s*:?=\s*\w|\(\s*_\s*\)/g)];
+    const ignored = ignoredMatches[0];
     if (ignored) {
       findings.push({
         rule: 'go-ignored-error', severity: 'warn', file: f, line: lineOf(ignored.index),
-        message: `${f}:${lineOf(ignored.index)} 丢弃了一个返回值（\`${ignored[0].replace(/\s+/g, ' ').slice(0, 40)}\`）。`,
+        message: `${f}:${lineOf(ignored.index)} 丢弃返回值 ${ignoredMatches.length} 处，例如 \`${ignored[0].replace(/\s+/g, ' ').slice(0, 40)}\`。`,
         why: 'Go 里 `, _ :=` 最常见的用途就是丢掉 error：线上表现为"什么都没发生"，而错误被永久吞掉。至少要 log 或显式注释为什么安全。',
-        evidence: `matched: ${ignored[0].replace(/\s+/g, ' ').slice(0, 50)}`,
+        evidence: `occurrences=${ignoredMatches.length}, first=${ignored[0].replace(/\s+/g, ' ').slice(0, 50)}`,
       });
     }
     const isMainPkg = /^\s*package\s+main\b/m.test(src);
-    const panics = /\bpanic\s*\(/.exec(src);
+    const panicMatches = [...src.matchAll(/\bpanic\s*\(/g)];
+    const panics = panicMatches[0];
     if (panics && !isMainPkg) {
       findings.push({
         rule: 'go-panic-in-library', severity: 'warn', file: f, line: lineOf(panics.index),
-        message: `${f}:${lineOf(panics.index)} 非 main 包里调用 panic。`,
+        message: `${f}:${lineOf(panics.index)} 非 main 包里调用 panic ${panicMatches.length} 处。`,
         why: '库/business 层 panic 会把调用方（可能是 HTTP handler）整条请求打挂，而且没法被调用方兜住；返回 error 让上层决定。',
-        evidence: `package=non-main, matched=${panics[0]}`,
+        evidence: `package=non-main, occurrences=${panicMatches.length}`,
       });
     }
-    const sqlConcat = /\b(?:db|tx|conn)\.(?:Query|QueryContext|Exec|ExecContext|Raw)\s*\([^)]*(?:fmt\.Sprintf|\+|\$\{)/.exec(src.replace(/\n/g, ' '));
+    const sqlConcat = /\b(?:db|tx|conn)\.(?:query|QueryContext|Query|exec|ExecContext|Exec|raw|Raw)\s*\([^)]*(?:fmt\.Sprintf|\+|\$\{)/i.exec(src.replace(/\n/g, ' '));
     if (sqlConcat) {
       findings.push({
         rule: 'go-sql-injection', severity: 'error', file: f, line: lineOf(sqlConcat.index),
