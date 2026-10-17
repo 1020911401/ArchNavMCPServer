@@ -16,7 +16,7 @@ ArchNav is an **architecture-aware code navigation** system for AI agents (Herme
 - **Recall layer for what plain ASTs miss** — Blade template calls (Laravel), alias imports (`@/…`), calls nested inside Vue/JS callbacks, Laravel routes, and the uni-app page/component layer. Every edge carries `source_kind` (`ast` / `template` / `callback` / `route` / `navigation` / `component` / `heuristic`) plus a confidence, so consumers can down-weight guesses.
 - **Diff-driven change impact** — `changes` maps a git diff (unstaged / staged / all / vs a base ref) to the symbols it touches and everything that breaks; without git it falls back to the index's content-drift signal and says so.
 - **Graph-only impact** — `impact` walks real `DEPENDS_ON` edges 1–2 hops backwards (no filename guessing): a controller method surfaces its route, a component method surfaces the pages that render it.
-- **Fused multi-engine** — optional adapters for **CodeGraph** and **GitNexus**; `callers` / `fusion_calls` fan out to `auto | codegraph | gitnexus | archnav` and merge, deduplicate and re-score the results.
+- **Optional external engines — cross-check only** — the **CodeGraph** and **GitNexus** adapters remain available for comparison (an explicit `engine`, or `engine: auto` in MCP), but **nothing in the pipeline requires them**: the default engine is ArchNav's own graph, and the local deep ops above cover flows / clusters / risk / cross-repo. `bench/` keeps the measured three-way comparison as *evidence*, not as a runtime dependency.
 
 ### 🚧 Local deep ops, and the boundary they must respect
 
