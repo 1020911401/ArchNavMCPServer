@@ -420,7 +420,7 @@ function changedLinesFromGit(dirPath, scope = 'unstaged', baseRef = null, timeou
   // assistant adds. Without this, a brand-new file was invisible to the whole
   // review path (measured before the fix: 3 changed files instead of 6, all
   // new files missing). Ranges stay null → the file counts as wholly changed.
-  const untracked = spawnSync('git', ['ls-files', '--others', '--exclude-standard'], {
+  const untracked = spawnSync('git', ['-c', 'core.quotepath=false', 'ls-files', '--others', '--exclude-standard'], {
     cwd: dirPath, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   if (!untracked.error && untracked.status === 0) {

@@ -53,6 +53,11 @@ jobs:
       - name: Build index
         run: node src/index.js analyze .
 
+      # Functional self-check: every designed capability, on a throwaway repo
+      # (fixture-dependent checks skip themselves when bench/ is absent).
+      - name: Self-test (designed capabilities)
+        run: node scripts/selftest.mjs
+
       - name: Review task sheet (rules + duplication)
         id: review
         continue-on-error: true
