@@ -175,6 +175,12 @@ export function buildDupChecklist({ summary = {}, opts = {} } = {}) {
       hits: summary.new_clones || 0,
       reason: baselineGate ? null : '未用 --changed/--baseline：跑的是全仓存量，不归本次改动',
     },
+    ...(summary.provenance ? [{
+      id: 'dup.provenance', group: '重复代码', family: 'dup', title: '改动出处：新增行里有多少是复制来的',
+      status: summary.provenance.copied_lines ? 'hit' : 'pass',
+      hits: summary.provenance.copied_lines,
+      reason: `新增 ${summary.provenance.added_lines} 行，其中 ${summary.provenance.meaningful_added_lines} 行有意义、${summary.provenance.copied_lines} 行与仓库既有行逐字相同（${(summary.provenance.ratio * 100).toFixed(1)}%）${summary.provenance.renames.length ? `；git 识别到 ${summary.provenance.renames.length} 处改名/复制` : ''}`,
+    }] : []),
     {
       id: 'dup.percent', group: '重复代码', family: 'dup', title: '仓库级重复率',
       status: opts.maxPercent !== null && opts.maxPercent !== undefined && exceedsThreshold(summary, opts.maxPercent) ? 'hit' : 'pass',
@@ -192,6 +198,67 @@ export function buildDupChecklist({ summary = {}, opts = {} } = {}) {
   return { rows, summary: summaryOut, meta: { percent: summary.percent, new_clones: summary.new_clones, by_kind: allKinds, new_by_kind: summary.new_by_kind || {} } };
 }
 
+/**
+ * Provenance — the GitClear-style question "how much of this change is copied
+ * from elsewhere rather than written or moved?". jscpd answers "do these blocks
+ * look alike"; this answers "did these added lines already exist in the repo",
+ * which is a property of the diff, not of the text. Both are reported separately
+ * because they disagree (a moved block is a clone jscpd sees and provenance does
+ * not count as copy).
+ *
+ * Pure: give it the added lines, a corpus of existing lines, and git's rename
+ * summary; it returns counts. `--provenance` on the CLI builds those inputs.
+ */
+export function analyzeProvenance({ addedLines = [], corpus = new Set(), summary = '' } = {}) {
+  const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+  const meaningful = addedLines.map(norm).filter((l) => l.length >= 12 && !/^(\/\/|#|\*|<!--|\/\*)/.test(l));
+  const copied = meaningful.filter((l) => corpus.has(l));
+  const renames = [...String(summary).matchAll(/^\s*(rename|copy)\s+([^\n]+)$/gm)].map((m) => m[0].trim());
+  return {
+    added_lines: addedLines.length,
+    meaningful_added_lines: meaningful.length,
+    copied_lines: copied.length,
+    ratio: meaningful.length ? copied.length / meaningful.length : 0,
+    samples: [...new Set(copied)].slice(0, 5),
+    renames,
+  };
+}
+
+/** Build the inputs for analyzeProvenance from git (added lines + existing corpus). */
+export function provenanceFromGit(dir, { scope = 'unstaged', base = null } = {}) {
+  const isWin = process.platform === 'win32';
+  const runGit = (args) => {
+    const full = ['-c', 'core.quotepath=false', ...args];
+    return isWin
+      ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', ['git', ...full].join(' ')], { cwd: dir, encoding: 'utf8', windowsHide: true })
+      : spawnSync('git', full, { cwd: dir, encoding: 'utf8', windowsHide: true });
+  };
+  const diffArgs = ['diff', '--unified=0', '--no-color'];
+  if (scope === 'staged') diffArgs.push('--cached');
+  else if (scope === 'all') diffArgs.push('HEAD');
+  else if (scope === 'compare') { if (!base) return { error: 'scope compare needs --base' }; diffArgs.push(`${base}...HEAD`); }
+  const diff = runGit(diffArgs);
+  if (diff.status !== 0) return { error: (diff.stderr || 'git diff failed').split('\n')[0] };
+  const addedLines = [];
+  const touched = new Set();
+  for (const line of String(diff.stdout || '').split(/\r?\n/)) {
+    if (line.startsWith('+++ ')) { const p = line.slice(4).trim(); if (p !== '/dev/null') touched.add(p.replace(/^[ab]\//, '')); continue; }
+    if (line.startsWith('+') && !line.startsWith('+++')) addedLines.push(line.slice(1));
+  }
+  const ls = runGit(['ls-files']);
+  const corpus = new Set();
+  const norm = (s) => String(s).replace(/\s+/g, ' ').trim();
+  for (const rel of String(ls.stdout || '').split(/\r?\n/)) {
+    if (!rel.trim() || touched.has(rel)) continue;
+    if (!/\.(php|js|ts|tsx|mjs|cjs|vue|py|go|rs|java|rb|sh)$/i.test(rel)) continue;
+    let txt = '';
+    try { txt = fs.readFileSync(path.join(dir, rel), 'utf8'); } catch { continue; }
+    for (const l of txt.split(/\r?\n/)) { const n = norm(l); if (n.length >= 12) corpus.add(n); }
+  }
+  const summary = runGit(['diff', '-M', '-C', '--find-copies-harder', '--summary', ...(scope === 'staged' ? ['--cached'] : scope === 'all' ? ['HEAD'] : [])]);
+  return { ...analyzeProvenance({ addedLines, corpus, summary: String(summary.stdout || '') }), corpus_lines: corpus.size, files_compared: touched.size };
+}
+
 /** Run jscpd + normalise, so other scripts can reuse this without spawning twice. */
 export function runDuplication(dir, opts = {}) {
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jscpd-'));
@@ -204,7 +271,7 @@ export function runDuplication(dir, opts = {}) {
 function parseArgs(argv) {
   const out = {
     dir: '.', minLines: 10, minTokens: 70, scope: null, changedOnly: false,
-    maxPercent: null, json: false, sarif: null, github: false, gate: false, includeVendored: false,
+    maxPercent: null, json: false, sarif: null, github: false, gate: false, includeVendored: false, provenance: false,
     kinds: [], similarity: 0.8, maxGapLines: 4, mode: null, skipComments: false,
     changed: false, baseline: null, baselineFromRef: null, blame: false, maxNewClones: null,
   };
@@ -215,6 +282,7 @@ function parseArgs(argv) {
     else if (a === '--scope') out.scope = argv[++i];
     else if (a === '--changed-only') out.changedOnly = true;
     else if (a === '--changed') out.changed = true;
+    else if (a === '--provenance') out.provenance = true;
     else if (a === '--kind') out.kinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
     else if (a === '--similarity') { out.similarity = Number(argv[++i]); if (!out.kinds.includes('similar')) out.kinds.push('similar'); }
     else if (a === '--max-gap-lines') { out.maxGapLines = Number(argv[++i]); if (!out.kinds.includes('gap')) out.kinds.push('gap'); }
@@ -300,6 +368,25 @@ async function main() {
     process.exit(3);
   }
   const { findings, summary } = normalizeJscpd(run.report, { changedFiles, minLines: 0 });
+  // provenance is diff-based, not clone-based: it answers how much of the change
+  // already existed in the repo (copied) vs was moved (git rename/copy summary)
+  if (opts.provenance) {
+    const scope = opts.scope || (opts.changed ? 'unstaged' : 'all');
+    const prov = provenanceFromGit(dir, { scope, base: opts.base });
+    if (prov.error) console.error(`provenance skipped: ${prov.error}`);
+    else {
+      summary.provenance = prov;
+      if (prov.copied_lines) {
+        findings.push({
+          rule: 'duplication-provenance', severity: 'info', source: 'provenance',
+          file: null, line: null,
+          message: `新增行里 ${prov.copied_lines}/${prov.meaningful_added_lines} 行与仓库既有行逐字相同（${(prov.ratio * 100).toFixed(1)}%）。`,
+          why: 'GitClear 的招牌口径（复制行 vs 搬移行）：复制行越多，维护债与"同一 bug 修一处漏一处"的风险越高；git 识别到的改名/复制是搬移，不算复制。',
+          evidence: `copied=${prov.copied_lines}, new=${prov.meaningful_added_lines - prov.copied_lines}, renames=${prov.renames.length}, corpus=${prov.corpus_lines} 行`,
+        });
+      }
+    }
+  }
   const checklist = buildDupChecklist({ summary, opts });
   const out = { dir, scope: opts.scope, changed_only: Boolean(changedFiles), native_changed: nativeScope.changed || nativeScope.changedOnly, summary, checklist: { summary: checklist.summary, rows: checklist.rows }, findings };
   if (opts.json) console.log(JSON.stringify(out, null, 2));

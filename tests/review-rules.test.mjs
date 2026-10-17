@@ -69,9 +69,95 @@ test('arity: missing required args warn, extra args are info, ambiguity stays si
   assert.deepEqual(arityFindings('app/A.php', 'getNavigation();', { symbols }), []);
 });
 
+test('new language rules: PHP read-modify-write, Vue prop/v-if/timer, JS dead bindings, Go', () => {
+  // PHP: read-modify-write on one attribute (lost update)
+  const rmw = scanContent('app/Http/Controllers/BalanceController.php', '<?php\n$user->points = $user->points + 10;\n$user->save();\n');
+  assert.equal(rmw.find((x) => x.rule === 'php-read-modify-write').severity, 'warn');
+  const rmwOnly = scanContent('app/A.php', "<?php $user->points = $user->points + 10;");
+  assert.equal(rmwOnly.filter((x) => x.rule === 'php-read-modify-write').length, 1);
+
+  // Vue: mutating a declared prop
+  const vue = `<template><view>{{ label }}</view></template>
+<script>
+export default {
+  props: { label: String, count: { type: Number, default: 0 } },
+  methods: { bump() { this.count = this.count + 1; } },
+};
+</script>`;
+  const propFindings = scanContent('components/Badge.vue', vue);
+  assert.equal(propFindings.filter((x) => x.rule === 'vue-mutating-props').length, 1);
+  assert.match(propFindings.find((x) => x.rule === 'vue-mutating-props').message, /count/);
+  // local data mutation is fine
+  assert.deepEqual(scanContent('components/Badge.vue', vue.replace('props:', 'data:').replace('this.count = this.count + 1;', 'this.n = 1;')).filter((x) => x.rule === 'vue-mutating-props'), []);
+
+  // Vue: v-if + v-for on the same element
+  const both = scanContent('pages/a/index.vue', '<view v-for="i in list" v-if="i.ok">{{ i.x }}</view>');
+  assert.equal(both.filter((x) => x.rule === 'vue-v-if-with-v-for').length, 1);
+  assert.deepEqual(scanContent('pages/a/index.vue', '<view v-for="i in list" :key="i.id">{{ i.x }}</view>').filter((x) => x.rule === 'vue-v-if-with-v-for'), []);
+
+  // Vue: interval without a clear
+  assert.equal(scanContent('pages/a/index.vue', '<script>export default { onLoad() { setInterval(() => this.tick(), 1000); } };</script>').filter((x) => x.rule === 'vue-timer-leak').length, 1);
+  assert.deepEqual(scanContent('pages/a/index.vue', '<script>export default { onUnload() { clearInterval(this.t); } };</script>').filter((x) => x.rule === 'vue-timer-leak'), []);
+
+  // JS: unused import (warn) and unused local (info); real use is silent
+  const dead = scanContent('utils/a.js', "import { unusedThing, usedThing } from './x';\nusedThing();\nconst neverRead = 1;");
+  const deadRules = dead.filter((x) => x.rule === 'js-unused-binding');
+  assert.equal(deadRules.filter((x) => x.severity === 'warn').length, 1);
+  assert.equal(deadRules.filter((x) => x.severity === 'info').length, 1);
+  assert.match(deadRules.find((x) => x.severity === 'warn').message, /unusedThing/);
+  assert.deepEqual(scanContent('utils/a.js', "import { usedThing } from './x';\nconst used = 1;\nusedThing(used);").filter((x) => x.rule === 'js-unused-binding'), []);
+
+  // Go: ignored return value, panic in a library, SQL built by concatenation
+  const go = scanContent('internal/store/store.go', `package store
+
+func Load(id string) {
+    rows, _ := db.Query("select * from t where id = " + id)
+    if rows == nil {
+        panic("no rows")
+    }
+}
+`);
+  const goRules = go.map((x) => x.rule);
+  assert.ok(goRules.includes('go-ignored-error'), 'discarded return value');
+  assert.ok(goRules.includes('go-panic-in-library'), 'panic outside main');
+  assert.ok(goRules.includes('go-sql-injection'), 'concatenated SQL');
+  assert.equal(go.find((x) => x.rule === 'go-sql-injection').severity, 'error');
+  assert.deepEqual(scanContent('cmd/app/main.go', 'package main\nfunc main() { panic("fatal") }').filter((x) => x.rule === 'go-panic-in-library'), []);
+});
+
+test('PHP IDOR: parameterised route whose controller has no visible authorization', () => {
+  const index = makeIndex({
+    symbols: [
+      { id: 'show', name: 'show', kind: 'function', file: 'app/Http/Controllers/PatientController.php', line_start: 20, line_end: 30 },
+      { id: 'PatientController', name: 'PatientController', kind: 'class', file: 'app/Http/Controllers/PatientController.php', line_start: 5, line_end: 40 },
+    ],
+    unresolvedRoutes: [],
+    edges: [],
+    nodes: [
+      { id: 'route:GET patient/{patient}', type: 'route', uri: 'patient/{patient}', method: 'GET', file: 'routes/web.php', line: 75, controller: 'PatientController', action: 'show' },
+      { id: 'route:GET patient/create', type: 'route', uri: 'patient/create', method: 'GET', file: 'routes/web.php', line: 74, controller: 'PatientController', action: 'create' },
+    ],
+  });
+  const changes = makeChanges({ changed_files: [{ file: 'app/Http/Controllers/PatientController.php' }] });
+  const withoutAuth = reviewFindings({
+    changes, index,
+    readFile: (rel) => (rel.endsWith('PatientController.php') ? '<?php class PatientController { public function show($patient) { return $patient; } }' : null),
+  });
+  const idor = withoutAuth.filter((f) => f.rule === 'php-idor-missing-authorization');
+  assert.equal(idor.length, 1, 'only the parameterised route is checked');
+  assert.equal(idor[0].severity, 'info', 'a prompt for review, never a verdict');
+  assert.match(idor[0].evidence, /patient\/\{patient\}/);
+
+  const withAuth = reviewFindings({
+    changes, index,
+    readFile: (rel) => (rel.endsWith('PatientController.php') ? '<?php class PatientController { public function show($patient) { $this->authorize("view", $patient); return $patient; } }' : null),
+  });
+  assert.deepEqual(withAuth.filter((f) => f.rule === 'php-idor-missing-authorization'), []);
+});
+
 test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原因)', () => {
   const metaFull = {
-    dir: '.', changedTotal: 3, changedPhp: 2, changedFront: 1, changedPy: 1, changedOther: 0, hasChanges: true,
+    dir: '.', changedTotal: 3, changedPhp: 2, changedFront: 1, changedPy: 1, changedGo: 1, changedOther: 0, hasChanges: true,
     hasBackend: false, hasComposer: true, hasPackageJson: true, hasTests: true, hasIndex: true,
     symbols: 100, freshness: 'via=git',
   };
@@ -141,7 +227,7 @@ function makeIndex(over = {}) {
     layerMap: over.layerMap ?? { departments: 'API (Controller)' },
     unresolvedRoutes: over.unresolvedRoutes ?? [],
     unresolvedPages: over.unresolvedPages ?? [],
-    knowledgeGraph: { edges: over.edges ?? [] },
+    knowledgeGraph: { edges: over.edges ?? [], nodes: over.nodes ?? [] },
   };
 }
 

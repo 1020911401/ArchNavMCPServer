@@ -525,6 +525,130 @@ export function scanContent(file, src) {
     });
   }
 
+  // ── PHP: read-modify-write on a model attribute (race / lost update) ────────
+  if (isPhp) {
+    const rmw = /\$(\w+)->(\w+)\s*=\s*\$\1->\2\s*[+\-*/]/.exec(src);
+    if (rmw) {
+      findings.push({
+        rule: 'php-read-modify-write', severity: 'warn', file: f, line: lineOf(rmw.index),
+        message: `${f}:${lineOf(rmw.index)} 读-改-写同一字段：\`${rmw[0].replace(/\s+/g, ' ').slice(0, 50)}\``,
+        why: '并发下会丢更新（两人同时读到同一个值）；用原子 increment()/decrement()，或包在事务 + lockForUpdate() 里。',
+        evidence: `matched: ${rmw[0].replace(/\s+/g, ' ').slice(0, 60)}`,
+      });
+    }
+  }
+
+  // ── Vue: prop mutation, v-if+v-for on one element, interval leak ────────────
+  if (/\.vue$/i.test(file)) {
+    const propsBlock = /props\s*:\s*(\{[\s\S]{0,600}?\}|\[[^\]]*\])/.exec(src);
+    if (propsBlock) {
+      const names = [...propsBlock[1].matchAll(/(?:^|[,{\s])([A-Za-z_$][\w$]*)\s*(?=:|,|\]|\})/g)].map((m) => m[1])
+        .filter((n) => !['props', 'type', 'default', 'required', 'validator', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Function'].includes(n));
+      for (const name of [...new Set(names)]) {
+        const mut = new RegExp(`this\\.${name}\\s*(?:\\+\\+|--|[+\\-*/]?=(?!=))`).exec(src);
+        if (mut) {
+          findings.push({
+            rule: 'vue-mutating-props', severity: 'warn', file: f, line: lineOf(mut.index),
+            message: `${f}:${lineOf(mut.index)} 直接修改 prop \`${name}\`（\`${mut[0].slice(0, 30)}\`）。`,
+            why: '子组件改 prop 是单向数据流的破坏（父组件重渲染会覆盖，或者改了没有任何反应）；应 emit 事件让父组件改，或先复制到本地 data。',
+            evidence: `prop=${name}, matched=${mut[0].slice(0, 40)}`,
+          });
+        }
+      }
+    }
+    for (const m of src.matchAll(/<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g)) {
+      const attrs = m[2];
+      if (attrs.includes('v-if') && attrs.includes('v-for')) {
+        findings.push({
+          rule: 'vue-v-if-with-v-for', severity: 'warn', file: f, line: lineOf(m.index),
+          message: `${f}:${lineOf(m.index)} 同一个 <${m[1]}> 上同时有 v-if 与 v-for。`,
+          why: 'Vue 2 里 v-for 优先于 v-if：条件晚于循环求值，既可能报错（访问不存在的变量）又把整个列表渲染一遍才筛掉。用 computed 先过滤，或把 v-if 移到外层 <template>。',
+          evidence: `tag=${m[1]}`,
+        });
+      }
+    }
+    if (/setInterval\s*\(/.test(src) && !/clearInterval\s*\(/.test(src)) {
+      const m = /setInterval\s*\(/.exec(src);
+      findings.push({
+        rule: 'vue-timer-leak', severity: 'warn', file: f, line: lineOf(m.index),
+        message: `${f}:${lineOf(m.index)} 用了 setInterval 但整个文件没有 clearInterval。`,
+        why: '页面/组件销毁后定时器还在跑：拿着已卸载组件的状态发请求、刷数据，内存与请求都泄漏。在 onUnload/beforeDestroy/unmounted 里 clearInterval。',
+        evidence: 'setInterval present, clearInterval absent',
+      });
+    }
+  }
+
+  // ── JS/Vue: bindings that are never used (AI code leaves a lot of these) ────
+  if (JS_OR_VUE) {
+    const withoutComments = src.replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length)).replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+    for (const m of src.matchAll(/^[ \t]*import\s+([^;\n]+?)\s+from\s+['"][^'"]+['"]/gm)) {
+      const clause = m[1].trim();
+      const bound = [];
+      const defaultName = /^([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
+      if (defaultName && defaultName !== 'from') bound.push(defaultName);
+      const braces = /\{([^}]*)\}/.exec(clause)?.[1];
+      if (braces) for (const part of braces.split(',')) {
+        const name = part.trim().split(/\s+as\s+/).pop()?.trim();
+        if (name && /^[A-Za-z_$][\w$]*$/.test(name)) bound.push(name);
+      }
+      for (const name of bound) {
+        const uses = [...withoutComments.matchAll(new RegExp(`\\b${name}\\b`, 'g'))].length;
+        if (uses <= 1) {
+          findings.push({
+            rule: 'js-unused-binding', severity: 'warn', file: f, line: lineOf(m.index),
+            message: `${f}:${lineOf(m.index)} import 了 \`${name}\` 但整个文件没再用过。`,
+            why: '未使用的 import：AI 生成/改写的常见残留，增大打包体积、让"这个文件依赖谁"变假，也容易掩盖真正少 import 的东西。',
+            evidence: `name=${name}, occurrences=${uses}`,
+          });
+        }
+      }
+    }
+    for (const m of src.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm)) {
+      const name = m[1];
+      const uses = [...withoutComments.matchAll(new RegExp(`\\b${name}\\b`, 'g'))].length;
+      if (uses <= 1) {
+        findings.push({
+          rule: 'js-unused-binding', severity: 'info', file: f, line: lineOf(m.index),
+          message: `${f}:${lineOf(m.index)} 声明了 \`${name}\` 但从未被读取。`,
+          why: '死绑定：很可能是重构后忘了删，或者本该用这个变量却写了别的名字。',
+          evidence: `binding=${name}, occurrences=${uses}`,
+        });
+      }
+    }
+  }
+
+  // ── Go: the two mistakes that cost real money in services ───────────────────
+  if (/\.go$/i.test(file)) {
+    const ignored = /,\s*_\s*:?=\s*\w|\(\s*_\s*\)/.exec(src);
+    if (ignored) {
+      findings.push({
+        rule: 'go-ignored-error', severity: 'warn', file: f, line: lineOf(ignored.index),
+        message: `${f}:${lineOf(ignored.index)} 丢弃了一个返回值（\`${ignored[0].replace(/\s+/g, ' ').slice(0, 40)}\`）。`,
+        why: 'Go 里 `, _ :=` 最常见的用途就是丢掉 error：线上表现为"什么都没发生"，而错误被永久吞掉。至少要 log 或显式注释为什么安全。',
+        evidence: `matched: ${ignored[0].replace(/\s+/g, ' ').slice(0, 50)}`,
+      });
+    }
+    const isMainPkg = /^\s*package\s+main\b/m.test(src);
+    const panics = /\bpanic\s*\(/.exec(src);
+    if (panics && !isMainPkg) {
+      findings.push({
+        rule: 'go-panic-in-library', severity: 'warn', file: f, line: lineOf(panics.index),
+        message: `${f}:${lineOf(panics.index)} 非 main 包里调用 panic。`,
+        why: '库/business 层 panic 会把调用方（可能是 HTTP handler）整条请求打挂，而且没法被调用方兜住；返回 error 让上层决定。',
+        evidence: `package=non-main, matched=${panics[0]}`,
+      });
+    }
+    const sqlConcat = /\b(?:db|tx|conn)\.(?:Query|QueryContext|Exec|ExecContext|Raw)\s*\([^)]*(?:fmt\.Sprintf|\+|\$\{)/.exec(src.replace(/\n/g, ' '));
+    if (sqlConcat) {
+      findings.push({
+        rule: 'go-sql-injection', severity: 'error', file: f, line: lineOf(sqlConcat.index),
+        message: `${f} 用拼接/格式化构造 SQL：\`${sqlConcat[0].replace(/\s+/g, ' ').slice(0, 60)}\``,
+        why: 'SQL 注入；Go 的 database/sql 用占位符（? / $1）传参，不要 fmt.Sprintf 拼进语句。',
+        evidence: `matched: ${sqlConcat[0].replace(/\s+/g, ' ').slice(0, 70)}`,
+      });
+    }
+  }
+
   return findings;
 }
 
@@ -824,6 +948,29 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   }
   const unresolvedRoutes = index?.unresolvedRoutes || [];
   const unresolvedPages = index?.unresolvedPages || [];
+
+  // ── PHP: resource route with a bound parameter and no visible authorization ─
+  // This is a *prompt*, not a verdict: authorization can live in middleware or a
+  // policy the file does not mention, so it reports only when the changed set
+  // touches the controller of a parameterised route and none of the common checks
+  // appear in that file. Severity is info for exactly that reason.
+  const AUTH_HINTS = /(\$this->authorize\s*\(|Gate::|->can\s*\(|->cannot\s*\(|->policy\s*\(|abort_unless\s*\(|->where\(\s*['"]user_id|auth\(\)->id\(\)|Auth::id\(\)|\$request->user\(\)->id)/;
+  for (const route of (kg.nodes || [])) {
+    const id = String(route.id || '');
+    if (!id.startsWith('route:')) continue;
+    const uri = String(route.uri || '');
+    if (!/[{:]\w+/.test(uri)) continue;                       // no bound parameter
+    const ctrlFile = route.controller ? classFile.get(route.controller) : null;
+    if (!ctrlFile || !changedFiles.includes(norm(ctrlFile))) continue;
+    const src = read(norm(ctrlFile));
+    if (!src || AUTH_HINTS.test(src)) continue;
+    add({
+      rule: 'php-idor-missing-authorization', severity: 'info', file: norm(ctrlFile), line: route.line ?? null,
+      message: `${route.method || 'GET'} ${uri} 绑定参数，而 ${norm(ctrlFile)} 里看不到鉴权调用。`,
+      why: '带 {id} 的资源路由若只按 id 取数据，换个 id 就能读别人的记录（IDOR）——这是 Laravel 生产环境最常见的漏洞。此条是**复核项**：鉴权也可能在中间件/策略里，请人工确认这一条路由的授权链。',
+      evidence: `route=${route.method || 'GET'} ${uri}, controller=${route.controller || '?'}, checked=${norm(ctrlFile)}（无 authorize/Gate/policy/abort_unless/owner-check）`,
+    });
+  }
 
   // ── cross-cutting ──────────────────────────────────────────────────────────
   if (index && symbols.length && !Object.keys(index.layerMap || {}).length) {
@@ -1213,6 +1360,12 @@ export const RULE_REGISTRY = [
   { id: 'py-requests-no-timeout', group: 'Python', family: 'python', title: 'requests 调用没有 timeout' },
   { id: 'py-unresolved-local-import', group: 'AI·幻觉', family: 'python', title: '本地 import 指向不存在的模块' },
   { id: 'py-import-star', group: 'Python', family: 'python', title: 'from x import *' },
+  { id: 'php-read-modify-write', group: 'PHP·性能', family: 'php', title: '读-改-写同一字段（并发丢更新）' },
+  { id: 'php-idor-missing-authorization', group: 'PHP·安全', family: 'php', title: '带参数的资源路由看不到鉴权调用（IDOR 复核项）' },
+  // ── Go ───────────────────────────────────────────────────────────────────
+  { id: 'go-ignored-error', group: 'Go', family: 'go', title: '丢弃返回值（通常是 error）' },
+  { id: 'go-panic-in-library', group: 'Go', family: 'go', title: '非 main 包 panic' },
+  { id: 'go-sql-injection', group: 'Go·安全', family: 'go', title: '拼接/格式化构造 SQL' },
   // ── 前端 / Vue / uni-app ──────────────────────────────────────────────────
   { id: 'vue-page-not-registered', group: '前端', family: 'front', title: '页面未在 pages.json 注册' },
   { id: 'vue-nav-unknown-page', group: '前端', family: 'front', title: '跳转目标页面不存在' },
@@ -1227,6 +1380,10 @@ export const RULE_REGISTRY = [
   { id: 'js-dangerous-function', group: '前端·安全', family: 'front', title: 'eval / new Function' },
   { id: 'js-debug-left-on', group: '前端', family: 'front', title: 'console.log / debugger 残留' },
   { id: 'js-loose-equality', group: '前端', family: 'front', title: '判断里用 == / !=' },
+  { id: 'vue-mutating-props', group: '前端', family: 'front', title: '子组件直接改 prop' },
+  { id: 'vue-v-if-with-v-for', group: '前端', family: 'front', title: '同一元素上 v-if 与 v-for 并存' },
+  { id: 'vue-timer-leak', group: '前端', family: 'front', title: 'setInterval 没有 clearInterval' },
+  { id: 'js-unused-binding', group: 'AI·幻觉', family: 'front', title: 'import/局部变量从未被使用（死绑定）' },
   // ── AI 代码特有 ──────────────────────────────────────────────────────────
   { id: 'js-unresolved-local-import', group: 'AI·幻觉', family: 'front', title: '本地/别名 import 指向不存在的文件' },
   { id: 'hallucinated-dependency', group: 'AI·幻觉', family: 'front', needs: ['packageJson'], title: '依赖不在 package.json（幻觉包）' },
@@ -1244,6 +1401,7 @@ const NOT_APPLICABLE = {
   familyPhp: '本次没有 PHP 改动',
   familyFront: '本次没有 JS/Vue 改动',
   familyPython: '本次没有 Python 改动',
+  familyGo: '本次没有 Go 改动',
   familyBoundary: '未提供 --backend（前后端边界需要两个索引）',
   index: '索引不可用（先 archnav analyze）',
   tests: '仓库里没有测试文件',
@@ -1262,6 +1420,7 @@ export function buildChecklist({ findings = [], meta = {} }) {
     else if (r.family === 'php' && !meta.changedPhp) { status = 'na'; reason = NOT_APPLICABLE.familyPhp; }
     else if (r.family === 'front' && !meta.changedFront) { status = 'na'; reason = NOT_APPLICABLE.familyFront; }
     else if (r.family === 'python' && !meta.changedPy) { status = 'na'; reason = NOT_APPLICABLE.familyPython; }
+    else if (r.family === 'go' && !meta.changedGo) { status = 'na'; reason = NOT_APPLICABLE.familyGo; }
     else if (r.family === 'boundary' && !meta.hasBackend) { status = 'na'; reason = NOT_APPLICABLE.familyBoundary; }
     else if ((r.needs || []).includes('index') && !meta.hasIndex) { status = 'na'; reason = NOT_APPLICABLE.index; }
     else if ((r.needs || []).includes('composer') && !meta.hasComposer) { status = 'na'; reason = NOT_APPLICABLE.composer; }
@@ -1534,8 +1693,10 @@ async function main() {
     changedTotal: changedFiles.length,
     changedPhp: changedFiles.filter((f) => /\.php$/i.test(f)).length,
     changedFront: changedFiles.filter((f) => /\.(js|ts|mjs|cjs|vue)$/i.test(f)).length,
-    changedOther: changedFiles.filter((f) => !/\.(php|js|ts|mjs|cjs|vue|py)$/i.test(f)).length,
+    changedBackend: changedFiles.filter((f) => /\.(php|go)$/i.test(f)).length,
+    changedOther: changedFiles.filter((f) => !/\.(php|js|ts|mjs|cjs|vue|py|go)$/i.test(f)).length,
     changedPy: changedFiles.filter((f) => /\.py$/i.test(f)).length,
+    changedGo: changedFiles.filter((f) => /\.go$/i.test(f)).length,
     hasChanges: changedFiles.length > 0,
     hasBackend: Boolean(backendIndex),
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),

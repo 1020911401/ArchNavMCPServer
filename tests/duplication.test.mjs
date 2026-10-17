@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeJscpd, exceedsThreshold, buildJscpdFlags, buildDupChecklist, stripFormatSuffix } from '../scripts/duplication.mjs';
+import { normalizeJscpd, exceedsThreshold, buildJscpdFlags, buildDupChecklist, stripFormatSuffix, analyzeProvenance } from '../scripts/duplication.mjs';
 
 test('jscpd format suffixes are stripped from SARIF paths but kept as evidence', () => {
   // code scanning rejects `README.md:text` outright ("URI scheme readme.md did not
@@ -104,6 +104,29 @@ test('changed-only drops clones that touch nothing in the change set', () => {
 test('changed-only never hides a clone that touches a changed file', () => {
   const { findings } = normalizeJscpd(report, { changedFiles: ['pages/users/components/verify/utils/crypto-js.js'] });
   assert.ok(findings.some((f) => f.severity === 'warn' && f.message.includes('crypto-js.js')));
+});
+
+test('provenance: how much of the diff is copied from existing lines (vs moved)', () => {
+  const corpus = new Set(['const total = items.reduce((a, b) => a + b, 0);', 'function helper() { return 42; }']);
+  const added = [
+    'const total = items.reduce((a, b) => a + b, 0);',   // copied verbatim
+    'function helper() { return 42; }',                   // copied verbatim
+    'const brandNew = computeSomethingElse(1);',          // new
+    '// short',                                            // too short / comment
+  ];
+  const r = analyzeProvenance({ addedLines: added, corpus, summary: ' rename app/a.php => app/b.php (95%)\n' });
+  assert.equal(r.added_lines, 4);
+  assert.equal(r.meaningful_added_lines, 3, 'comments and <12 char lines are not counted');
+  assert.equal(r.copied_lines, 2);
+  assert.ok(Math.abs(r.ratio - 2 / 3) < 1e-9);
+  assert.equal(r.renames.length, 1, 'git rename summary means moved, not copied');
+
+  // the checklist gets a row once provenance data exists
+  const summary = { clones: 0, reported: 0, by_kind: {}, percent: 1, provenance: r };
+  const cl = buildDupChecklist({ summary, opts: {} });
+  const row = cl.rows.find((x) => x.id === 'dup.provenance');
+  assert.equal(row.status, 'hit');
+  assert.match(row.reason, /复制/);
 });
 
 test('the percentage gate is a pure function of the summary', () => {
