@@ -41,6 +41,7 @@ jobs:
             tests/analyze-ignore.test.mjs \
             tests/changes.test.mjs \
             tests/deep.test.mjs \
+            tests/taint-audit.test.mjs \
             tests/duplication.test.mjs \
             tests/impact-analysis.test.mjs \
             tests/navigation.test.mjs \

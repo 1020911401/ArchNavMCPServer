@@ -20,6 +20,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
 import { selectTests } from './test-select.mjs';
@@ -908,6 +909,84 @@ export function arityFindings(file, src, { symbols = [] } = {}) {
   return out;
 }
 
+/**
+ * Taint, intra-file: an external input assigned to a variable, then that variable
+ * reaching a dangerous sink without a sanitiser on the way.
+ *
+ * Boundary (deliberate, and printed in the finding's why): this is name-based and
+ * file-local. It does not follow the value across function calls, does not model
+ * framework validation, and does not know your custom escaper — so it reports only
+ * the shapes where the source and the sink are visible in the same file. For real
+ * interprocedural taint use `--semgrep` (Semgrep taint mode) if it is installed.
+ */
+const TAINT = {
+  php: {
+    source: /\$\w+\s*=\s*(?:\$request->(?:input|get|post|query|all|json)\s*\(|\$_GET|\$_POST|\$_REQUEST|\$request->\w+)/g,
+    sinks: [
+      { re: /\b(?:echo|print)\b[^;]*/, kind: 'output' },
+      { re: /(?:whereRaw|selectRaw|orderByRaw|DB::raw)\s*\([^;]*/, kind: 'sql' },
+      { re: /\b(?:exec|shell_exec|system|eval)\s*\([^;]*/, kind: 'exec' },
+    ],
+    sanitizers: /(htmlspecialchars|\be\s*\(|intval\s*\(|filter_var\s*\(|\(int\)|strip_tags\s*\(|\bas\s+\$\w+\s*->\s*\w+|validate\s*\()/,
+  },
+  js: {
+    source: /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*[^;\n]*(?:req\.(?:query|body|params)|request\.(?:query|body|params)|location\.(?:search|hash)|uni\.getStorageSync)/g,
+    sinks: [
+      { re: /\.innerHTML\s*=[^;]*/, kind: 'output' },
+      { re: /\bdocument\.write\s*\([^;]*/, kind: 'output' },
+      { re: /v-html\s*=\s*["'][^"']*["']/, kind: 'output' },
+      { re: /\b(?:eval|new\s+Function)\s*\([^;]*/, kind: 'exec' },
+    ],
+    sanitizers: /(encodeURIComponent|escapeHtml|\bNumber\s*\(|parseInt\s*\(|parseFloat\s*\(|textContent\s*=)/,
+  },
+  python: {
+    source: /(\w+)\s*=\s*[^\n#]*(?:request\.(?:args|form|json|values|get_json)|\binput\s*\()/g,
+    sinks: [
+      { re: /\.execute\s*\([^\n]*/, kind: 'sql' },
+      { re: /\b(?:eval|exec)\s*\([^\n]*/, kind: 'exec' },
+      { re: /\bos\.system\s*\([^\n]*|subprocess\.[\w_]+\([^\n]*shell\s*=\s*True/, kind: 'exec' },
+      { re: /render_template_string\s*\([^\n]*/, kind: 'output' },
+    ],
+    sanitizers: /(html\.escape|\bint\s*\(|float\s*\(|escape\s*\(|quote\s*\()/,
+  },
+};
+
+export function taintFindings(file, src) {
+  const f = norm(file);
+  const lang = /\.php$/i.test(f) ? 'php' : /\.(js|ts|mjs|cjs|jsx|tsx|vue)$/i.test(f) ? 'js' : /\.py$/i.test(f) ? 'python' : null;
+  if (!lang) return [];
+  const cfg = TAINT[lang];
+  const lines = src.split(/\r?\n/);
+  const tainted = new Map(); // variable → source line
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    cfg.source.lastIndex = 0;
+    for (const m of line.matchAll(cfg.source)) {
+      const name = lang === 'php' ? (m[0].match(/^(\$\w+)/)?.[1] || 'request') : m[1];
+      if (name) tainted.set(name, i + 1);
+    }
+    if (!tainted.size) continue;
+    if (cfg.sanitizers.test(line)) continue;      // sanitised on the way to the sink
+    for (const sink of cfg.sinks) {
+      if (!sink.re.test(line)) continue;
+      for (const [name, srcLine] of tainted) {
+        if (!new RegExp(`(^|[^\\w$])${name.replace(/\$/g, '\\$')}([^\\w$]|$)`).test(line)) continue;
+        out.push({
+          rule: 'taint-source-to-sink',
+          severity: sink.kind === 'exec' ? 'error' : 'warn',
+          file: f, line: i + 1,
+          message: `${f}:${i + 1} 外部输入（第 ${srcLine} 行的 ${name}）直达 ${sink.kind} sink：\`${line.trim().slice(0, 60)}\``,
+          why: '文件内可见的 source→sink 直达：参数来自请求且没有转义/强转。exec 类 sink 直接是 RCE，sql/output 类是注入/XSS。此规则只做**文件内、按变量名**的追踪（不跨函数、不认自定义转义函数），跨函数的数据流要上 Semgrep taint。',
+          evidence: `source=${name}@${srcLine} → sink=${sink.kind}@${i + 1}`,
+        });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null, tier = 'all' }) {
   const findings = [];
   const read = readFile || ((rel) => {
@@ -1179,6 +1258,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     findings.push(...scanContent(file, src));
     findings.push(...bladeRawOutputFindings(file, src));
     findings.push(...arityFindings(file, src, { symbols }));
+    findings.push(...taintFindings(file, src));
   }
 
   // ── AI-code hallucinations: imports that resolve to nothing ────────────────
@@ -1330,6 +1410,7 @@ export function applyMode(opts) {
 }
 export const RULE_REGISTRY = [
   // ── 结构 / 通用 ────────────────────────────────────────────────────────────
+  { id: 'taint-source-to-sink', group: '污点', family: 'any', title: '外部输入直达危险 sink（文件内污点追踪）' },
   { id: 'unmapped-change', group: '结构', family: 'any', title: '改动文件是否有符号可定位（不可定位=只能人工看）' },
   { id: 'backup-file-changed', group: '结构', family: 'any', title: '是否改到副本/日期备份文件' },
   { id: 'layer-model-missing', group: '结构', family: 'any', needs: ['index'], title: '分层模型是否生效（否则"0 违规"不算通过）' },
@@ -1644,6 +1725,9 @@ function parseArgs(argv) {
     else if (a === '--duplication') out.duplicationFlag = true;
     else if (a === '--impact') out.impactFlag = true;
     else if (a === '--deep') out.deepFlag = true;
+    else if (a === '--audit') out.audit = true;
+    else if (a === '--semgrep') out.semgrep = true;
+    else if (a === '--fail-on-cve') { out.failOnCve = String(argv[++i]).toUpperCase(); out.failOnCveSet = true; }
     else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deepFlag = true; }
     else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deepFlag = true; }
     else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impactFlag = true; }
@@ -1797,9 +1881,68 @@ async function main() {
       });
     }
   }
-  if (dupResult?.checklist || impactResult?.checklist || deepResult?.checklist) {
+  // ── optional: dependency vulnerability audit (OSV) and Semgrep taint ──────
+  const extraRows = [];
+  if (opts.audit) {
+    try {
+      const a = await import('./audit-deps.mjs');
+      const collected = a.collectDependencies(dir);
+      let entries = [];
+      let err = null;
+      try { if (collected.deps.length) entries = await a.queryOsv(collected.deps); } catch (e) { err = e.message; }
+      findings.push(...a.osvFindings(entries));
+      extraRows.push(...a.buildDepChecklist({ collected, entries, error: err }));
+      if (opts.failOnCveSet) {
+        const order = { LOW: 0, MODERATE: 1, HIGH: 2, CRITICAL: 3 };
+        const worst = Math.max(0, ...entries.map((e) => order[a.osvSeverity(e.vuln).level] ?? 0));
+        if (worst >= (order[opts.failOnCve] ?? 9)) findings.push({
+          rule: 'dep-vulnerability-gate', severity: 'error', file: null, line: null, source: 'audit',
+          message: `依赖漏洞等级达到 ${['LOW', 'MODERATE', 'HIGH', 'CRITICAL'][worst]}，超过 --fail-on-cve ${opts.failOnCve}`,
+          why: '显式要求把依赖漏洞当门禁时才会产生 error；默认不带此旗标。',
+          evidence: `entries=${entries.length}, worst=${['LOW', 'MODERATE', 'HIGH', 'CRITICAL'][worst]}`,
+        });
+      }
+    } catch (e) { console.error(`audit skipped: ${e.message}`); }
+  }
+  if (opts.semgrep) {
+    // Honest boundary: interprocedural taint needs an engine. If Semgrep is on PATH we
+    // use it (it IS the tool for this); if not, the row says exactly that instead of
+    // pretending the file-local tracker above is equivalent.
+    const r = spawnSync('semgrep', ['--json', '--quiet', '--config', 'auto', dir], {
+      encoding: 'utf8', timeout: 10 * 60 * 1000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (r.error && r.error.code === 'ENOENT') {
+      extraRows.push({
+        id: 'taint.semgrep', group: '污点', family: 'any', title: 'Semgrep 跨函数污点分析',
+        status: 'na', hits: 0, reason: 'semgrep 未安装（pipx install semgrep）；本次只有文件内污点追踪',
+      });
+    } else {
+      let parsed = null;
+      try { parsed = JSON.parse(String(r.stdout || '').replace(/^[^{]*/, '')); } catch { /* below */ }
+      const results = parsed?.results || [];
+      for (const res of results.slice(0, 200)) {
+        const sev = String(res.extra?.severity || 'INFO').toUpperCase();
+        findings.push({
+          rule: `semgrep:${res.check_id}`, source: 'semgrep',
+          severity: sev === 'ERROR' ? 'error' : sev === 'WARNING' ? 'warn' : 'info',
+          file: norm(res.path), line: res.start?.line ?? null,
+          message: `${norm(res.path)}:${res.start?.line ?? '?'} ${String(res.extra?.message || res.check_id).slice(0, 120)}`,
+          why: 'Semgrep 规则命中（含 taint 模式）；这是外部引擎结论，按需调 --config。',
+          evidence: `check_id=${res.check_id}, severity=${sev}`,
+        });
+      }
+      extraRows.push({
+        id: 'taint.semgrep', group: '污点', family: 'any', title: 'Semgrep 跨函数污点分析',
+        status: results.length ? 'hit' : 'pass', hits: results.length,
+        reason: r.status === 0 ? `config=auto，命中 ${results.length} 条` : `semgrep 退出码 ${r.status}（仅参考）`,
+      });
+    }
+  }
+
+  if (dupResult?.checklist || impactResult?.checklist || deepResult?.checklist || extraRows.length) {
     if (dupResult?.checklist) checklist.rows.push(...dupResult.checklist.rows);
     if (deepResult?.checklist) checklist.rows.push(...deepResult.checklist.rows);
+    checklist.rows.push(...extraRows);
     checklist.summary = {
       total: checklist.rows.length,
       hit: checklist.rows.filter((r) => r.status === 'hit').length,
