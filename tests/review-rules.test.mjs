@@ -8,7 +8,12 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES } from '../scripts/review-rules.mjs';
+import path from 'node:path';
+import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks } from '../scripts/review-rules.mjs';
+
+// a directory that deliberately does not exist: stack detection must then rely on
+// index node kinds alone (which is exactly what it does for a fresh clone)
+const ROOT_FIX = path.resolve('__no_such_dir__');
 
 test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原因)', () => {
   const metaFull = {
@@ -581,6 +586,30 @@ test('AI hallucinations: joinPosix normalises ./ and ../ segments', () => {
   assert.equal(joinPosix('components/payment', '../utils/request'), 'components/utils/request');
   assert.equal(joinPosix('a/b', '../../x'), 'x');
   assert.equal(joinPosix('a/b', './c/./d'), 'a/b/c/d');
+});
+
+test('stack detection switches features by language, with evidence', () => {
+  const laravel = detectStacks({
+    dir: path.join(ROOT_FIX, 'nope-laravel'),
+    index: { knowledgeGraph: { nodes: [{ id: 'route:GET /x' }, { id: 'file:routes/web.php' }] } },
+    changedFiles: ['app/Http/Controllers/AController.php'],
+  });
+  assert.equal(laravel.profiles.includes('laravel'), true);
+  assert.match(laravel.evidence.join(' '), /route 节点/);
+  assert.deepEqual(laravel.langs, { '.php': 1 });
+  assert.equal(laravel.nodeKinds.includes('route'), true);
+  assert.equal(laravel.suggestsBackend, false, 'a Laravel repo is not a front-end');
+
+  const front = detectStacks({
+    dir: path.join(ROOT_FIX, 'nope-uniapp'),
+    index: { knowledgeGraph: { nodes: [{ id: 'page:pages/a/index' }, { id: 'file:pages/a/index.vue' }] } },
+    changedFiles: ['pages/demo/index.vue', 'api/order.js'],
+  });
+  assert.equal(front.profiles.includes('uni-app'), true);
+  assert.equal(front.suggestsBackend, true, 'front-end without a backend → hint --backend');
+  assert.deepEqual(front.langs, { '.vue': 1, '.js': 1 });
+  assert.match(renderStacks(front), /栈 uni-app/);
+  assert.match(renderStacks(front), /pages\.json|page 节点|vue\.config|App\.vue/);
 });
 
 test('modes: brief is the cheap default, explicit flags upgrade to the task sheet', () => {

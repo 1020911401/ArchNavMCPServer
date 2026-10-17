@@ -964,6 +964,55 @@ export function buildChecklist({ findings = [], meta = {} }) {
   return { rows, summary, meta };
 }
 
+/**
+ * Stack detection: which language profiles this repo/change actually is, so the
+ * relevant analyzers can switch on by themselves instead of the user remembering
+ * that page-registration checks only mean something for uni-app, or that route
+ * flows only exist behind a Laravel/Express router. Evidence over vibes: each
+ * profile carries the files/nodes that proved it.
+ */
+export function detectStacks({ index, dir, changedFiles = [] }) {
+  const has = (rel) => { try { return fs.existsSync(path.join(dir, rel)); } catch { return false; } };
+  const nodes = index?.knowledgeGraph?.nodes || [];
+  const kindCount = (prefix) => nodes.filter((n) => String(n.id).startsWith(`${prefix}:`)).length;
+  const profiles = [];
+  const evidence = [];
+  if (has('composer.json') || has('artisan') || kindCount('route') > 0) {
+    profiles.push('laravel');
+    evidence.push(['composer.json', has('artisan') ? 'artisan' : null, kindCount('route') ? `${kindCount('route')} route 节点` : null].filter(Boolean).join(' + '));
+  }
+  if (kindCount('page') > 0 || has('pages.json')) {
+    profiles.push('uni-app');
+    evidence.push([has('pages.json') ? 'pages.json' : null, kindCount('page') ? `${kindCount('page')} page 节点` : null].filter(Boolean).join(' + '));
+  } else if (has('vue.config.js') || has('src/App.vue')) {
+    profiles.push('vue');
+    evidence.push(has('vue.config.js') ? 'vue.config.js' : 'src/App.vue');
+  }
+  if (has('package.json')) { profiles.push('node'); evidence.push('package.json'); }
+  if (has('requirements.txt') || has('pyproject.toml') || changedFiles.some((f) => f.endsWith('.py'))) {
+    profiles.push('python');
+    evidence.push(has('pyproject.toml') ? 'pyproject.toml' : has('requirements.txt') ? 'requirements.txt' : 'changed .py');
+  }
+  const langs = {};
+  for (const f of changedFiles) {
+    const ext = path.extname(f).toLowerCase() || '(none)';
+    langs[ext] = (langs[ext] || 0) + 1;
+  }
+  return {
+    profiles,
+    evidence,
+    langs,
+    nodeKinds: ['route', 'page', 'flow'].filter((k) => kindCount(k) > 0),
+    // a front-end repo gets a concrete, actionable hint instead of a silent gap
+    suggestsBackend: (profiles.includes('uni-app') || profiles.includes('vue')) && !profiles.includes('laravel'),
+  };
+}
+
+export function renderStacks(stacks) {
+  if (!stacks?.profiles?.length) return '栈: 未能识别（无 composer.json/package.json/pages.json 等标志文件）';
+  const langs = Object.entries(stacks.langs).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([e, n]) => `${e}×${n}`).join(' ');
+  return `栈 ${stacks.profiles.join('+')}（依据 ${stacks.evidence.join('；')}）${langs ? `　改动 ${langs}` : ''}`;
+}
 const STATUS_MARK = { pass: '✅ 通过', hit: '⚠️  命中', na: '➖ 不适用' };
 const MD_MARK = { pass: '✅', hit: '⚠️', na: '➖' };
 
@@ -976,6 +1025,10 @@ export function renderMarkdown(checklist, findings = [], meta = {}, extra = {}) 
     + ` · **索引** ${meta.symbols ?? '?'} 符号 · **后端索引** ${meta.hasBackend ? '已提供' : '未提供'}`
     + (extra.dupPercent !== undefined ? ` · **仓库重复率** ${extra.dupPercent}%` : '')
     + (extra.risk ? ` · **风险** ${extra.risk.level}（${extra.risk.score}）` : ''));
+  if (meta.stackLine) L.push(`${meta.stackLine}`);
+  if (meta.stacks?.suggestsBackend && !meta.hasBackend) {
+    L.push('', '> 💡 检测到前端仓：加 `--backend <后端仓>` 可做接口边界核对（前端在调、后端有没有这条路由）');
+  }
   L.push('');
   if (extra.impact) {
     const i = extra.impact;
@@ -1043,6 +1096,10 @@ export function renderChecklist({ rows, summary, meta }) {
     + `　索引 ${meta.symbols ?? '?'} 符号　索引新鲜度 ${meta.freshness ?? '?'}`
     + `　后端索引 ${meta.hasBackend ? '已提供' : '未提供'}`);
   L.push(`   规则 ${summary.total} 条：✅ 通过 ${summary.pass}　⚠️ 命中 ${summary.hit}　➖ 不适用 ${summary.na}　（findings ${summary.findings}）`);
+  if (meta.stackLine) L.push(`   ${meta.stackLine}`);
+  if (meta.stacks?.suggestsBackend && !meta.hasBackend) {
+    L.push('   💡 检测到前端仓：加 `--backend <后端仓>` 可做接口边界核对（前端在调、后端有没有这条路由）');
+  }
   L.push('');
   L.push('   状态        规则                          检查内容');
   L.push('   ────────────────────────────────────────────────────────────────────────────');
@@ -1172,6 +1229,9 @@ async function main() {
     symbols: (index.symbols || []).length,
     freshness: `via=${changes.via}${changes.note ? ' (drift fallback)' : ''}`,
   };
+  // language profiles: the relevant analyzers/rules switch on from here
+  meta.stacks = detectStacks({ index, dir, changedFiles });
+  meta.stackLine = renderStacks(meta.stacks);
   // ── optional: merge the jscpd duplication half into the same task sheet ────
   let dupResult = null;
   if (opts.duplication) {
