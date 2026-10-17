@@ -28,6 +28,29 @@ import { toSarif, toGithubAnnotations } from './review-rules.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
 
+/**
+ * jscpd names a fragment `README.md:text` / `x.vue:javascript` (file + format).
+ * That suffix cannot go into a SARIF artifact URI: GitHub parses `README.md:text`
+ * as URI scheme `readme.md` and rejects the whole upload ("SARIF URI scheme
+ * "readme.md" did not match the checkout URI scheme "file""). The Windows guard
+ * (tail must be a bare word) keeps `C:/x/y.js` intact.
+ */
+export function stripFormatSuffix(name) {
+  const s = norm(name);
+  const i = s.lastIndexOf(':');
+  if (i === -1) return s;
+  const tail = s.slice(i + 1);
+  return /^[A-Za-z0-9+#_-]+$/.test(tail) ? s.slice(0, i) : s;
+}
+
+const formatOf = (name) => {
+  const s = norm(name);
+  const i = s.lastIndexOf(':');
+  if (i === -1) return null;
+  const tail = s.slice(i + 1);
+  return /^[A-Za-z0-9+#_-]+$/.test(tail) ? tail : null;
+};
+
 /** Normalise a jscpd JSON report into review findings. Pure — unit tested. */
 export function normalizeJscpd(report, { changedFiles = null, minLines = 0 } = {}) {
   const dup = (report?.duplicates || []).filter((c) => (c.lines || 0) >= minLines);
@@ -35,8 +58,8 @@ export function normalizeJscpd(report, { changedFiles = null, minLines = 0 } = {
   const touched = (f) => !changed || changed.has(norm(f));
   const out = [];
   for (const c of dup) {
-    const a = { file: norm(c.firstFile?.name), line: c.firstFile?.start ?? null };
-    const b = { file: norm(c.secondFile?.name), line: c.secondFile?.start ?? null };
+    const a = { file: stripFormatSuffix(c.firstFile?.name), line: c.firstFile?.start ?? null, format: formatOf(c.firstFile?.name) };
+    const b = { file: stripFormatSuffix(c.secondFile?.name), line: c.secondFile?.start ?? null, format: formatOf(c.secondFile?.name) };
     // `--changed-only` means exactly that: clones where neither side is in the
     // change set are dropped, not downgraded (and the flag documents itself).
     if (changed && !touched(a.file) && !touched(b.file)) continue;
@@ -60,7 +83,7 @@ export function normalizeJscpd(report, { changedFiles = null, minLines = 0 } = {
       is_new: isNew,
       message: `[${kind}${isNew ? '/new' : ''}] ${a.file}:${a.line} ↔ ${b.file}:${b.line} 重复 ${c.lines} 行 / ${c.tokens} tokens`,
       why: `${why}${isNew ? ' 基线里没有这块克隆 → 是本次改动新引入的重复。' : ''}`,
-      evidence: `kind=${kind}, isNew=${isNew}, lines=${c.lines}, tokens=${c.tokens}, second=${b.file}:${b.line}`,
+      evidence: `kind=${kind}, isNew=${isNew}, lines=${c.lines}, tokens=${c.tokens}, second=${b.file}:${b.line}${b.format ? `, format=${b.format}` : ''}`,
     });
   }
   const total = report?.statistics?.total || {};

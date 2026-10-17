@@ -7,7 +7,26 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeJscpd, exceedsThreshold, buildJscpdFlags, buildDupChecklist } from '../scripts/duplication.mjs';
+import { normalizeJscpd, exceedsThreshold, buildJscpdFlags, buildDupChecklist, stripFormatSuffix } from '../scripts/duplication.mjs';
+
+test('jscpd format suffixes are stripped from SARIF paths but kept as evidence', () => {
+  // code scanning rejects `README.md:text` outright ("URI scheme readme.md did not
+  // match the checkout URI scheme file"), so the finding path must be the file.
+  assert.equal(stripFormatSuffix('README.md:text'), 'README.md');
+  assert.equal(stripFormatSuffix('pages/x/index.vue:javascript'), 'pages/x/index.vue');
+  assert.equal(stripFormatSuffix('a/b.js'), 'a/b.js');
+  assert.equal(stripFormatSuffix('C:/repo/src/a.js'), 'C:/repo/src/a.js', 'Windows drive letters stay intact');
+
+  const rep = {
+    duplicates: [{ lines: 30, tokens: 200, kind: 'exact', firstFile: { name: 'README.md:text', start: 5 }, secondFile: { name: 'docs/x.md:text', start: 9 } }],
+    statistics: { total: { lines: 100, duplicatedLines: 30, percentage: 30 } },
+  };
+  const { findings } = normalizeJscpd(rep);
+  assert.equal(findings[0].file, 'README.md');
+  assert.equal(findings[0].line, 5);
+  assert.match(findings[0].evidence, /format=text/);
+  assert.equal(findings[0].message.includes(':text'), false, 'message 里不出现伪 scheme');
+});
 
 test('buildJscpdFlags maps our kinds onto jscpd flags (no home-grown similarity)', () => {
   assert.deepEqual(buildJscpdFlags({}), []);
