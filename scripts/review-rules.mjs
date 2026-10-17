@@ -193,7 +193,48 @@ const SEC_PATTERNS = [
   },
 ];
 
-/** Same idea for the front-end: the PHP patterns must not run over JS/Vue. */
+/** Python: the same three classes as PHP/JS — dangerous calls, swallowed errors,
+ * injection, plus the two traps that are Python-only (mutable default args,
+ * requests without a timeout). */
+const PY_PATTERNS = [
+  {
+    rule: 'py-dangerous-function', severity: 'error',
+    re: /\b(?:eval|exec)\s*\(|pickle\.loads?\s*\(|os\.system\s*\(|subprocess\.[a-z_]+\([^)\n]*shell\s*=\s*True/,
+    why: 'eval/exec/pickle/os.system/shell=True 把数据变成代码或命令：任何拼进来的变量都是 RCE 或反序列化入口。',
+  },
+  {
+    rule: 'py-raw-sql', severity: 'error',
+    re: /\.execute\s*\(\s*f['"]|\.execute\s*\(\s*['"][^'"]*['"]\s*(?:%|\+)/,
+    why: 'f-string / % / 拼接进 SQL 就是注入；用参数化（execute(sql, params)）。',
+  },
+  {
+    rule: 'py-bare-except', severity: 'warn',
+    re: /except\s*:/,
+    why: '裸 except 连 KeyboardInterrupt/SystemExit 一起吞：至少写 except Exception as e 并记录。',
+  },
+  {
+    rule: 'py-mutable-default-arg', severity: 'warn',
+    re: /def\s+\w+\s*\([^)]*=\s*(?:\[\]|\{\}|set\(\))/,
+    why: '可变默认参数在调用之间共享同一个对象（经典 Python 陷阱）：默认值用 None，函数体内再建。',
+  },
+  {
+    rule: 'py-debug-left-on', severity: 'warn',
+    re: /(?<![\w.])(?:breakpoint\(\)|pdb\.set_trace\(\))/,
+    why: 'breakpoint()/pdb 留在提交里会让服务在请求路径上直接挂住。',
+  },
+  {
+    rule: 'py-requests-no-timeout', severity: 'warn',
+    re: /requests\.(?:get|post|put|delete|patch|request)\s*\((?![^)\n]*timeout\s*=)/,
+    why: '没有 timeout 的 requests 调用在对方不响应时会一直挂着（连同线程/worker 一起耗尽）。',
+  },
+  {
+    rule: 'py-import-star', severity: 'info',
+    re: /^[ \t]*from\s+[\w.]+\s+import\s+\*[ \t]*$/m,
+    why: 'import * 覆盖本地名字、让 callers/影响面分析失效（图谱看不到具体符号）。',
+  },
+];
+const PY_SECRET_RE = /(?:^|[\s(,])([A-Za-z_]*(?:password|passwd|secret|api_?key|access_?token|private_?key)[A-Za-z_]*)\s*=\s*['"]([^'"]{8,})['"]/gim;
+const PY_STDLIB = new Set(['os', 'sys', 're', 'json', 'math', 'time', 'datetime', 'pathlib', 'typing', 'collections', 'itertools', 'functools', 'subprocess', 'logging', 'csv', 'sqlite3', 'unittest', 'asyncio', 'hashlib', 'random', 'shutil', 'tempfile', 'urllib', 'http', 'socket', 'threading', 'multiprocessing', 'uuid', 'base64', 'glob', 'io', 'argparse', 'contextlib', 'dataclasses', 'enum', 'decimal', 'statistics', 'traceback', 'warnings', 'zipfile', 'tarfile', 'gzip', 'xml', 'email', 'smtplib', 'ssl', 'secrets', 'string', 'textwrap', 'pprint', 'copy', 'inspect', 'importlib', 'signal', 'queue', 'heapq', 'bisect', 'array', 'struct', 'difflib', 'fnmatch', 'getpass', 'platform', 'sysconfig', 'codecs', 'locale', 'calendar', 'zoneinfo', 'tomllib', 'abc', 'concurrent', 'ctypes', 'unicodedata', 'webbrowser', 'tkinter', 'venv', 'site', 'atexit', 'pickle', 'shlex', 'stat', 'sched', 'select', 'errno', 'operator', 'numbers', 'fractions', 'graphlib', 'weakref', 'gc', 'types']);
 const JS_SEC_PATTERNS = [
   {
     rule: 'js-dangerous-function', severity: 'error',
@@ -273,6 +314,7 @@ export function scanContent(file, src) {
 
   const isPhp = /\.php$/i.test(file);
   const isJs = /\.(js|ts|vue)$/i.test(file);
+  const isPy = /\.py$/i.test(file);
   const isRequestPath = /(^|\/)(Http\/Controllers|Controllers|Services|Repositories|Presenters|Validators)\//i.test(file);
 
   if (isPhp) {
@@ -312,6 +354,40 @@ export function scanContent(file, src) {
         message: `${file} 命中 ${p.rule}：\`${m[0].slice(0, 40)}\``,
         why: p.why,
         evidence: `matched: ${m[0].slice(0, 60)}`,
+      });
+    }
+  }
+
+  if (isPy) {
+    for (const p of PY_PATTERNS) {
+      const m = p.re.exec(src);
+      if (!m) continue;
+      findings.push({
+        rule: p.rule, severity: p.severity, file: f, line: lineOf(m.index),
+        message: `${file} 命中 ${p.rule.replace(/^py-/, '')}：\`${m[0].slice(0, 40)}\``,
+        why: p.why,
+        evidence: `matched: ${m[0].slice(0, 60)}`,
+      });
+    }
+    // `except ...: pass` is Python's empty catch — same rule id as the JS/PHP one
+    const exceptPass = /except[^:\n]*:\s*(?:\n[ \t]*)?pass\b/.exec(src);
+    if (exceptPass) {
+      findings.push({
+        rule: 'empty-catch', severity: 'warn', file: f, line: lineOf(exceptPass.index),
+        message: `${file} 用 except: pass 静默吞掉了异常。`,
+        why: 'AI/偷懒代码最常见的"看起来能跑"写法：异常被吞后线上只剩空数据没有日志，排查成本极高。',
+        evidence: `matched: ${exceptPass[0].replace(/\s+/g, ' ').slice(0, 40)}`,
+      });
+    }
+    PY_SECRET_RE.lastIndex = 0;
+    for (const m of src.matchAll(PY_SECRET_RE)) {
+      const value = m[2];
+      if (VALIDATION_RULE_VALUE_RE.test(value) || PLACEHOLDER_VALUE_RE.test(value)) continue;
+      findings.push({
+        rule: 'py-hardcoded-secret', severity: 'error', file: f, line: lineOf(m.index),
+        message: `${f} 里 ${m[1]} 被写成字面量（值长度 ${value.length}）。`,
+        why: '硬编码凭据会随仓库扩散且无法轮换：放进环境变量或密钥管理。',
+        evidence: `name=${m[1]}, valueLen=${value.length}`,
       });
     }
   }
@@ -856,6 +932,7 @@ export const EXTENDED_RULES = new Set([
   'js-debug-left-on',            // 23/333 files fire
   'vue-global-blast',            // context
   'vue-nav-dynamic-url',         // boundary note
+  'py-import-star',              // style, not a defect
 ]);
 
 export const MODE_PRESETS = {
@@ -901,13 +978,24 @@ export const RULE_REGISTRY = [
   { id: 'php-blade-unverified-calls', group: 'PHP', family: 'php', title: 'Blade 模板调用无法绑定（证据边界）' },
   { id: 'php-n-plus-one', group: 'PHP·性能', family: 'php', title: '循环体内查库（N+1 启发式）' },
   { id: 'php-unbounded-query', group: 'PHP·性能', family: 'php', title: '无分页全量取数' },
+  // ── Python ───────────────────────────────────────────────────────────────
+  { id: 'py-dangerous-function', group: 'Python·安全', family: 'python', title: 'eval/exec/pickle/os.system/shell=True' },
+  { id: 'py-raw-sql', group: 'Python·安全', family: 'python', title: 'SQL f-string/拼接（注入）' },
+  { id: 'py-hardcoded-secret', group: 'Python·安全', family: 'python', title: '硬编码凭据' },
+  { id: 'py-bare-except', group: 'Python', family: 'python', title: '裸 except（吞 KeyboardInterrupt）' },
+  { id: 'py-mutable-default-arg', group: 'Python', family: 'python', title: '可变默认参数（跨调用共享）' },
+  { id: 'py-debug-left-on', group: 'Python', family: 'python', title: 'breakpoint()/pdb 残留' },
+  { id: 'py-requests-no-timeout', group: 'Python', family: 'python', title: 'requests 调用没有 timeout' },
+  { id: 'py-unresolved-local-import', group: 'AI·幻觉', family: 'python', title: '本地 import 指向不存在的模块' },
+  { id: 'py-import-star', group: 'Python', family: 'python', title: 'from x import *' },
   // ── 前端 / Vue / uni-app ──────────────────────────────────────────────────
   { id: 'vue-page-not-registered', group: '前端', family: 'front', title: '页面未在 pages.json 注册' },
   { id: 'vue-nav-unknown-page', group: '前端', family: 'front', title: '跳转目标页面不存在' },
   { id: 'vue-nav-dynamic-url', group: '前端', family: 'front', title: '动态拼接跳转 URL（影响面边界）' },
   { id: 'vue-unresolved-import', group: '前端', family: 'front', title: '组件 import 解析不到（省略 index.vue）' },
   { id: 'vue-component-orphan', group: '前端', family: 'front', title: '组件无人 import（改了不生效）' },
-  { id: 'vue-global-blast', group: '前端', family: 'front', title: 'store/mixins 全局影响面' },
+  { id: 'vue-global-blast',            // context
+    group: '前端', family: 'front', title: 'store/mixins 全局影响面' },
   { id: 'vue-vfor-missing-key', group: '前端', family: 'front', title: 'v-for 缺 :key' },
   { id: 'vue-v-html', group: '前端·安全', family: 'front', title: 'v-html（XSS）' },
   { id: 'js-innerhtml', group: '前端·安全', family: 'front', title: '.innerHTML 赋值' },
@@ -930,6 +1018,7 @@ export const RULE_REGISTRY = [
 const NOT_APPLICABLE = {
   familyPhp: '本次没有 PHP 改动',
   familyFront: '本次没有 JS/Vue 改动',
+  familyPython: '本次没有 Python 改动',
   familyBoundary: '未提供 --backend（前后端边界需要两个索引）',
   index: '索引不可用（先 archnav analyze）',
   tests: '仓库里没有测试文件',
@@ -947,6 +1036,7 @@ export function buildChecklist({ findings = [], meta = {} }) {
     if (!meta.hasChanges) { status = 'na'; reason = NOT_APPLICABLE.noChanges; }
     else if (r.family === 'php' && !meta.changedPhp) { status = 'na'; reason = NOT_APPLICABLE.familyPhp; }
     else if (r.family === 'front' && !meta.changedFront) { status = 'na'; reason = NOT_APPLICABLE.familyFront; }
+    else if (r.family === 'python' && !meta.changedPy) { status = 'na'; reason = NOT_APPLICABLE.familyPython; }
     else if (r.family === 'boundary' && !meta.hasBackend) { status = 'na'; reason = NOT_APPLICABLE.familyBoundary; }
     else if ((r.needs || []).includes('index') && !meta.hasIndex) { status = 'na'; reason = NOT_APPLICABLE.index; }
     else if ((r.needs || []).includes('composer') && !meta.hasComposer) { status = 'na'; reason = NOT_APPLICABLE.composer; }
@@ -1219,7 +1309,8 @@ async function main() {
     changedTotal: changedFiles.length,
     changedPhp: changedFiles.filter((f) => /\.php$/i.test(f)).length,
     changedFront: changedFiles.filter((f) => /\.(js|ts|mjs|cjs|vue)$/i.test(f)).length,
-    changedOther: changedFiles.filter((f) => !/\.(php|js|ts|mjs|cjs|vue)$/i.test(f)).length,
+    changedOther: changedFiles.filter((f) => !/\.(php|js|ts|mjs|cjs|vue|py)$/i.test(f)).length,
+    changedPy: changedFiles.filter((f) => /\.py$/i.test(f)).length,
     hasChanges: changedFiles.length > 0,
     hasBackend: Boolean(backendIndex),
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),

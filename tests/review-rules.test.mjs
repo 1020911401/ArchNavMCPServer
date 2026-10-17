@@ -17,7 +17,7 @@ const ROOT_FIX = path.resolve('__no_such_dir__');
 
 test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原因)', () => {
   const metaFull = {
-    dir: '.', changedTotal: 3, changedPhp: 2, changedFront: 1, changedOther: 0, hasChanges: true,
+    dir: '.', changedTotal: 3, changedPhp: 2, changedFront: 1, changedPy: 1, changedOther: 0, hasChanges: true,
     hasBackend: false, hasComposer: true, hasPackageJson: true, hasTests: true, hasIndex: true,
     symbols: 100, freshness: 'via=git',
   };
@@ -586,6 +586,48 @@ test('AI hallucinations: joinPosix normalises ./ and ../ segments', () => {
   assert.equal(joinPosix('components/payment', '../utils/request'), 'components/utils/request');
   assert.equal(joinPosix('a/b', '../../x'), 'x');
   assert.equal(joinPosix('a/b', './c/./d'), 'a/b/c/d');
+});
+
+test('python rules fire on Python sources and stay out of PHP/JS', () => {
+  const src = [
+    'import requests',
+    'api_key = "sk_live_1234567890"',
+    'def load(items=[], *a):',
+    '    breakpoint()',
+    '    try:',
+    '        r = requests.get("https://x")',
+    '        cur.execute(f"select * from t where id = {i}")',
+    '    except: pass',
+    'eval(user_input)',
+    'from os.path import *',
+  ].join('\n');
+  const f = scanContent('app/loader.py', src);
+  const ids = new Set(f.map((x) => x.rule));
+  for (const need of ['py-dangerous-function', 'py-raw-sql', 'py-bare-except', 'py-mutable-default-arg', 'py-debug-left-on', 'py-requests-no-timeout', 'py-hardcoded-secret', 'empty-catch', 'py-import-star']) {
+    assert.ok(ids.has(need), `expected ${need}`);
+  }
+  assert.equal(f.filter((x) => x.rule === 'py-dangerous-function')[0].severity, 'error');
+  assert.equal(f.filter((x) => x.rule === 'py-import-star')[0].severity, 'info');
+  assert.match(f.filter((x) => x.rule === 'empty-catch')[0].message, /except: pass/);
+
+  // no cross-language bleed: PHP/JS sources must not trip Python rules
+  assert.deepEqual(scanContent('app/x.php', "<?php $a = 1; // breakpoint()").filter((x) => x.rule.startsWith('py-')), []);
+  assert.deepEqual(scanContent('src/x.js', 'const a = 1; // def f(items=[])').filter((x) => x.rule.startsWith('py-')), []);
+  // …and rules that should not fire stay quiet
+  assert.deepEqual(scanContent('app/ok.py', 'import os\nr = requests.get("https://x", timeout=5)\ndef f(items=None):\n    return items\n').filter((x) => x.rule.startsWith('py-')), []);
+});
+
+test('python family shows up as 不适用 when the change has no .py file', () => {
+  const meta = {
+    dir: '.', changedTotal: 1, changedPhp: 1, changedFront: 0, changedPy: 0, changedOther: 0, hasChanges: true,
+    hasBackend: false, hasComposer: true, hasPackageJson: false, hasTests: false, hasIndex: true,
+    symbols: 10, freshness: 'via=git',
+  };
+  const { rows } = buildChecklist({ findings: [], meta });
+  const py = rows.filter((r) => r.family === 'python');
+  assert.ok(py.length >= 8, `expected the Python rules in the registry, got ${py.length}`);
+  assert.equal(py.every((r) => r.status === 'na' && r.reason === '本次没有 Python 改动'), true);
+  assert.equal(rows.some((r) => r.id === 'py-dangerous-function'), true);
 });
 
 test('stack detection switches features by language, with evidence', () => {
