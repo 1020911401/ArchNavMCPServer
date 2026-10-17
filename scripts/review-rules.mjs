@@ -1390,7 +1390,10 @@ export const EXTENDED_RULES = new Set([
 export const MODE_PRESETS = {
   brief: { tier: 'core', checklist: false, impact: false, deep: false, duplication: false, dupKinds: [], compact: true },
   standard: { tier: 'all', checklist: true, impact: true, deep: false, duplication: true, dupKinds: ['renamed', 'similar'], compact: false },
-  deep: { tier: 'all', checklist: true, impact: true, deep: true, duplication: true, dupKinds: ['renamed', 'similar', 'gap'], compact: false },
+  deep: { tier: 'all', checklist: true, impact: true, deep: true, duplication: true, dupKinds: ['renamed', 'similar', 'gap'], compact: false, audit: true },
+  // `deep` also audits dependencies (OSV over HTTP): repo-level mode is the one that
+  // runs periodically, not per commit — a network hiccup shows up as a na row, never
+  // as a failed build.
 };
 
 export function applyMode(opts) {
@@ -1401,13 +1404,94 @@ export function applyMode(opts) {
   out.impact = opts.impactFlag || (preset.impact && !opts.duplicationOnly);
   out.deep = opts.deepFlag || preset.deep;
   out.duplication = opts.duplicationFlag || preset.duplication;
+  // null = follow the preset (deep audits); explicit --audit / --no-audit wins
+  out.audit = opts.auditFlag === null || opts.auditFlag === undefined ? Boolean(preset.audit) : Boolean(opts.auditFlag);
   // an explicit analysis flag implies at least `standard` output: asking for the
   // analysis and then hiding the sheet would be surprising
   out.checklist = opts.checklistFlag !== null ? opts.checklistFlag : (preset.checklist || anyAnalysisFlag);
   if (!opts.dupKindsFlag && !out.dupKinds.length) out.dupKinds = preset.dupKinds;
   if (opts.compactFlag === null) out.compact = preset.compact;
+  // explicit --no-compact must win over the brief default (line above only follows the
+  // preset when the flag is absent, so without this `--no-compact` could never turn
+  // compact off — `--json` then emitted the compact summary with no checklist/why/evidence).
+  else out.compact = Boolean(opts.compactFlag);
   return out;
 }
+/**
+ * How Semgrep is located, in order (first candidate that starts wins):
+ *   1. `$SEMGREP_BIN`
+ *   2. `semgrep` on PATH
+ *   3. the console scripts of the python that reports them — pip --user installs into a
+ *      Scripts dir that is **not** on PATH (measured on this machine:
+ *      `%APPDATA%\Python\Python314\Scripts\semgrep.exe`, while the interpreter's own
+ *      Scripts dir has no semgrep at all). `semgrep.exe` is a launcher that spawns
+ *      `pysemgrep` by name, so its PATH gets that dir prepended; the `pysemgrep`
+ *      script sitting next to it needs no such help.
+ *   4. `python -m semgrep` — last resort: Semgrep ≥ 1.38 refuses to run that way
+ *      (measured: exit 2 with a deprecation notice), so it only helps on old installs.
+ */
+export function semgrepCandidates(env = process.env, { scriptsDirs = [] } = {}) {
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  const out = [];
+  if (env.SEMGREP_BIN) out.push({ bin: env.SEMGREP_BIN, prefix: [] });
+  out.push({ bin: 'semgrep', prefix: [] });
+  for (const dir of scriptsDirs) {
+    out.push({ bin: path.join(dir, `semgrep${exe}`), prefix: [], pathPrefix: dir });
+    out.push({ bin: path.join(dir, `pysemgrep${exe}`), prefix: [] });
+  }
+  out.push({ bin: env.PYTHON || 'python', prefix: ['-m', 'semgrep'] });
+  return out;
+}
+
+/**
+ * Where the active python keeps console scripts: the interpreter's own dir and the user
+ * base dir (`pip --user` puts them there — on this machine that is the only copy, and it
+ * is not on PATH). Both are returned; missing ones simply fail to spawn.
+ */
+export function pythonScriptsDirs(env = process.env, spawnImpl = spawnSync) {
+  const code = 'import sys,sysconfig;u="nt_user" if sys.platform=="win32" else "posix_user";print(sysconfig.get_path("scripts"));print(sysconfig.get_path("scripts",u))';
+  try {
+    const r = spawnImpl(env.PYTHON || 'python', ['-c', code], {
+      encoding: 'utf8', timeout: 20000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (r.error || r.status !== 0) return [];
+    return [...new Set(String(r.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean))];
+  } catch { return []; }
+}
+
+/**
+ * Walk the candidate list until one actually starts. Returns `{ bin, result }` for the
+ * first spawn that was not a plain "not found"; when nothing is found the last ENOENT
+ * result comes back so the caller can report *why* instead of staying silent.
+ */
+export function resolveSemgrep({ env = process.env, args = [], spawnImpl = spawnSync } = {}) {
+  let order = semgrepCandidates(env);
+  let last = null;
+  for (let i = 0; i < order.length; i++) {
+    const c = order[i];
+    const spawnEnv = c.pathPrefix ? { ...env, PATH: `${c.pathPrefix}${path.delimiter}${env.PATH || ''}` } : env;
+    const result = spawnImpl(c.bin, [...c.prefix, ...args], {
+      encoding: 'utf8', timeout: 10 * 60 * 1000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: spawnEnv,
+    });
+    last = { bin: c.bin, prefix: c.prefix, result };
+    if (!(result.error && result.error.code === 'ENOENT')) return last;
+    if (c.bin === 'semgrep') {                       // not on PATH: ask python where pip put it
+      const dirs = pythonScriptsDirs(env, spawnImpl);
+      if (dirs.length) order = semgrepCandidates(env, { scriptsDirs: dirs });
+    }
+  }
+  return last;
+}
+
+/** Semgrep may print warnings before the JSON payload; take the first JSON object. */
+export function parseSemgrepJson(stdout) {
+  try { return JSON.parse(String(stdout || '').replace(/^[^{]*/, '')); } catch { return null; }
+}
+
+export function firstLine(text) {
+  return String(text || '').split('\n').map((s) => s.trim()).filter(Boolean)[0] || '';
+}
+
 export const RULE_REGISTRY = [
   // ── 结构 / 通用 ────────────────────────────────────────────────────────────
   { id: 'taint-source-to-sink', group: '污点', family: 'any', title: '外部输入直达危险 sink（文件内污点追踪）' },
@@ -1704,7 +1788,7 @@ function parseArgs(argv) {
     // modes: `brief` (default) = high-signal rules, findings only, compact JSON;
     // `standard` = full task sheet; `deep` = + repo-level deep analysis.
     mode: 'brief', tier: 'core',
-    checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, compactFlag: null,
+    checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, compactFlag: null, auditFlag: null,
     checklist: false, duplication: false, impact: false, deep: false, compact: true,
     dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null,
   };
@@ -1725,7 +1809,8 @@ function parseArgs(argv) {
     else if (a === '--duplication') out.duplicationFlag = true;
     else if (a === '--impact') out.impactFlag = true;
     else if (a === '--deep') out.deepFlag = true;
-    else if (a === '--audit') out.audit = true;
+    else if (a === '--audit') out.auditFlag = true;
+    else if (a === '--no-audit') out.auditFlag = false;
     else if (a === '--semgrep') out.semgrep = true;
     else if (a === '--fail-on-cve') { out.failOnCve = String(argv[++i]).toUpperCase(); out.failOnCveSet = true; }
     else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deepFlag = true; }
@@ -1905,21 +1990,26 @@ async function main() {
     } catch (e) { console.error(`audit skipped: ${e.message}`); }
   }
   if (opts.semgrep) {
-    // Honest boundary: interprocedural taint needs an engine. If Semgrep is on PATH we
+    // Honest boundary: interprocedural taint needs an engine. If Semgrep is available we
     // use it (it IS the tool for this); if not, the row says exactly that instead of
     // pretending the file-local tracker above is equivalent.
-    const r = spawnSync('semgrep', ['--json', '--quiet', '--config', 'auto', dir], {
-      encoding: 'utf8', timeout: 10 * 60 * 1000, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const resolved = resolveSemgrep({ args: ['--json', '--quiet', '--config', 'auto', dir] });
+    const r = resolved?.result || { error: { code: 'ENOENT' } };
+    const parsed = r.error ? null : parseSemgrepJson(r.stdout);
+    const results = parsed?.results || [];
     if (r.error && r.error.code === 'ENOENT') {
       extraRows.push({
         id: 'taint.semgrep', group: '污点', family: 'any', title: 'Semgrep 跨函数污点分析',
-        status: 'na', hits: 0, reason: 'semgrep 未安装（pipx install semgrep）；本次只有文件内污点追踪',
+        status: 'na', hits: 0, reason: 'semgrep 不可用（pip install semgrep —— --user 装到非 PATH 的 Scripts 目录也会被找到；或用 SEMGREP_BIN 指定路径）；本次只有文件内污点追踪',
+      });
+    } else if (!results.length && r.status !== 0) {
+      // The binary exists but produced no JSON (missing module, bad config, crash).
+      // Reporting `pass` here would read as "no taint found" — say what happened.
+      extraRows.push({
+        id: 'taint.semgrep', group: '污点', family: 'any', title: 'Semgrep 跨函数污点分析',
+        status: 'na', hits: 0, reason: `semgrep 未能产出结果（退出码 ${r.status}）：${firstLine(r.stderr) || '无 stderr'}；本次只有文件内污点追踪`,
       });
     } else {
-      let parsed = null;
-      try { parsed = JSON.parse(String(r.stdout || '').replace(/^[^{]*/, '')); } catch { /* below */ }
-      const results = parsed?.results || [];
       for (const res of results.slice(0, 200)) {
         const sev = String(res.extra?.severity || 'INFO').toUpperCase();
         findings.push({

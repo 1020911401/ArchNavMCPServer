@@ -5,10 +5,11 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { taintFindings, reviewFindings, RULE_REGISTRY } from '../scripts/review-rules.mjs';
+import path from 'node:path';
+import { taintFindings, reviewFindings, RULE_REGISTRY, MODE_PRESETS, applyMode, semgrepCandidates, parseSemgrepJson, firstLine, resolveSemgrep, pythonScriptsDirs } from '../scripts/review-rules.mjs';
 import {
   parseNpmLock, parseComposerLock, parseGoMod, parseRequirements,
-  osvSeverity, osvFindings, buildDepChecklist,
+  osvSeverity, osvFindings, buildDepChecklist, queryOsv,
 } from '../scripts/audit-deps.mjs';
 
 test('taint: request input reaching echo / exec / SQL is caught, escaping silences it', () => {
@@ -111,4 +112,97 @@ test('audit: checklist rows explain what could not be scanned', () => {
   assert.match(byId.get('deps.unpinned').reason, /flask/);
   const withError = buildDepChecklist({ collected: { ecosystems: {}, missing: [], unscannable: [] }, entries: [], error: 'OSV timeout' });
   assert.match(withError[0].reason, /OSV timeout/);
+});
+
+test('audit: the deep preset audits, --no-audit / --audit override it both ways', () => {
+  assert.equal(MODE_PRESETS.deep.audit, true, 'repo-level mode is the one that runs periodically');
+  assert.ok(!MODE_PRESETS.brief.audit && !MODE_PRESETS.standard.audit, 'per-commit modes never hit the network');
+  // parseArgs leaves the flag null when neither --audit nor --no-audit was given
+  assert.equal(applyMode({ mode: 'deep', auditFlag: null, dupKinds: [] }).audit, true);
+  assert.equal(applyMode({ mode: 'deep', auditFlag: false, dupKinds: [] }).audit, false, 'CI runs deep without touching OSV');
+  assert.equal(applyMode({ mode: 'brief', auditFlag: true, dupKinds: [] }).audit, true, '--audit works on its own');
+  assert.equal(applyMode({ mode: 'standard', auditFlag: null, dupKinds: [] }).audit, false);
+});
+
+test('OSV details: one fetch per unique advisory id, through a bounded pool', async () => {
+  const calls = [];
+  let live = 0, peak = 0;
+  const fetchImpl = async (url) => {
+    live++; peak = Math.max(peak, live);
+    await new Promise((r) => setTimeout(r, 5));
+    live--; calls.push(url);
+    if (url.endsWith('/querybatch')) {
+      // dep a → two advisories, dep b → shares one of them, dep c → none
+      return { ok: true, json: async () => ({ results: [{ vulns: [{ id: 'GHSA-x' }, { id: 'GHSA-y' }] }, { vulns: [{ id: 'GHSA-x' }] }, { vulns: [] }] }) };
+    }
+    return { ok: true, json: async () => ({ id: url.split('/').pop() }) };
+  };
+  const deps = ['a', 'b', 'c'].map((name) => ({ ecosystem: 'npm', name, version: '1.0.0' }));
+  const entries = await queryOsv(deps, { fetchImpl, concurrency: 2 });
+  const details = calls.filter((u) => u.includes('/v1/vulns/')).sort();
+  assert.deepEqual(details, ['https://api.osv.dev/v1/vulns/GHSA-x', 'https://api.osv.dev/v1/vulns/GHSA-y'], 'the shared advisory is fetched once, not once per package');
+  assert.deepEqual(entries.map((e) => `${e.dep.name}:${e.vuln.id}`).sort(), ['a:GHSA-x', 'a:GHSA-y', 'b:GHSA-x'], 'every (package, advisory) pair is reported');
+  assert.ok(peak <= 3, `in-flight requests stay bounded (peak ${peak})`);
+});
+
+test('OSV details: a failed detail response drops that entry, never invents one', async () => {
+  let live = 0, peak = 0;
+  const ids = Array.from({ length: 30 }, (_, i) => `TH-${i}`);
+  const fetchImpl = async (url) => {
+    live++; peak = Math.max(peak, live);
+    await new Promise((r) => setTimeout(r, 5));
+    live--;
+    if (url.endsWith('/querybatch')) return { ok: true, json: async () => ({ results: [{ vulns: ids.map((id) => ({ id })) }] }) };
+    return { ok: false, status: 500 };
+  };
+  const entries = await queryOsv([{ ecosystem: 'npm', name: 'a', version: '1.0.0' }], { fetchImpl, concurrency: 4 });
+  assert.deepEqual(entries, [], 'no detail → no finding');
+  assert.ok(peak <= 5, `30 advisories do not open 30 sockets at once (peak ${peak})`);
+});
+
+test('semgrep: resolution order, and its stdout is read past the leading warning', () => {
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  assert.deepEqual(semgrepCandidates({}).map((c) => c.bin), ['semgrep', 'python']);
+  assert.deepEqual(semgrepCandidates({}).at(-1), { bin: 'python', prefix: ['-m', 'semgrep'] });
+  assert.equal(semgrepCandidates({ SEMGREP_BIN: '/opt/semgrep' })[0].bin, '/opt/semgrep', 'an explicit binary wins');
+  assert.deepEqual(semgrepCandidates({ PYTHON: 'py3' }).at(-1), { bin: 'py3', prefix: ['-m', 'semgrep'] }, 'PYTHON picks the interpreter');
+  const sd = '/home/u/.local/bin';
+  const withScripts = semgrepCandidates({}, { scriptsDirs: [sd] });
+  assert.deepEqual(withScripts.map((c) => c.bin), ['semgrep', path.join(sd, `semgrep${exe}`), path.join(sd, `pysemgrep${exe}`), 'python']);
+  assert.equal(withScripts[1].pathPrefix, sd, 'the semgrep launcher needs its own dir on PATH to find pysemgrep');
+  // measured: the fallback prints a deprecation notice before the JSON
+  assert.deepEqual(parseSemgrepJson('Using python -m semgrep is deprecated\n{"results":[]}'), { results: [] });
+  assert.equal(parseSemgrepJson('not json at all'), null);
+  assert.equal(parseSemgrepJson(''), null);
+  assert.equal(firstLine('\n   node: bad option: --json  \nmore text'), 'node: bad option: --json');
+  assert.equal(firstLine(null), '');
+});
+
+test('semgrep: an off-PATH install is found before falling back to `python -m`', () => {
+  const exe = process.platform === 'win32' ? '.exe' : '';
+  const interp = 'C:\\py\\Scripts';
+  const userBase = 'C:\\Users\\x\\AppData\\Roaming\\Python\\Python314\\Scripts';
+  const tried = [];
+  const spawnImpl = (bin, args) => {
+    tried.push(`${bin} ${args.join(' ')}`.trim());
+    if (bin === 'python' && args[0] === '-c') return { status: 0, stdout: `${interp}\r\n${userBase}\r\n` };
+    if (bin === 'semgrep') return { error: { code: 'ENOENT' } };
+    if (bin.startsWith(interp)) return { error: { code: 'ENOENT' } };   // the interpreter's own dir has no semgrep (measured)
+    return { status: 0, stdout: '{"results":[{"check_id":"x"}]}' };
+  };
+  const r = resolveSemgrep({ env: { PATH: '/usr/bin' }, args: ['--json'], spawnImpl });
+  assert.equal(r.bin, path.join(userBase, `semgrep${exe}`), 'the user-base script python reports wins over the deprecated module route');
+  assert.equal(tried[0], 'semgrep --json', 'PATH is tried before python is asked anything');
+  assert.match(tried[1], /^python -c import sys,sysconfig/, 'python is asked only after the PATH lookup misses');
+  assert.ok(!tried.some((t) => t.endsWith('-m semgrep')), 'the deprecated `python -m semgrep` route is never reached when a script exists');
+  assert.match(r.result.stdout, /results/);
+
+  // helpers behind it
+  assert.deepEqual(pythonScriptsDirs({}, () => ({ status: 0, stdout: 'C:\\a\\Scripts\n  C:\\b\\Scripts  \nC:\\a\\Scripts\n' })), ['C:\\a\\Scripts', 'C:\\b\\Scripts'], 'both dirs, deduplicated');
+  assert.deepEqual(pythonScriptsDirs({}, () => ({ status: 1, stdout: '/nope' })), []);
+  assert.deepEqual(pythonScriptsDirs({}, () => ({ error: { code: 'ENOENT' } })), []);
+
+  // nothing works anywhere: the last "not found" comes back so the caller can say why
+  const none = resolveSemgrep({ env: { PATH: '/usr/bin' }, spawnImpl: (bin, args) => (bin === 'python' && args[0] === '-c' ? { status: 1, stdout: '' } : { error: { code: 'ENOENT' } }) });
+  assert.equal(none.result.error.code, 'ENOENT');
 });

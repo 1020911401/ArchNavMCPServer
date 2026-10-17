@@ -140,6 +140,15 @@ of a legacy repo (the measured rate is in the last column).
 | `deep-module-risk` | W | the repo's highest-risk module (standing condition — never gates by default) |
 | `duplication-clone` | W | clone kinds `exact` / `renamed` / `similar` / `gap`, with a baseline so only *new* clones matter |
 
+### Taint / dependency audit (optional engines, honest rows)
+
+| rule / row | sev | fires when |
+|---|---|---|
+| `taint-source-to-sink` | W (E for exec/eval sinks) | request/query input reaches `echo` / raw SQL / `exec` / `innerHTML` **in the same file**; escaping on the way clears it. Not interprocedural — that is what `--semgrep` is for |
+| `dep-vulnerability` | W / I | with `--audit`: OSV has an advisory for a pinned version (fix version + CVSS in the evidence). Pre-existing state, so it never gates unless `--fail-on-cve high\|critical` |
+| `deps.<eco>` / `deps.<eco>.missing` / `deps.unpinned` / `deps.osv` | — / I | what the audit actually covered — and why something could not be scanned (no `composer.lock`, a range instead of a pin, an OSV error). A network hiccup lands here, never as a failed build |
+| `taint.semgrep` | — | with `--semgrep`: the external engine's results. Unusable (not installed, or it exits without JSON) → `➖` carrying the exit code and the first stderr line, never a silent pass |
+
 ## Boundary: what the deep half must respect
 
 1. Off by default (`--mode deep` or explicit flags).
@@ -150,12 +159,15 @@ of a legacy repo (the measured rate is in the last column).
    deep group).
 
 Not done, on purpose: `Cypher queries` (product surface) and `PDG / taint data-flow`
-(needs a real SSA front end — use Semgrep taint).
+(needs a real SSA front end — cross-function taint is delegated to Semgrep via `--semgrep`).
+Dependency vulnerabilities are pre-existing state, not this change's defect: `--audit`
+(on in `deep`, off in CI via `--no-audit`) reports them as warn/info and never gates
+unless `--fail-on-cve` is given.
 
 ## How any of this is trusted
 
-- `tests/*.test.mjs` — 205 tests, 203 pass, 2 skipped (the 2 need the fixtures, which
-  hold customer code and stay out of git).
+- `tests/*.test.mjs` — 225 tests, 223 pass, 2 skipped (the 2 are the cross-engine smoke
+  tests: they need `codegraph` / `gitnexus` on PATH, so a clean checkout skips them).
 - `scripts/selftest.mjs` — builds a throwaway repo containing every stack, injects real
   defects, and verifies the designed behaviours end to end, printing ✅/❌ with evidence.
 - CI ([`.github/workflows/review.yml`](../.github/workflows/review.yml)) — fixture-independent

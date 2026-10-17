@@ -32,7 +32,9 @@ attached to every answer**. Nothing in the pipeline requires a third-party binar
   guessing from filenames: a controller method surfaces its route, a component method
   surfaces the pages that render it. Every row carries `depth` / `via` / `source_kind` /
   `confidence`.
-- **Review layer (diff-scoped)** — 40 rules for PHP/Laravel, JS/Vue/uni-app and Python,
+- **Review layer (diff-scoped)** — 61 rules for PHP/Laravel, JS/Vue/uni-app, Python and Go,
+  plus a file-local taint tracker, an OSV dependency audit and an optional Semgrep pass for
+  interprocedural taint,
   a front/back API-boundary check, affected-test selection, block-level duplication
   against a baseline, and one checklist that lists what was checked *and* what was
   skipped and why. See [the review pipeline](#-review-pipeline) and
@@ -66,10 +68,11 @@ these five constraints, and each is enforced by code rather than intent:
 5. **Deletable in isolation** — the review path imports them lazily and works without
    them; `scripts/selftest.mjs` asserts the default output carries no deep group.
 
-**Not done, on purpose:** `Cypher queries` (a query language is a product surface with
-its own grammar, docs and injection surface — `--json` covers agent use) and
-`PDG / taint data-flow` (needs a real SSA front end; edges we cannot evidence would
-poison every number built on top of them — use Semgrep taint for that).
+Not done, on purpose: `Cypher queries` (product surface) and `PDG / taint data-flow`
+(needs a real SSA front end — cross-function taint is delegated to Semgrep). Dependency
+vulnerabilities stay out of the rule table: they are pre-existing state, not this change's
+defect — `--audit` (on in `deep`, off in CI) reports them as warn/info, and gating is
+opt-in via `--fail-on-cve`.
 
 ### 🔍 Review pipeline
 
@@ -104,6 +107,19 @@ Explicit `--impact` / `--deep` / `--duplication` flags upgrade the output automa
 `--all-rules` re-enables the context rules that fire on half of a legacy repo
 (`js-loose-equality` hits 160/333 files — opt-in by design); `--compact` / `--no-compact`
 control the JSON payload; `--no-checklist` prints findings only.
+
+Two optional engines the checklist reports honestly:
+
+- **`--audit` / `--no-audit`** — dependency vulnerabilities via OSV (npm / Packagist / Go /
+  requirements). `deep` turns it on, CI turns it back off (`--no-audit`) so a network hiccup
+  can never fail a build; the row says what could not be scanned (missing lockfile,
+  unpinned range, OSV error) instead of passing silently. `--fail-on-cve high|critical`
+  turns it into a gate.
+- **`--semgrep`** — interprocedural taint, from the real engine. Resolution order is
+  `$SEMGREP_BIN` → `semgrep` on PATH → the console scripts the active python reports
+  (a `pip --user` install lands in a Scripts dir that is **not** on PATH) → `python -m
+  semgrep` (refused by semgrep ≥ 1.38, hence last). When nothing is usable the row is
+  `➖ taint.semgrep` *with the reason* — never a silent pass.
 
 **The task sheet** renders every rule as `✅ 通过` / `⚠️ 命中(N)` / `➖ 不适用(+原因)`,
 then groups the analysis:
@@ -229,7 +245,7 @@ every PHP repo reported `Layer: null`.
 │   ├── treewalker.js         # JS AST parser (acorn)
 │   └── parsers/              # dispatcher + TS / Python / WASM parsers
 ├── scripts/
-│   ├── review-rules.mjs      # 40 rules + task sheet + SARIF / markdown / gates
+│   ├── review-rules.mjs      # 61 rules + task sheet + SARIF / markdown / gates
 │   ├── impact.mjs            # entry points, blast radius, explainable risk
 │   ├── deep.mjs              # flows, clusters, cycles, module risk, cross-repo
 │   ├── duplication.mjs       # jscpd wrapper: clone kinds + baseline gate
@@ -265,7 +281,8 @@ ArchNav 为仓库建知识图谱，回答 Agent 最容易答错的问题 —— 
   （AI 新增文件正是未跟踪）；没有 git 时退回内容漂移并显式写进 `note`。
 - **纯图谱影响分析**：`impact` 沿真实 `DEPENDS_ON` 边反向走，不靠文件名猜；每行带
   `depth` / `via` / `source_kind` / `confidence`。
-- **审核层（diff 范围）**：40 条规则覆盖 PHP/Laravel、JS/Vue/uni-app、Python；前后端接口
+- **审核层（diff 范围）**：61 条规则覆盖 PHP/Laravel、JS/Vue/uni-app、Python、Go；文件内污点
+  追踪 + OSV 依赖漏洞审计（`--audit`，`deep` 默认开）+ 可选 Semgrep 跨函数污点；前后端接口
   边界核对；受影响测试选择；块级重复 + 基线门禁；一张清单同时列出**查过什么、跳过什么、为什么**。
 - **外部引擎降级为交叉验证**：CodeGraph / GitNexus 适配器仍在（显式 `engine`，或 MCP 的
   `engine: auto`），但**默认引擎是 ArchNav 自己的图谱**，管道不依赖它们。
@@ -285,7 +302,9 @@ ArchNav 为仓库建知识图谱，回答 Agent 最容易答错的问题 —— 
 5. **可单独删除** —— 审核主路径 lazy import，删掉不影响主流程；自测断言默认输出不含深查分组。
 
 **明令不做**：`Cypher 查询`（产品面：语法/文档/注入面，`--json` 对 agent 够用）、
-`PDG/污点数据流`（需要真 SSA 前端，编出来的边会污染所有下游数字 —— 要用就上 Semgrep taint）。
+`PDG/污点数据流`（需要真 SSA 前端，编出来的边会污染所有下游数字 —— 跨函数污点外包给 Semgrep）。
+依赖漏洞不进主规则表：它是**既有状态**不是本次改动，走 `--audit`（`deep` 默认开、CI 用
+`--no-audit` 关掉），命中只作 warn/info，要拦必须显式 `--fail-on-cve`。
 
 ### 🔍 审核层：一条命令，一张清单
 

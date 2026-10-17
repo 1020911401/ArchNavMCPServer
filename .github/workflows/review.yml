@@ -83,7 +83,7 @@ jobs:
           node scripts/review-rules.mjs . $SCOPE_ARGS \
             --mode deep \
             --impact --impact-depth 4 \
-            --deep \
+            --deep --no-audit \
             --duplication --dup-kinds renamed,similar \
             --dup-baseline-from-ref "origin/${BASE_REF:-HEAD}" \
             --dup-max-new-clones 6 \
