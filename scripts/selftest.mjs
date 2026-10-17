@@ -281,13 +281,17 @@ check('review-rules：--gate 在 error 级发现时 exit 1', () => {
 check('review-rules：默认 brief 便宜、standard 更全（模式切换生效）', () => {
   const brief = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged'], TMP);
   const std = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--standard'], TMP);
+  const deepOut = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--mode', 'deep'], TMP);
   const briefJson = run(node, [script('review-rules.mjs'), '.', '--scope', 'unstaged', '--json'], TMP);
   let compact = {};
   try { compact = JSON.parse(briefJson.stdout); } catch { /* below */ }
-  const ok = brief.stdout.length < std.stdout.length && compact.mode === 'brief' && compact.tier === 'core';
+  // boundary constraint #5: the default path must not carry the deep analysis
+  const noDeepInBrief = !brief.stdout.includes('代码库深查') && !brief.stdout.includes('影响面');
+  const deepPresent = deepOut.stdout.includes('代码库深查');
+  const ok = brief.stdout.length < std.stdout.length && compact.mode === 'brief' && compact.tier === 'core' && noDeepInBrief && deepPresent;
   return {
     ok,
-    evidence: `brief=${brief.stdout.length}B standard=${std.stdout.length}B mode=${compact.mode} tier=${compact.tier} findings=${compact.findings?.length}`,
+    evidence: `brief=${brief.stdout.length}B standard=${std.stdout.length}B mode=${compact.mode} tier=${compact.tier} brief 无深查=${noDeepInBrief} deep 有深查=${deepPresent}`,
   };
 });
 check('package.json：test 脚本用 tests/**/*.test.mjs（避免把 scripts 当测试）', () => {

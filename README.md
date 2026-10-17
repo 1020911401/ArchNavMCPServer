@@ -16,7 +16,34 @@ ArchNav is an **architecture-aware code navigation** system for AI agents (Herme
 - **Recall layer for what plain ASTs miss** — Blade template calls (Laravel), alias imports (`@/…`), calls nested inside Vue/JS callbacks, Laravel routes, and the uni-app page/component layer. Every edge carries `source_kind` (`ast` / `template` / `callback` / `route` / `navigation` / `component` / `heuristic`) plus a confidence, so consumers can down-weight guesses.
 - **Diff-driven change impact** — `changes` maps a git diff (unstaged / staged / all / vs a base ref) to the symbols it touches and everything that breaks; without git it falls back to the index's content-drift signal and says so.
 - **Graph-only impact** — `impact` walks real `DEPENDS_ON` edges 1–2 hops backwards (no filename guessing): a controller method surfaces its route, a component method surfaces the pages that render it.
-- **Fused multi-engine** — optional adapters for **CodeGraph** and **GitNexus**; `callers` / `fusion_calls` fan out to `auto | codegraph | gitnexus | archnav` and merge, deduplicate and re-score the results. GitNexus starts lazily and is only needed for the deeper ops (flows, clusters, risk grading).
+- **Fused multi-engine** — optional adapters for **CodeGraph** and **GitNexus**; `callers` / `fusion_calls` fan out to `auto | codegraph | gitnexus | archnav` and merge, deduplicate and re-score the results.
+
+### 🚧 Local deep ops, and the boundary they must respect
+
+Four things this project originally delegated to GitNexus (`flows`, `clusters`, `risk
+grading`, `cross-repo groups`) are now implemented locally — a CI pipeline cannot
+depend on a third-party binary that needs a C++ toolchain. They are kept only under
+these five constraints, each of which is enforced by code, not by intent:
+
+1. **Off by default** — they live behind `--mode deep` or an explicit `--impact` /
+   `--deep` / `--duplication` flag; the default `brief` mode never builds them
+   (`MODE_PRESETS`, and brief mode filters the findings before rendering).
+2. **Evidence or nothing** — every deep row carries `depth` / `via` / `source_kind` /
+   `confidence`; flow steps that come from unbound placeholders or `heuristic` edges
+   are dropped rather than reported (measured: they dominated the first Laravel run).
+3. **Repo-level standing conditions never fail a build** — module risk and cycles are
+   reported as `warn` with every factor listed; blocking is opt-in via
+   `--module-max-risk` / `--impact-max-risk`. Only change-scoped defects gate `--gate`.
+4. **Gate thresholds are calibrated on measured cases** — e.g. the new-clone gate sits
+   at 6 because a legitimate rule-table addition produced 4 *renamed* clones while the
+   genuine incident (a verbatim 13-line copy) produced 1 *exact* clone.
+5. **Deletable in isolation** — the review path imports them lazily and works without
+   them; `scripts/selftest.mjs` asserts that the default output contains no deep group.
+
+**Still not done, on purpose:** `Cypher queries` (a query language is a product
+surface with its own grammar, docs and injection surface — `--json` covers agent use)
+and `PDG / taint data-flow` (needs a real SSA front end; edges we cannot evidence
+would poison every number built on top — use Semgrep taint for that instead).
 
 ### 🔍 Review pipeline (diff-scoped)
 
