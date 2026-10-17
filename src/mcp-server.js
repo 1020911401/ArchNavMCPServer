@@ -113,7 +113,7 @@ async function callGN(tool, args) {
 //  Tool Definitions (9)
 // ═══════════════════════════════════════════════════
 
-const ENGINE_ENUM = { type: 'string', enum: ['auto', 'codegraph', 'gitnexus', 'archnav'], description: 'Engine selector (default auto)' };
+const ENGINE_ENUM = { type: 'string', enum: ['archnav', 'codegraph', 'gitnexus', 'auto'], description: 'Engine selector. Default `archnav` (this repo\'s own graph, no external binary). `auto` fans out to the external CLIs when installed — cross-check only.' };
 
 const TOOLS = [
   {
@@ -144,7 +144,7 @@ const TOOLS = [
   },
   {
     name: 'archnav_callers',
-    description: '[ArchNav] Find callers of a symbol, fused across codegraph, gitnexus and archnav engines.',
+    description: '[ArchNav] Find callers of a symbol. Uses this repo\'s own knowledge graph by default; pass engine=auto to also ask the external CLIs (codegraph, gitnexus) as a cross-check.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -226,12 +226,19 @@ const TOOLS = [
   },
   {
     name: 'archnav_analyze',
-    description: '[ArchNav] Build or update the architecture knowledge graph index.',
-    inputSchema: { type: 'object', properties: { projectDir: { type: 'string' } }, required: ['projectDir'] },
+    description: '[ArchNav] Build or update the architecture knowledge graph index. `ignore` takes gitignore-ish globs (comma-separated) so vendored trees, fixtures or generated code stay out of the index; the patterns are recorded in the index so `status` honours them too.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectDir: { type: 'string' },
+        ignore: { type: 'string', description: 'Comma-separated globs to exclude, e.g. "bench/**,**/vendor/**,**/node_modules/**"' },
+      },
+      required: ['projectDir'],
+    },
   },
   {
     name: 'archnav_fusion_calls',
-    description: '[ArchNav] Multi-engine caller fusion: per-engine counts plus merged call sites with confidence.',
+    description: '[ArchNav] Multi-engine caller fusion: per-engine counts plus merged call sites with confidence. `archnav` (default) uses only this repo\'s graph; `auto` adds the external CLIs when installed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -270,7 +277,7 @@ const EXPLORE_OPS = {
 
 async function gatherCallersFromEngines(name, args) {
   const dir = path.resolve(args.projectDir || process.cwd());
-  const engine = args.engine || 'auto';
+  const engine = args.engine || 'archnav';
   const timeoutMs = args.timeoutMs;
   const results = [];
 
@@ -475,9 +482,10 @@ async function handleToolCall(name, args) {
     }
 
     case 'archnav_analyze': {
-      const result = await analyze(dir, {});
+      const result = await analyze(dir, { ignore: args.ignore });
       saveIndex(dir, result._raw || result);
-      return mkText(`✅ ${result.files} files, ${result.symbols} symbols, ${result.layers} layers`);
+      const ignored = (result.ignore || []).length;
+      return mkText(`✅ ${result.files} files, ${result.symbols} symbols, ${result.layers} layers${ignored ? `, ${ignored} ignore pattern(s)` : ''}`);
     }
   }
 
@@ -545,6 +553,6 @@ const ERRORS = {
   INTERNAL_ERROR: { code: -32603, message: 'Internal error' },
 };
 
-process.stderr.write(`[archnav] MCP server: ${TOOLS.length} tools; engines: codegraph, gitnexus, archnav\n`);
+process.stderr.write(`[archnav] MCP server: ${TOOLS.length} tools; engine: archnav (default) — optional cross-check engines: codegraph, gitnexus\n`);
 
 export { TOOLS, handleToolCall, gatherCallersFromEngines, confidenceOf };

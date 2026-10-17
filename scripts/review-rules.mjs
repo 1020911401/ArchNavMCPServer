@@ -193,7 +193,48 @@ const SEC_PATTERNS = [
   },
 ];
 
-/** Same idea for the front-end: the PHP patterns must not run over JS/Vue. */
+/** Python: the same three classes as PHP/JS — dangerous calls, swallowed errors,
+ * injection, plus the two traps that are Python-only (mutable default args,
+ * requests without a timeout). */
+const PY_PATTERNS = [
+  {
+    rule: 'py-dangerous-function', severity: 'error',
+    re: /\b(?:eval|exec)\s*\(|pickle\.loads?\s*\(|os\.system\s*\(|subprocess\.[a-z_]+\([^)\n]*shell\s*=\s*True/,
+    why: 'eval/exec/pickle/os.system/shell=True 把数据变成代码或命令：任何拼进来的变量都是 RCE 或反序列化入口。',
+  },
+  {
+    rule: 'py-raw-sql', severity: 'error',
+    re: /\.execute\s*\(\s*f['"]|\.execute\s*\(\s*['"][^'"]*['"]\s*(?:%|\+)/,
+    why: 'f-string / % / 拼接进 SQL 就是注入；用参数化（execute(sql, params)）。',
+  },
+  {
+    rule: 'py-bare-except', severity: 'warn',
+    re: /except\s*:/,
+    why: '裸 except 连 KeyboardInterrupt/SystemExit 一起吞：至少写 except Exception as e 并记录。',
+  },
+  {
+    rule: 'py-mutable-default-arg', severity: 'warn',
+    re: /def\s+\w+\s*\([^)]*=\s*(?:\[\]|\{\}|set\(\))/,
+    why: '可变默认参数在调用之间共享同一个对象（经典 Python 陷阱）：默认值用 None，函数体内再建。',
+  },
+  {
+    rule: 'py-debug-left-on', severity: 'warn',
+    re: /(?<![\w.])(?:breakpoint\(\)|pdb\.set_trace\(\))/,
+    why: 'breakpoint()/pdb 留在提交里会让服务在请求路径上直接挂住。',
+  },
+  {
+    rule: 'py-requests-no-timeout', severity: 'warn',
+    re: /requests\.(?:get|post|put|delete|patch|request)\s*\((?![^)\n]*timeout\s*=)/,
+    why: '没有 timeout 的 requests 调用在对方不响应时会一直挂着（连同线程/worker 一起耗尽）。',
+  },
+  {
+    rule: 'py-import-star', severity: 'info',
+    re: /^[ \t]*from\s+[\w.]+\s+import\s+\*[ \t]*$/m,
+    why: 'import * 覆盖本地名字、让 callers/影响面分析失效（图谱看不到具体符号）。',
+  },
+];
+const PY_SECRET_RE = /(?:^|[\s(,])([A-Za-z_]*(?:password|passwd|secret|api_?key|access_?token|private_?key)[A-Za-z_]*)\s*=\s*['"]([^'"]{8,})['"]/gim;
+const PY_STDLIB = new Set(['os', 'sys', 're', 'json', 'math', 'time', 'datetime', 'pathlib', 'typing', 'collections', 'itertools', 'functools', 'subprocess', 'logging', 'csv', 'sqlite3', 'unittest', 'asyncio', 'hashlib', 'random', 'shutil', 'tempfile', 'urllib', 'http', 'socket', 'threading', 'multiprocessing', 'uuid', 'base64', 'glob', 'io', 'argparse', 'contextlib', 'dataclasses', 'enum', 'decimal', 'statistics', 'traceback', 'warnings', 'zipfile', 'tarfile', 'gzip', 'xml', 'email', 'smtplib', 'ssl', 'secrets', 'string', 'textwrap', 'pprint', 'copy', 'inspect', 'importlib', 'signal', 'queue', 'heapq', 'bisect', 'array', 'struct', 'difflib', 'fnmatch', 'getpass', 'platform', 'sysconfig', 'codecs', 'locale', 'calendar', 'zoneinfo', 'tomllib', 'abc', 'concurrent', 'ctypes', 'unicodedata', 'webbrowser', 'tkinter', 'venv', 'site', 'atexit', 'pickle', 'shlex', 'stat', 'sched', 'select', 'errno', 'operator', 'numbers', 'fractions', 'graphlib', 'weakref', 'gc', 'types']);
 const JS_SEC_PATTERNS = [
   {
     rule: 'js-dangerous-function', severity: 'error',
@@ -229,6 +270,16 @@ const MASS_INPUT_RE = /->all\s*\(\s*\)/;
 const VALIDATION_PRESENT_RE = /(->validate\s*\(|extends\s+FormRequest|validate\s*\(\s*\$request|\w+Request\s+\$)/;
 
 const TAG_RE = /<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+
+/**
+ * Blank *template literal* contents (backticks only, length preserved). Our own
+ * scripts write source code into template strings (fixture builders, rule tables,
+ * regex sources); scanning those as if they were code produced false findings —
+ * e.g. `tests/selftest.mjs` "imports" a controller file it only writes out.
+ */
+export function blankTemplateLiterals(src) {
+  return src.replace(/`(?:\\[\s\S]|[^\\`])*`/g, (m) => '`' + ' '.repeat(Math.max(0, m.length - 2)) + '`');
+}
 
 /**
  * Blank out string/comment *contents* (length preserved, so offsets stay valid)
@@ -273,6 +324,7 @@ export function scanContent(file, src) {
 
   const isPhp = /\.php$/i.test(file);
   const isJs = /\.(js|ts|vue)$/i.test(file);
+  const isPy = /\.py$/i.test(file);
   const isRequestPath = /(^|\/)(Http\/Controllers|Controllers|Services|Repositories|Presenters|Validators)\//i.test(file);
 
   if (isPhp) {
@@ -312,6 +364,40 @@ export function scanContent(file, src) {
         message: `${file} 命中 ${p.rule}：\`${m[0].slice(0, 40)}\``,
         why: p.why,
         evidence: `matched: ${m[0].slice(0, 60)}`,
+      });
+    }
+  }
+
+  if (isPy) {
+    for (const p of PY_PATTERNS) {
+      const m = p.re.exec(src);
+      if (!m) continue;
+      findings.push({
+        rule: p.rule, severity: p.severity, file: f, line: lineOf(m.index),
+        message: `${file} 命中 ${p.rule.replace(/^py-/, '')}：\`${m[0].slice(0, 40)}\``,
+        why: p.why,
+        evidence: `matched: ${m[0].slice(0, 60)}`,
+      });
+    }
+    // `except ...: pass` is Python's empty catch — same rule id as the JS/PHP one
+    const exceptPass = /except[^:\n]*:\s*(?:\n[ \t]*)?pass\b/.exec(src);
+    if (exceptPass) {
+      findings.push({
+        rule: 'empty-catch', severity: 'warn', file: f, line: lineOf(exceptPass.index),
+        message: `${file} 用 except: pass 静默吞掉了异常。`,
+        why: 'AI/偷懒代码最常见的"看起来能跑"写法：异常被吞后线上只剩空数据没有日志，排查成本极高。',
+        evidence: `matched: ${exceptPass[0].replace(/\s+/g, ' ').slice(0, 40)}`,
+      });
+    }
+    PY_SECRET_RE.lastIndex = 0;
+    for (const m of src.matchAll(PY_SECRET_RE)) {
+      const value = m[2];
+      if (VALIDATION_RULE_VALUE_RE.test(value) || PLACEHOLDER_VALUE_RE.test(value)) continue;
+      findings.push({
+        rule: 'py-hardcoded-secret', severity: 'error', file: f, line: lineOf(m.index),
+        message: `${f} 里 ${m[1]} 被写成字面量（值长度 ${value.length}）。`,
+        why: '硬编码凭据会随仓库扩散且无法轮换：放进环境变量或密钥管理。',
+        evidence: `name=${m[1]}, valueLen=${value.length}`,
       });
     }
   }
@@ -388,8 +474,11 @@ export function scanContent(file, src) {
     }
   }
 
-  if (JS_OR_VUE) {
-    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|\bdebugger\b/.exec(src);
+  // A shebang means this file *is* a CLI: console.log is its interface, not a
+  // leftover debug statement (this is how the checker flagged its own scripts).
+  const isCli = /^#!/.test(src);
+  if (JS_OR_VUE && !isCli) {
+    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(src);
     if (dbg) {
       findings.push({
         rule: 'js-debug-left-on', severity: 'warn', file: f, line: lineOf(dbg.index),
@@ -411,7 +500,10 @@ export function scanContent(file, src) {
     }
   }
 
-  const emptyCatch = /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(src);
+  // "empty catch" and TODO stubs are code smells — scanning prose (README, rule
+  // tables that *describe* `catch {}`) flagged the documentation instead.
+  const isCode = /\.(php|js|ts|mjs|cjs|jsx|tsx|vue|py)$/i.test(file);
+  const emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(src) : null;
   if (emptyCatch) {
     findings.push({
       rule: 'empty-catch', severity: 'warn', file: f, line: lineOf(emptyCatch.index),
@@ -421,7 +513,9 @@ export function scanContent(file, src) {
     });
   }
 
-  const todo = /\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|先这样|临时方案|not implemented/.exec(src);
+  // TODO/FIXME only counts in a comment — the rule's own pattern lives in source
+  // code, and matching that made the checker flag itself.
+  const todo = isCode ? /(?:\/\/|#|\/\*|<!--|\*)[^\n]{0,80}?\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|先这样|临时方案|not implemented/.exec(src) : null;
   if (todo) {
     findings.push({
       rule: 'ai-todo-left', severity: 'info', file: f, line: lineOf(todo.index),
@@ -439,10 +533,17 @@ export function scanContent(file, src) {
  * (8.1–40% of LLM answers use library features that do not exist). We can only
  * check what the index knows: local paths and the project's own dependency lists.
  */
-export function hallucinationFindings(file, src, { indexedFiles, deps, psr4 }) {
+export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyDeps = null }) {
   const out = [];
   if (!src) return out;
   const f = norm(file);
+  // Only code is scanned: a Markdown file (or a template string inside a script)
+  // is prose *about* code, and treating it as an import/dependency source produced
+  // false findings on this repo's own docs and fixture builders.
+  const isCodeFile = /\.(js|ts|mjs|cjs|jsx|tsx|vue|py|php)$/i.test(f);
+  if (!isCodeFile) return out;
+  const isJsLike = /\.(js|ts|mjs|cjs|jsx|tsx|vue)$/i.test(f);
+  const srcScan = isJsLike ? blankTemplateLiterals(src) : src;
   const dir = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '';
   const lineOf = (idx) => src.slice(0, idx).split(/\r?\n/).length;
   const exists = (p) => indexedFiles.has(norm(p));
@@ -453,7 +554,7 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4 }) {
   const ASSET_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|mp3|mp4|wav|avi|css|scss|sass|less|styl|ttf|woff2?|eot|otf|md|txt|html?)$/i;
   const tryResolve = (spec) => [...EXT.map((e) => `${spec}${e}`), ...INDEX.map((e) => `${spec}${e}`)].filter(exists);
 
-  for (const m of src.matchAll(/(?:import|export)[^'"\n]*?from\s*['"]([^'"]+)['"]|require\(\s*['"]([^'"]+)['"]\s*\)|import\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+  for (const m of srcScan.matchAll(/^[ \t]*(?:import|export)[^'"\n]*?from\s*['"]([^'"]+)['"]|(?<![\w.])require\(\s*['"]([^'"]+)['"]\s*\)|(?<![\w.])import\(\s*['"]([^'"]+)['"]\s*\)/gm)) {
     const spec = m[1] || m[2] || m[3];
     if (!spec) continue;
     if (ASSET_RE.test(spec)) continue; // images/styles/fonts are not code-index entries
@@ -507,10 +608,49 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4 }) {
       }
     }
   }
+  if (/\.py$/i.test(f)) {
+    // relative imports: `from .mod import x` / `from ..pkg.mod import y`
+    for (const m of src.matchAll(/^[ \t]*from[ \t]+(\.+)([\w.]*)[ \t]+import[ \t]+/gm)) {
+      const dots = m[1].length;
+      const mod = m[2];
+      let base = dir;
+      for (let i = 1; i < dots; i++) base = base.includes('/') ? base.slice(0, base.lastIndexOf('/')) : '';
+      const target = mod ? mod.replace(/\./g, '/') : '';
+      const candidates = target
+        ? [joinPosix(base, `${target}.py`), joinPosix(base, target, '__init__.py')]
+        : [joinPosix(base, '__init__.py')];
+      if (!candidates.some(exists)) {
+        out.push({
+          rule: 'py-unresolved-local-import', severity: 'warn', file: f, line: lineOf(m.index),
+          message: `${f} 的相对 import \`from ${'.'.repeat(dots)}${mod} import …\` 找不到对应模块。`,
+          why: '相对 import 写错层数或模块名（AI 生成代码里"看起来对"的包结构）在运行期直接 ImportError。',
+          evidence: `tried: ${candidates.join(', ')}`,
+        });
+      }
+    }
+    // absolute imports: only judged when the project's dependencies are known
+    for (const m of src.matchAll(/^[ \t]*(?:from|import)[ \t]+([A-Za-z_][\w.]*)/gm)) {
+      const mod = m[1];
+      const top = mod.split('.')[0];
+      if (PY_STDLIB.has(top)) continue;
+      const asPath = mod.replace(/\./g, '/');
+      if ([...indexedFiles].some((p) => p === `${asPath}.py` || p.startsWith(`${asPath}/`))) continue;
+      if (deps && deps.has(top)) continue;
+      if (!pyDeps) continue; // no requirements.txt/pyproject → cannot judge, stay silent
+      // declared names differ from import names (`python-dotenv` → `import dotenv`)
+      if ([...pyDeps].some((d) => d === top || d.includes(top) || top.includes(d))) continue;
+      out.push({
+        rule: 'hallucinated-dependency', severity: 'warn', file: f, line: lineOf(m.index),
+        message: `${f} 依赖了 \`${top}\`，但它既不在 requirements.txt/pyproject 里，也不是标准库。`,
+        why: '幻觉依赖/漏加依赖：本地可能因为某个已装包侥幸跑通，CI 或换机器就 ImportError。',
+        evidence: `module=${top}, declared=${pyDeps.size}`,
+      });
+    }
+  }
   return out;
 }
 
-export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null }) {
+export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null, tier = 'all' }) {
   const findings = [];
   const read = readFile || ((rel) => {
     try { return fs.readFileSync(rel, 'utf8'); } catch { return null; }
@@ -534,11 +674,18 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
       .map((e) => norm(e.to).slice(5))
   );
   const defsByName = new Map();
+  const exportedByName = new Map();
   for (const s of symbols) {
     const k = s.name;
     if (!defsByName.has(k)) defsByName.set(k, []);
     defsByName.get(k).push(norm(s.file));
+    if (s.exported) exportedByName.set(k, (exportedByName.get(k) || 0) + 1);
   }
+  // Same-name is only real ambiguity when the *exported* definitions collide: every
+  // script here has its own local `parseArgs`/`main`/`norm`, and flagging those
+  // buried the real cases (measured: 11 findings, ~2 of them meaningful).
+  const hasExportInfo = symbols.some((s) => typeof s.exported === 'boolean');
+  const ambiguous = (name) => defsByName.get(name)?.length >= 2 && (!hasExportInfo || (exportedByName.get(name) || 0) >= 2);
   const classFile = new Map();
   for (const s of symbols) if ((s.kind || '').includes('class') || /^[A-Z]/.test(s.name || '')) {
     if (!classFile.has(s.name)) classFile.set(s.name, norm(s.file));
@@ -610,7 +757,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     if (r.kind !== 'symbol') continue;
     const n = r.symbol || '';
     const defs = defsByName.get(n) || [];
-    if (defs.length < 2 || LIFECYCLE_NAME_RE.test(n)) continue;
+    if (!ambiguous(n) || LIFECYCLE_NAME_RE.test(n)) continue;
     const lang = norm(r.file).endsWith('.php') ? 'php' : null;
     const id = lang === 'php' ? 'php-same-name-method' : 'js-same-name-method';
     if (seenSameName.has(`${id}:${n}`)) continue;
@@ -624,7 +771,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   }
   for (const s of changedSymbols) {
     const defs = defsByName.get(s.symbol) || [];
-    if (defs.length < 2 || LIFECYCLE_NAME_RE.test(s.symbol)) continue;
+    if (!ambiguous(s.symbol) || LIFECYCLE_NAME_RE.test(s.symbol)) continue;
     const isPhp = norm(s.file).endsWith('.php');
     const id = isPhp ? 'php-same-name-method' : 'js-same-name-method';
     if (seenSameName.has(`${id}:${s.symbol}`)) continue;
@@ -774,10 +921,28 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
       if (Object.keys(map).length) psr4 = map;
     } catch { /* malformed composer.json: skip */ }
   }
+  let pyDeps = null;
+  const reqSrc = read('requirements.txt');
+  const pyprojSrc = read('pyproject.toml');
+  if (reqSrc || pyprojSrc) {
+    const set = new Set();
+    if (reqSrc) {
+      for (const line of reqSrc.split(/\r?\n/)) {
+        const t = line.trim();
+        if (!t || t.startsWith('#') || t.startsWith('-')) continue;
+        const m = /^([A-Za-z_][\w.-]*)/.exec(t);
+        if (m) set.add(m[1].toLowerCase().replace(/-/g, '_'));
+      }
+    }
+    if (pyprojSrc) {
+      for (const m of pyprojSrc.matchAll(/^\s*"?([A-Za-z_][\w.-]*)"?\s*[<>=~!\[]/gm)) set.add(m[1].toLowerCase().replace(/-/g, '_'));
+    }
+    if (set.size) pyDeps = set;
+  }
   for (const file of changedFiles) {
     const src = read(file);
     if (!src) continue;
-    findings.push(...hallucinationFindings(file, src, { indexedFiles, deps: deps.size ? deps : null, psr4 }));
+    findings.push(...hallucinationFindings(file, src, { indexedFiles, deps: deps.size ? deps : null, psr4, pyDeps }));
   }
 
   // ── front-end / back-end boundary (needs the other repo's index) ───────────
@@ -831,20 +996,55 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     }
   }
 
-  findings.sort((a, b) => {
+  // tier: `brief` mode keeps only the high-signal rules (a legacy repo makes the
+  // extended ones fire on half the files, which is noise, not a review finding).
+  const kept = tier === 'core' ? findings.filter((f) => !EXTENDED_RULES.has(f.rule)) : findings;
+  kept.sort((a, b) => {
     const sev = { error: 0, warn: 1, info: 2 };
     return (sev[a.severity] - sev[b.severity]) || String(a.file).localeCompare(String(b.file)) || (a.line ?? 0) - (b.line ?? 0);
   });
-  return findings;
+  return kept;
 }
 
 const ICON = { error: '⛔', warn: '⚠️ ', info: 'ℹ️ ' };
 
 /**
- * The checklist "task sheet": every rule this layer knows, with its status for
- * the current change set — 通过 / 命中 N / 不适用(+原因). A review that only prints
- * findings cannot answer "what did you actually check?"; this registry can.
+ * Rule tiers + mode presets. `brief` is the default so a routine change costs a
+ * few hundred tokens instead of the full task sheet; context/noise rules stay
+ * behind `--mode standard|deep` (measured: `js-loose-equality` fires on 160/333
+ * files of a legacy repo — that is not a signal, it is weather).
  */
+export const EXTENDED_RULES = new Set([
+  'php-loose-comparison',        // 34/286 files fire
+  'php-blade-unverified-calls',  // evidence caveat, not a defect
+  'js-loose-equality',           // 160/333 files fire
+  'js-debug-left-on',            // 23/333 files fire
+  'vue-global-blast',            // context
+  'vue-nav-dynamic-url',         // boundary note
+  'py-import-star',              // style, not a defect
+]);
+
+export const MODE_PRESETS = {
+  brief: { tier: 'core', checklist: false, impact: false, deep: false, duplication: false, dupKinds: [], compact: true },
+  standard: { tier: 'all', checklist: true, impact: true, deep: false, duplication: true, dupKinds: ['renamed', 'similar'], compact: false },
+  deep: { tier: 'all', checklist: true, impact: true, deep: true, duplication: true, dupKinds: ['renamed', 'similar', 'gap'], compact: false },
+};
+
+export function applyMode(opts) {
+  const preset = MODE_PRESETS[opts.mode] || MODE_PRESETS.brief;
+  const anyAnalysisFlag = Boolean(opts.impactFlag || opts.deepFlag || opts.duplicationFlag);
+  const out = { ...opts };
+  out.tier = preset.tier;
+  out.impact = opts.impactFlag || (preset.impact && !opts.duplicationOnly);
+  out.deep = opts.deepFlag || preset.deep;
+  out.duplication = opts.duplicationFlag || preset.duplication;
+  // an explicit analysis flag implies at least `standard` output: asking for the
+  // analysis and then hiding the sheet would be surprising
+  out.checklist = opts.checklistFlag !== null ? opts.checklistFlag : (preset.checklist || anyAnalysisFlag);
+  if (!opts.dupKindsFlag && !out.dupKinds.length) out.dupKinds = preset.dupKinds;
+  if (opts.compactFlag === null) out.compact = preset.compact;
+  return out;
+}
 export const RULE_REGISTRY = [
   // ── 结构 / 通用 ────────────────────────────────────────────────────────────
   { id: 'unmapped-change', group: '结构', family: 'any', title: '改动文件是否有符号可定位（不可定位=只能人工看）' },
@@ -867,13 +1067,24 @@ export const RULE_REGISTRY = [
   { id: 'php-blade-unverified-calls', group: 'PHP', family: 'php', title: 'Blade 模板调用无法绑定（证据边界）' },
   { id: 'php-n-plus-one', group: 'PHP·性能', family: 'php', title: '循环体内查库（N+1 启发式）' },
   { id: 'php-unbounded-query', group: 'PHP·性能', family: 'php', title: '无分页全量取数' },
+  // ── Python ───────────────────────────────────────────────────────────────
+  { id: 'py-dangerous-function', group: 'Python·安全', family: 'python', title: 'eval/exec/pickle/os.system/shell=True' },
+  { id: 'py-raw-sql', group: 'Python·安全', family: 'python', title: 'SQL f-string/拼接（注入）' },
+  { id: 'py-hardcoded-secret', group: 'Python·安全', family: 'python', title: '硬编码凭据' },
+  { id: 'py-bare-except', group: 'Python', family: 'python', title: '裸 except（吞 KeyboardInterrupt）' },
+  { id: 'py-mutable-default-arg', group: 'Python', family: 'python', title: '可变默认参数（跨调用共享）' },
+  { id: 'py-debug-left-on', group: 'Python', family: 'python', title: 'breakpoint()/pdb 残留' },
+  { id: 'py-requests-no-timeout', group: 'Python', family: 'python', title: 'requests 调用没有 timeout' },
+  { id: 'py-unresolved-local-import', group: 'AI·幻觉', family: 'python', title: '本地 import 指向不存在的模块' },
+  { id: 'py-import-star', group: 'Python', family: 'python', title: 'from x import *' },
   // ── 前端 / Vue / uni-app ──────────────────────────────────────────────────
   { id: 'vue-page-not-registered', group: '前端', family: 'front', title: '页面未在 pages.json 注册' },
   { id: 'vue-nav-unknown-page', group: '前端', family: 'front', title: '跳转目标页面不存在' },
   { id: 'vue-nav-dynamic-url', group: '前端', family: 'front', title: '动态拼接跳转 URL（影响面边界）' },
   { id: 'vue-unresolved-import', group: '前端', family: 'front', title: '组件 import 解析不到（省略 index.vue）' },
   { id: 'vue-component-orphan', group: '前端', family: 'front', title: '组件无人 import（改了不生效）' },
-  { id: 'vue-global-blast', group: '前端', family: 'front', title: 'store/mixins 全局影响面' },
+  { id: 'vue-global-blast',            // context
+    group: '前端', family: 'front', title: 'store/mixins 全局影响面' },
   { id: 'vue-vfor-missing-key', group: '前端', family: 'front', title: 'v-for 缺 :key' },
   { id: 'vue-v-html', group: '前端·安全', family: 'front', title: 'v-html（XSS）' },
   { id: 'js-innerhtml', group: '前端·安全', family: 'front', title: '.innerHTML 赋值' },
@@ -896,6 +1107,7 @@ export const RULE_REGISTRY = [
 const NOT_APPLICABLE = {
   familyPhp: '本次没有 PHP 改动',
   familyFront: '本次没有 JS/Vue 改动',
+  familyPython: '本次没有 Python 改动',
   familyBoundary: '未提供 --backend（前后端边界需要两个索引）',
   index: '索引不可用（先 archnav analyze）',
   tests: '仓库里没有测试文件',
@@ -913,6 +1125,7 @@ export function buildChecklist({ findings = [], meta = {} }) {
     if (!meta.hasChanges) { status = 'na'; reason = NOT_APPLICABLE.noChanges; }
     else if (r.family === 'php' && !meta.changedPhp) { status = 'na'; reason = NOT_APPLICABLE.familyPhp; }
     else if (r.family === 'front' && !meta.changedFront) { status = 'na'; reason = NOT_APPLICABLE.familyFront; }
+    else if (r.family === 'python' && !meta.changedPy) { status = 'na'; reason = NOT_APPLICABLE.familyPython; }
     else if (r.family === 'boundary' && !meta.hasBackend) { status = 'na'; reason = NOT_APPLICABLE.familyBoundary; }
     else if ((r.needs || []).includes('index') && !meta.hasIndex) { status = 'na'; reason = NOT_APPLICABLE.index; }
     else if ((r.needs || []).includes('composer') && !meta.hasComposer) { status = 'na'; reason = NOT_APPLICABLE.composer; }
@@ -930,6 +1143,55 @@ export function buildChecklist({ findings = [], meta = {} }) {
   return { rows, summary, meta };
 }
 
+/**
+ * Stack detection: which language profiles this repo/change actually is, so the
+ * relevant analyzers can switch on by themselves instead of the user remembering
+ * that page-registration checks only mean something for uni-app, or that route
+ * flows only exist behind a Laravel/Express router. Evidence over vibes: each
+ * profile carries the files/nodes that proved it.
+ */
+export function detectStacks({ index, dir, changedFiles = [] }) {
+  const has = (rel) => { try { return fs.existsSync(path.join(dir, rel)); } catch { return false; } };
+  const nodes = index?.knowledgeGraph?.nodes || [];
+  const kindCount = (prefix) => nodes.filter((n) => String(n.id).startsWith(`${prefix}:`)).length;
+  const profiles = [];
+  const evidence = [];
+  if (has('composer.json') || has('artisan') || kindCount('route') > 0) {
+    profiles.push('laravel');
+    evidence.push(['composer.json', has('artisan') ? 'artisan' : null, kindCount('route') ? `${kindCount('route')} route 节点` : null].filter(Boolean).join(' + '));
+  }
+  if (kindCount('page') > 0 || has('pages.json')) {
+    profiles.push('uni-app');
+    evidence.push([has('pages.json') ? 'pages.json' : null, kindCount('page') ? `${kindCount('page')} page 节点` : null].filter(Boolean).join(' + '));
+  } else if (has('vue.config.js') || has('src/App.vue')) {
+    profiles.push('vue');
+    evidence.push(has('vue.config.js') ? 'vue.config.js' : 'src/App.vue');
+  }
+  if (has('package.json')) { profiles.push('node'); evidence.push('package.json'); }
+  if (has('requirements.txt') || has('pyproject.toml') || changedFiles.some((f) => f.endsWith('.py'))) {
+    profiles.push('python');
+    evidence.push(has('pyproject.toml') ? 'pyproject.toml' : has('requirements.txt') ? 'requirements.txt' : 'changed .py');
+  }
+  const langs = {};
+  for (const f of changedFiles) {
+    const ext = path.extname(f).toLowerCase() || '(none)';
+    langs[ext] = (langs[ext] || 0) + 1;
+  }
+  return {
+    profiles,
+    evidence,
+    langs,
+    nodeKinds: ['route', 'page', 'flow'].filter((k) => kindCount(k) > 0),
+    // a front-end repo gets a concrete, actionable hint instead of a silent gap
+    suggestsBackend: (profiles.includes('uni-app') || profiles.includes('vue')) && !profiles.includes('laravel'),
+  };
+}
+
+export function renderStacks(stacks) {
+  if (!stacks?.profiles?.length) return '栈: 未能识别（无 composer.json/package.json/pages.json 等标志文件）';
+  const langs = Object.entries(stacks.langs).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([e, n]) => `${e}×${n}`).join(' ');
+  return `栈 ${stacks.profiles.join('+')}（依据 ${stacks.evidence.join('；')}）${langs ? `　改动 ${langs}` : ''}`;
+}
 const STATUS_MARK = { pass: '✅ 通过', hit: '⚠️  命中', na: '➖ 不适用' };
 const MD_MARK = { pass: '✅', hit: '⚠️', na: '➖' };
 
@@ -942,6 +1204,10 @@ export function renderMarkdown(checklist, findings = [], meta = {}, extra = {}) 
     + ` · **索引** ${meta.symbols ?? '?'} 符号 · **后端索引** ${meta.hasBackend ? '已提供' : '未提供'}`
     + (extra.dupPercent !== undefined ? ` · **仓库重复率** ${extra.dupPercent}%` : '')
     + (extra.risk ? ` · **风险** ${extra.risk.level}（${extra.risk.score}）` : ''));
+  if (meta.stackLine) L.push(`${meta.stackLine}`);
+  if (meta.stacks?.suggestsBackend && !meta.hasBackend) {
+    L.push('', '> 💡 检测到前端仓：加 `--backend <后端仓>` 可做接口边界核对（前端在调、后端有没有这条路由）');
+  }
   L.push('');
   if (extra.impact) {
     const i = extra.impact;
@@ -1009,6 +1275,10 @@ export function renderChecklist({ rows, summary, meta }) {
     + `　索引 ${meta.symbols ?? '?'} 符号　索引新鲜度 ${meta.freshness ?? '?'}`
     + `　后端索引 ${meta.hasBackend ? '已提供' : '未提供'}`);
   L.push(`   规则 ${summary.total} 条：✅ 通过 ${summary.pass}　⚠️ 命中 ${summary.hit}　➖ 不适用 ${summary.na}　（findings ${summary.findings}）`);
+  if (meta.stackLine) L.push(`   ${meta.stackLine}`);
+  if (meta.stacks?.suggestsBackend && !meta.hasBackend) {
+    L.push('   💡 检测到前端仓：加 `--backend <后端仓>` 可做接口边界核对（前端在调、后端有没有这条路由）');
+  }
   L.push('');
   L.push('   状态        规则                          检查内容');
   L.push('   ────────────────────────────────────────────────────────────────────────────');
@@ -1051,26 +1321,41 @@ export function renderFindings(findings, { scope, via } = {}) {
 }
 
 function parseArgs(argv) {
-  const out = { dir: '.', scope: 'unstaged', base: null, json: false, gate: false, backend: null, sarif: null, github: false, pairingFloor: 0.2, checklist: true, duplication: false, dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null };
+  const out = {
+    dir: '.', scope: 'unstaged', base: null, json: false, gate: false, backend: null, sarif: null, github: false, pairingFloor: 0.2,
+    // modes: `brief` (default) = high-signal rules, findings only, compact JSON;
+    // `standard` = full task sheet; `deep` = + repo-level deep analysis.
+    mode: 'brief', tier: 'core',
+    checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, compactFlag: null,
+    checklist: false, duplication: false, impact: false, deep: false, compact: true,
+    dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--scope') out.scope = argv[++i];
     else if (a === '--base') out.base = argv[++i];
     else if (a === '--json') out.json = true;
     else if (a === '--gate') out.gate = true;
-    else if (a === '--no-checklist') out.checklist = false;
-    else if (a === '--duplication') out.duplication = true;
-    else if (a === '--impact') out.impact = true;
-    else if (a === '--deep') out.deep = true;
-    else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deep = true; }
-    else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deep = true; }
-    else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impact = true; }
-    else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impact = true; }
-    else if (a === '--dup-kinds') out.dupKinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
+    else if (a === '--mode') out.mode = String(argv[++i]).toLowerCase();
+    else if (a === '--brief') out.mode = 'brief';
+    else if (a === '--standard') out.mode = 'standard';
+    else if (a === '--all-rules') out.tier = 'all';
+    else if (a === '--compact') out.compactFlag = true;
+    else if (a === '--no-compact') out.compactFlag = false;
+    else if (a === '--no-checklist') out.checklistFlag = false;
+    else if (a === '--checklist') out.checklistFlag = true;
+    else if (a === '--duplication') out.duplicationFlag = true;
+    else if (a === '--impact') out.impactFlag = true;
+    else if (a === '--deep') out.deepFlag = true;
+    else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deepFlag = true; }
+    else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deepFlag = true; }
+    else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impactFlag = true; }
+    else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impactFlag = true; }
+    else if (a === '--dup-kinds') { out.dupKinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean); out.dupKindsFlag = true; }
     else if (a === '--dup-min-lines') out.dupMinLines = Number(argv[++i]);
     else if (a === '--dup-min-tokens') out.dupMinTokens = Number(argv[++i]);
     else if (a === '--dup-max-new-clones') out.dupMaxNewClones = Number(argv[++i]);
-    else if (a === '--dup-baseline-from-ref') { out.dupBaselineFromRef = argv[++i]; out.duplication = true; }
+    else if (a === '--dup-baseline-from-ref') { out.dupBaselineFromRef = argv[++i]; out.duplicationFlag = true; }
     else if (a === '--markdown') out.markdown = argv[++i] === undefined ? '-' : argv[i];
     else if (a === '--backend') out.backend = argv[++i];
     else if (a === '--sarif') out.sarif = argv[++i];
@@ -1083,7 +1368,7 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = applyMode(parseArgs(process.argv.slice(2)));
   const dir = path.resolve(opts.dir);
   const changes = await archNav.changes(dir, { scope: opts.scope, base: opts.base });
   if (changes.error) { console.error(changes.error); process.exit(2); }
@@ -1099,6 +1384,7 @@ async function main() {
     changes,
     index,
     backendIndex,
+    tier: opts.tier,
     boundary: { pairingFloor: Number.isFinite(opts.pairingFloor) ? opts.pairingFloor : 0.2 },
     readFile: (rel) => {
       try { return fs.readFileSync(path.join(dir, rel), 'utf8'); } catch { return null; }
@@ -1112,7 +1398,8 @@ async function main() {
     changedTotal: changedFiles.length,
     changedPhp: changedFiles.filter((f) => /\.php$/i.test(f)).length,
     changedFront: changedFiles.filter((f) => /\.(js|ts|mjs|cjs|vue)$/i.test(f)).length,
-    changedOther: changedFiles.filter((f) => !/\.(php|js|ts|mjs|cjs|vue)$/i.test(f)).length,
+    changedOther: changedFiles.filter((f) => !/\.(php|js|ts|mjs|cjs|vue|py)$/i.test(f)).length,
+    changedPy: changedFiles.filter((f) => /\.py$/i.test(f)).length,
     hasChanges: changedFiles.length > 0,
     hasBackend: Boolean(backendIndex),
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),
@@ -1122,6 +1409,9 @@ async function main() {
     symbols: (index.symbols || []).length,
     freshness: `via=${changes.via}${changes.note ? ' (drift fallback)' : ''}`,
   };
+  // language profiles: the relevant analyzers/rules switch on from here
+  meta.stacks = detectStacks({ index, dir, changedFiles });
+  meta.stackLine = renderStacks(meta.stacks);
   // ── optional: merge the jscpd duplication half into the same task sheet ────
   let dupResult = null;
   if (opts.duplication) {
@@ -1240,12 +1530,23 @@ async function main() {
   }
   if (opts.github) console.log(toGithubAnnotations(findings));
   if (opts.json) {
-    console.log(JSON.stringify({
-      scope: changes.scope, via: changes.via, backend: backendDir,
-      checklist: { summary: checklist.summary, rows: checklist.rows },
-      duplication: dupResult ? { summary: dupResult.summary } : null,
-      findings,
-    }, null, 2));
+    if (opts.compact) {
+      // compact = what a tool (or an agent) actually needs per finding; the long
+      // why/evidence text made this payload ~12 KB for a three-file diff.
+      console.log(JSON.stringify({
+        mode: opts.mode,
+        tier: opts.tier,
+        summary: { ...checklist.summary, duplication: dupResult?.summary ?? null, risk: impactResult?.risk?.level ?? null },
+        findings: findings.map((f) => ({ rule: f.rule, severity: f.severity, file: f.file, line: f.line })),
+      }));
+    } else {
+      console.log(JSON.stringify({
+        scope: changes.scope, via: changes.via, backend: backendDir,
+        checklist: { summary: checklist.summary, rows: checklist.rows },
+        duplication: dupResult ? { summary: dupResult.summary } : null,
+        findings,
+      }, null, 2));
+    }
   } else if (!opts.sarif || opts.sarif !== '-') {
     if (opts.checklist) console.log(renderChecklist(checklist));
     console.log(renderFindings(findings, { scope: changes.scope, via: changes.via }));

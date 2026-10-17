@@ -16,6 +16,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createHash } from 'crypto';
+import { makeIgnoreFilter } from './analyzer.js';
 
 // Same extension set the analyzer indexes.
 const CODE_EXT =
@@ -153,10 +154,13 @@ function diffIndex(dirPath, index, indexMtimeMs) {
     }
   }
 
-  // Newly added code files that the index never saw.
+  // Newly added code files that the index never saw (honour the index's own
+  // `ignore` list: a file excluded at analyze time must not read as "added").
+  const ignored = makeIgnoreFilter(index?.ignore || []);
   let added = 0;
   for (const abs of collectDiskFiles(dirPath)) {
     const rel = normalizeRel(path.relative(dirPath, abs));
+    if (ignored(rel)) continue;
     if (!normIndex.has(rel)) {
       details.push({ file: rel, change: 'added', symbolsAffected: 0 });
       added++;

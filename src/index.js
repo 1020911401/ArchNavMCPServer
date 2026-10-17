@@ -30,6 +30,7 @@ program
   .description('Analyze a codebase and build architecture knowledge graph')
   .option('--json', 'Output raw JSON')
   .option('--no-cluster', 'Skip community detection')
+  .option('--ignore <globs>', 'Comma-separated gitignore-ish globs to exclude (e.g. "bench/** , **/vendor/**"); recorded in the index so status honours them')
   .action(async (dir, options) => {
     const target = dir || process.cwd();
     const result = await analyze(path.resolve(target), options);

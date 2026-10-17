@@ -136,13 +136,14 @@ export function summarizeImpact({ rows, changedSymbols = [], layerMap = {}, file
   const flows = rows.filter((r) => r.entry === 'flow');
   const commands = rows.filter((r) => !r.entry && classifyFile(r.entryFile || r.node));
   // layerMap is keyed by symbol id; map through the file the node belongs to so
-  // the "波及层" line works for symbols, files, routes and pages alike.
+  // the "波及层" line works for symbols, files, routes and pages alike. Only real
+  // strings are accepted — a non-string value used to render as a blank/odd row.
   const layerOfFile = fileLayers || new Map();
   const layers = new Set();
   for (const r of rows) {
     const file = r.entryFile || (isSym(r.node) ? norm(r.node).slice(4).split('::')[0] : norm(r.node).replace(/^(file|sym):/, ''));
     const l = layerOfFile.get(norm(file));
-    if (l) layers.add(l);
+    if (typeof l === 'string' && l) layers.add(l);
   }
   return {
     depth,

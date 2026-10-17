@@ -8,11 +8,16 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY } from '../scripts/review-rules.mjs';
+import path from 'node:path';
+import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks } from '../scripts/review-rules.mjs';
+
+// a directory that deliberately does not exist: stack detection must then rely on
+// index node kinds alone (which is exactly what it does for a fresh clone)
+const ROOT_FIX = path.resolve('__no_such_dir__');
 
 test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原因)', () => {
   const metaFull = {
-    dir: '.', changedTotal: 3, changedPhp: 2, changedFront: 1, changedOther: 0, hasChanges: true,
+    dir: '.', changedTotal: 3, changedPhp: 2, changedFront: 1, changedPy: 1, changedOther: 0, hasChanges: true,
     hasBackend: false, hasComposer: true, hasPackageJson: true, hasTests: true, hasIndex: true,
     symbols: 100, freshness: 'via=git',
   };
@@ -581,6 +586,114 @@ test('AI hallucinations: joinPosix normalises ./ and ../ segments', () => {
   assert.equal(joinPosix('components/payment', '../utils/request'), 'components/utils/request');
   assert.equal(joinPosix('a/b', '../../x'), 'x');
   assert.equal(joinPosix('a/b', './c/./d'), 'a/b/c/d');
+});
+
+test('python rules fire on Python sources and stay out of PHP/JS', () => {
+  const src = [
+    'import requests',
+    'api_key = "sk_live_1234567890"',
+    'def load(items=[], *a):',
+    '    breakpoint()',
+    '    try:',
+    '        r = requests.get("https://x")',
+    '        cur.execute(f"select * from t where id = {i}")',
+    '    except: pass',
+    'eval(user_input)',
+    'from os.path import *',
+  ].join('\n');
+  const f = scanContent('app/loader.py', src);
+  const ids = new Set(f.map((x) => x.rule));
+  for (const need of ['py-dangerous-function', 'py-raw-sql', 'py-bare-except', 'py-mutable-default-arg', 'py-debug-left-on', 'py-requests-no-timeout', 'py-hardcoded-secret', 'empty-catch', 'py-import-star']) {
+    assert.ok(ids.has(need), `expected ${need}`);
+  }
+  assert.equal(f.filter((x) => x.rule === 'py-dangerous-function')[0].severity, 'error');
+  assert.equal(f.filter((x) => x.rule === 'py-import-star')[0].severity, 'info');
+  assert.match(f.filter((x) => x.rule === 'empty-catch')[0].message, /except: pass/);
+
+  // no cross-language bleed: PHP/JS sources must not trip Python rules
+  assert.deepEqual(scanContent('app/x.php', "<?php $a = 1; // breakpoint()").filter((x) => x.rule.startsWith('py-')), []);
+  assert.deepEqual(scanContent('src/x.js', 'const a = 1; // def f(items=[])').filter((x) => x.rule.startsWith('py-')), []);
+  // …and rules that should not fire stay quiet
+  assert.deepEqual(scanContent('app/ok.py', 'import os\nr = requests.get("https://x", timeout=5)\ndef f(items=None):\n    return items\n').filter((x) => x.rule.startsWith('py-')), []);
+});
+
+test('python family shows up as 不适用 when the change has no .py file', () => {
+  const meta = {
+    dir: '.', changedTotal: 1, changedPhp: 1, changedFront: 0, changedPy: 0, changedOther: 0, hasChanges: true,
+    hasBackend: false, hasComposer: true, hasPackageJson: false, hasTests: false, hasIndex: true,
+    symbols: 10, freshness: 'via=git',
+  };
+  const { rows } = buildChecklist({ findings: [], meta });
+  const py = rows.filter((r) => r.family === 'python');
+  assert.ok(py.length >= 8, `expected the Python rules in the registry, got ${py.length}`);
+  assert.equal(py.every((r) => r.status === 'na' && r.reason === '本次没有 Python 改动'), true);
+  assert.equal(rows.some((r) => r.id === 'py-dangerous-function'), true);
+});
+
+test('stack detection switches features by language, with evidence', () => {
+  const laravel = detectStacks({
+    dir: path.join(ROOT_FIX, 'nope-laravel'),
+    index: { knowledgeGraph: { nodes: [{ id: 'route:GET /x' }, { id: 'file:routes/web.php' }] } },
+    changedFiles: ['app/Http/Controllers/AController.php'],
+  });
+  assert.equal(laravel.profiles.includes('laravel'), true);
+  assert.match(laravel.evidence.join(' '), /route 节点/);
+  assert.deepEqual(laravel.langs, { '.php': 1 });
+  assert.equal(laravel.nodeKinds.includes('route'), true);
+  assert.equal(laravel.suggestsBackend, false, 'a Laravel repo is not a front-end');
+
+  const front = detectStacks({
+    dir: path.join(ROOT_FIX, 'nope-uniapp'),
+    index: { knowledgeGraph: { nodes: [{ id: 'page:pages/a/index' }, { id: 'file:pages/a/index.vue' }] } },
+    changedFiles: ['pages/demo/index.vue', 'api/order.js'],
+  });
+  assert.equal(front.profiles.includes('uni-app'), true);
+  assert.equal(front.suggestsBackend, true, 'front-end without a backend → hint --backend');
+  assert.deepEqual(front.langs, { '.vue': 1, '.js': 1 });
+  assert.match(renderStacks(front), /栈 uni-app/);
+  assert.match(renderStacks(front), /pages\.json|page 节点|vue\.config|App\.vue/);
+});
+
+test('modes: brief is the cheap default, explicit flags upgrade to the task sheet', () => {
+  const base = { mode: 'brief', checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, dupKinds: [], compactFlag: null };
+  const brief = applyMode({ ...base });
+  assert.equal(brief.tier, 'core', 'brief keeps only high-signal rules');
+  assert.equal(brief.checklist, false);
+  assert.equal(brief.impact, false);
+  assert.equal(brief.deep, false);
+  assert.equal(brief.duplication, false);
+  assert.equal(brief.compact, true);
+
+  const standard = applyMode({ ...base, mode: 'standard' });
+  assert.equal(standard.tier, 'all');
+  assert.equal(standard.checklist, true);
+  assert.equal(standard.impact, true);
+  assert.equal(standard.duplication, true);
+  assert.deepEqual(standard.dupKinds, ['renamed', 'similar']);
+
+  const deep = applyMode({ ...base, mode: 'deep' });
+  assert.equal(deep.deep, true);
+  assert.ok(deep.dupKinds.includes('gap'));
+
+  // an explicit analysis flag must not hide the sheet, and --no-checklist still wins
+  const asked = applyMode({ ...base, impactFlag: true });
+  assert.equal(asked.checklist, true, 'asking for impact implies the task sheet');
+  assert.equal(asked.tier, 'core', 'but the tier stays brief unless told otherwise');
+  assert.equal(applyMode({ ...base, checklistFlag: false, deepFlag: true }).checklist, false);
+  assert.equal(applyMode({ ...base, mode: 'deep', checklistFlag: false }).checklist, false);
+});
+
+test('tier=core drops the extended (noisy) rules from the findings', () => {
+  const changes = makeChanges({
+    changed_files: [{ file: 'utils/a.js' }],
+    changed_symbols: [{ symbol: 'x', file: 'utils/a.js', line_start: 1, confidence: 1 }],
+  });
+  const noisy = "const a = 'q'; if (a == 'q') { console.log(a); }";
+  const all = reviewFindings({ changes, index: makeIndex(), readFile: () => noisy, tier: 'all' });
+  const core = reviewFindings({ changes, index: makeIndex(), readFile: () => noisy, tier: 'core' });
+  assert.ok(all.some((f) => f.rule === 'js-loose-equality'), 'extended rules fire in full mode');
+  assert.equal(core.some((f) => f.rule === 'js-loose-equality'), false, 'and are filtered in brief mode');
+  assert.equal(core.length <= all.length, true);
 });
 
 test('findings sort by severity and render with why + evidence', () => {
