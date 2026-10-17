@@ -8,7 +8,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY } from '../scripts/review-rules.mjs';
+import { reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES } from '../scripts/review-rules.mjs';
 
 test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原因)', () => {
   const metaFull = {
@@ -581,6 +581,48 @@ test('AI hallucinations: joinPosix normalises ./ and ../ segments', () => {
   assert.equal(joinPosix('components/payment', '../utils/request'), 'components/utils/request');
   assert.equal(joinPosix('a/b', '../../x'), 'x');
   assert.equal(joinPosix('a/b', './c/./d'), 'a/b/c/d');
+});
+
+test('modes: brief is the cheap default, explicit flags upgrade to the task sheet', () => {
+  const base = { mode: 'brief', checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, dupKinds: [], compactFlag: null };
+  const brief = applyMode({ ...base });
+  assert.equal(brief.tier, 'core', 'brief keeps only high-signal rules');
+  assert.equal(brief.checklist, false);
+  assert.equal(brief.impact, false);
+  assert.equal(brief.deep, false);
+  assert.equal(brief.duplication, false);
+  assert.equal(brief.compact, true);
+
+  const standard = applyMode({ ...base, mode: 'standard' });
+  assert.equal(standard.tier, 'all');
+  assert.equal(standard.checklist, true);
+  assert.equal(standard.impact, true);
+  assert.equal(standard.duplication, true);
+  assert.deepEqual(standard.dupKinds, ['renamed', 'similar']);
+
+  const deep = applyMode({ ...base, mode: 'deep' });
+  assert.equal(deep.deep, true);
+  assert.ok(deep.dupKinds.includes('gap'));
+
+  // an explicit analysis flag must not hide the sheet, and --no-checklist still wins
+  const asked = applyMode({ ...base, impactFlag: true });
+  assert.equal(asked.checklist, true, 'asking for impact implies the task sheet');
+  assert.equal(asked.tier, 'core', 'but the tier stays brief unless told otherwise');
+  assert.equal(applyMode({ ...base, checklistFlag: false, deepFlag: true }).checklist, false);
+  assert.equal(applyMode({ ...base, mode: 'deep', checklistFlag: false }).checklist, false);
+});
+
+test('tier=core drops the extended (noisy) rules from the findings', () => {
+  const changes = makeChanges({
+    changed_files: [{ file: 'utils/a.js' }],
+    changed_symbols: [{ symbol: 'x', file: 'utils/a.js', line_start: 1, confidence: 1 }],
+  });
+  const noisy = "const a = 'q'; if (a == 'q') { console.log(a); }";
+  const all = reviewFindings({ changes, index: makeIndex(), readFile: () => noisy, tier: 'all' });
+  const core = reviewFindings({ changes, index: makeIndex(), readFile: () => noisy, tier: 'core' });
+  assert.ok(all.some((f) => f.rule === 'js-loose-equality'), 'extended rules fire in full mode');
+  assert.equal(core.some((f) => f.rule === 'js-loose-equality'), false, 'and are filtered in brief mode');
+  assert.equal(core.length <= all.length, true);
 });
 
 test('findings sort by severity and render with why + evidence', () => {

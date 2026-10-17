@@ -75,6 +75,7 @@ jobs:
             SCOPE_ARGS="--scope all"
           fi
           node scripts/review-rules.mjs . $SCOPE_ARGS \
+            --mode deep \
             --impact --impact-depth 4 \
             --deep \
             --duplication --dup-kinds renamed,similar \

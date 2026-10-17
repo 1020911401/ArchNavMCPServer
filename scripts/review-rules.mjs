@@ -510,7 +510,7 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4 }) {
   return out;
 }
 
-export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null }) {
+export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null, tier = 'all' }) {
   const findings = [];
   const read = readFile || ((rel) => {
     try { return fs.readFileSync(rel, 'utf8'); } catch { return null; }
@@ -831,20 +831,54 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     }
   }
 
-  findings.sort((a, b) => {
+  // tier: `brief` mode keeps only the high-signal rules (a legacy repo makes the
+  // extended ones fire on half the files, which is noise, not a review finding).
+  const kept = tier === 'core' ? findings.filter((f) => !EXTENDED_RULES.has(f.rule)) : findings;
+  kept.sort((a, b) => {
     const sev = { error: 0, warn: 1, info: 2 };
     return (sev[a.severity] - sev[b.severity]) || String(a.file).localeCompare(String(b.file)) || (a.line ?? 0) - (b.line ?? 0);
   });
-  return findings;
+  return kept;
 }
 
 const ICON = { error: '⛔', warn: '⚠️ ', info: 'ℹ️ ' };
 
 /**
- * The checklist "task sheet": every rule this layer knows, with its status for
- * the current change set — 通过 / 命中 N / 不适用(+原因). A review that only prints
- * findings cannot answer "what did you actually check?"; this registry can.
+ * Rule tiers + mode presets. `brief` is the default so a routine change costs a
+ * few hundred tokens instead of the full task sheet; context/noise rules stay
+ * behind `--mode standard|deep` (measured: `js-loose-equality` fires on 160/333
+ * files of a legacy repo — that is not a signal, it is weather).
  */
+export const EXTENDED_RULES = new Set([
+  'php-loose-comparison',        // 34/286 files fire
+  'php-blade-unverified-calls',  // evidence caveat, not a defect
+  'js-loose-equality',           // 160/333 files fire
+  'js-debug-left-on',            // 23/333 files fire
+  'vue-global-blast',            // context
+  'vue-nav-dynamic-url',         // boundary note
+]);
+
+export const MODE_PRESETS = {
+  brief: { tier: 'core', checklist: false, impact: false, deep: false, duplication: false, dupKinds: [], compact: true },
+  standard: { tier: 'all', checklist: true, impact: true, deep: false, duplication: true, dupKinds: ['renamed', 'similar'], compact: false },
+  deep: { tier: 'all', checklist: true, impact: true, deep: true, duplication: true, dupKinds: ['renamed', 'similar', 'gap'], compact: false },
+};
+
+export function applyMode(opts) {
+  const preset = MODE_PRESETS[opts.mode] || MODE_PRESETS.brief;
+  const anyAnalysisFlag = Boolean(opts.impactFlag || opts.deepFlag || opts.duplicationFlag);
+  const out = { ...opts };
+  out.tier = preset.tier;
+  out.impact = opts.impactFlag || (preset.impact && !opts.duplicationOnly);
+  out.deep = opts.deepFlag || preset.deep;
+  out.duplication = opts.duplicationFlag || preset.duplication;
+  // an explicit analysis flag implies at least `standard` output: asking for the
+  // analysis and then hiding the sheet would be surprising
+  out.checklist = opts.checklistFlag !== null ? opts.checklistFlag : (preset.checklist || anyAnalysisFlag);
+  if (!opts.dupKindsFlag && !out.dupKinds.length) out.dupKinds = preset.dupKinds;
+  if (opts.compactFlag === null) out.compact = preset.compact;
+  return out;
+}
 export const RULE_REGISTRY = [
   // ── 结构 / 通用 ────────────────────────────────────────────────────────────
   { id: 'unmapped-change', group: '结构', family: 'any', title: '改动文件是否有符号可定位（不可定位=只能人工看）' },
@@ -1051,26 +1085,41 @@ export function renderFindings(findings, { scope, via } = {}) {
 }
 
 function parseArgs(argv) {
-  const out = { dir: '.', scope: 'unstaged', base: null, json: false, gate: false, backend: null, sarif: null, github: false, pairingFloor: 0.2, checklist: true, duplication: false, dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null };
+  const out = {
+    dir: '.', scope: 'unstaged', base: null, json: false, gate: false, backend: null, sarif: null, github: false, pairingFloor: 0.2,
+    // modes: `brief` (default) = high-signal rules, findings only, compact JSON;
+    // `standard` = full task sheet; `deep` = + repo-level deep analysis.
+    mode: 'brief', tier: 'core',
+    checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, compactFlag: null,
+    checklist: false, duplication: false, impact: false, deep: false, compact: true,
+    dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--scope') out.scope = argv[++i];
     else if (a === '--base') out.base = argv[++i];
     else if (a === '--json') out.json = true;
     else if (a === '--gate') out.gate = true;
-    else if (a === '--no-checklist') out.checklist = false;
-    else if (a === '--duplication') out.duplication = true;
-    else if (a === '--impact') out.impact = true;
-    else if (a === '--deep') out.deep = true;
-    else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deep = true; }
-    else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deep = true; }
-    else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impact = true; }
-    else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impact = true; }
-    else if (a === '--dup-kinds') out.dupKinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean);
+    else if (a === '--mode') out.mode = String(argv[++i]).toLowerCase();
+    else if (a === '--brief') out.mode = 'brief';
+    else if (a === '--standard') out.mode = 'standard';
+    else if (a === '--all-rules') out.tier = 'all';
+    else if (a === '--compact') out.compactFlag = true;
+    else if (a === '--no-compact') out.compactFlag = false;
+    else if (a === '--no-checklist') out.checklistFlag = false;
+    else if (a === '--checklist') out.checklistFlag = true;
+    else if (a === '--duplication') out.duplicationFlag = true;
+    else if (a === '--impact') out.impactFlag = true;
+    else if (a === '--deep') out.deepFlag = true;
+    else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deepFlag = true; }
+    else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deepFlag = true; }
+    else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impactFlag = true; }
+    else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impactFlag = true; }
+    else if (a === '--dup-kinds') { out.dupKinds = String(argv[++i]).split(',').map((s) => s.trim()).filter(Boolean); out.dupKindsFlag = true; }
     else if (a === '--dup-min-lines') out.dupMinLines = Number(argv[++i]);
     else if (a === '--dup-min-tokens') out.dupMinTokens = Number(argv[++i]);
     else if (a === '--dup-max-new-clones') out.dupMaxNewClones = Number(argv[++i]);
-    else if (a === '--dup-baseline-from-ref') { out.dupBaselineFromRef = argv[++i]; out.duplication = true; }
+    else if (a === '--dup-baseline-from-ref') { out.dupBaselineFromRef = argv[++i]; out.duplicationFlag = true; }
     else if (a === '--markdown') out.markdown = argv[++i] === undefined ? '-' : argv[i];
     else if (a === '--backend') out.backend = argv[++i];
     else if (a === '--sarif') out.sarif = argv[++i];
@@ -1083,7 +1132,7 @@ function parseArgs(argv) {
 }
 
 async function main() {
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = applyMode(parseArgs(process.argv.slice(2)));
   const dir = path.resolve(opts.dir);
   const changes = await archNav.changes(dir, { scope: opts.scope, base: opts.base });
   if (changes.error) { console.error(changes.error); process.exit(2); }
@@ -1099,6 +1148,7 @@ async function main() {
     changes,
     index,
     backendIndex,
+    tier: opts.tier,
     boundary: { pairingFloor: Number.isFinite(opts.pairingFloor) ? opts.pairingFloor : 0.2 },
     readFile: (rel) => {
       try { return fs.readFileSync(path.join(dir, rel), 'utf8'); } catch { return null; }
@@ -1240,12 +1290,23 @@ async function main() {
   }
   if (opts.github) console.log(toGithubAnnotations(findings));
   if (opts.json) {
-    console.log(JSON.stringify({
-      scope: changes.scope, via: changes.via, backend: backendDir,
-      checklist: { summary: checklist.summary, rows: checklist.rows },
-      duplication: dupResult ? { summary: dupResult.summary } : null,
-      findings,
-    }, null, 2));
+    if (opts.compact) {
+      // compact = what a tool (or an agent) actually needs per finding; the long
+      // why/evidence text made this payload ~12 KB for a three-file diff.
+      console.log(JSON.stringify({
+        mode: opts.mode,
+        tier: opts.tier,
+        summary: { ...checklist.summary, duplication: dupResult?.summary ?? null, risk: impactResult?.risk?.level ?? null },
+        findings: findings.map((f) => ({ rule: f.rule, severity: f.severity, file: f.file, line: f.line })),
+      }));
+    } else {
+      console.log(JSON.stringify({
+        scope: changes.scope, via: changes.via, backend: backendDir,
+        checklist: { summary: checklist.summary, rows: checklist.rows },
+        duplication: dupResult ? { summary: dupResult.summary } : null,
+        findings,
+      }, null, 2));
+    }
   } else if (!opts.sarif || opts.sarif !== '-') {
     if (opts.checklist) console.log(renderChecklist(checklist));
     console.log(renderFindings(findings, { scope: changes.scope, via: changes.via }));

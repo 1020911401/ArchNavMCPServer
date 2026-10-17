@@ -29,6 +29,13 @@ node scripts/review-rules.mjs . --scope staged \
   --markdown review.md --sarif review.sarif --gate
 ```
 
+- **Modes** — `--mode brief` (default: high-signal rules only, findings only, compact
+  JSON — ~0.5 K tokens for a three-file diff), `--mode standard` (full task sheet,
+  ~3.4 K), `--mode deep` (+ repo-level flows/clusters/module risk, ~3.9 K). Explicit
+  `--impact` / `--deep` / `--duplication` flags upgrade the output automatically;
+  `--all-rules` re-enables the context rules (`js-loose-equality` and friends fire on
+  hundreds of files in a legacy repo, so they are opt-in), `--compact` / `--no-compact`
+  control the JSON payload, `--no-checklist` drops the sheet entirely.
 - **Task sheet** — 40 rules rendered as 通过 / 命中(N) / 不适用(+原因), plus 影响面
   (entry points, blast radius, explainable risk), 重复代码 (exact/renamed/similar/gap
   clone kinds) and 代码库深查 (flows, clusters, cycles, module risk). `--json` for tooling.
