@@ -17,9 +17,17 @@ export async function analyze(dirPath, options = {}) {
   const symbols = [];
   const dependencies = [];
   const fileHashes = {};
-  
+
+  // `--ignore` support: this project's own bench/ fixtures (and any vendor tree)
+  // live inside the repo and used to be indexed as if they were our code — a
+  // self-review gave 5 836 symbols instead of 448 and 5 069 findings from
+  // customer code. Patterns are gitignore-ish globs, matched against the
+  // repo-relative POSIX path.
+  const ignorePatterns = normalizeIgnore(options.ignore);
+  const ignored = makeIgnoreFilter(ignorePatterns);
+
   // Walk directory
-  await walkDir(dirPath, files);
+  await walkDir(dirPath, files, { ignored, baseDir: dirPath });
   
   // Parse each file
   const allCalls = [];
@@ -61,7 +69,11 @@ export async function analyze(dirPath, options = {}) {
   }
 
   // Build knowledge graph (nodes + edges for architecture visualization)
-  const knowledgeGraph = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols, allCalls, options);
+  const graphRaw = buildKnowledgeGraph(files, dirPath, architecture, communities, flows, depGraph, layerMap, symbols, allCalls, options);
+  // Safety net: the resolver / route / page extractors can add nodes and edges for
+  // paths the walker never visited; drop anything under an ignored path so the
+  // index stays consistent no matter which subsystem produced it.
+  const knowledgeGraph = ignorePatterns.length ? pruneIgnored(graphRaw, ignored) : graphRaw;
   
   const elapsed = Date.now() - startTime;
   
@@ -87,6 +99,9 @@ export async function analyze(dirPath, options = {}) {
     flows,
     fileHashes,
     layerMap,
+    // recorded so `status`/staleness can honour the same exclusions instead of
+    // reporting ignored files as newly added
+    ignore: ignorePatterns,
     knowledgeGraph,
     // Laravel routes that could not be bound to a controller action — surfaced
     // here (and in index.json) so they are visible instead of silently dropped.
@@ -98,6 +113,9 @@ export async function analyze(dirPath, options = {}) {
     unresolvedPages: knowledgeGraph?.unresolvedPages || [],
     _raw: {
       symbols, depGraph, architecture, fileHashes, layerMap, knowledgeGraph,
+      // must be in `_raw` too: saveIndex() persists `_raw`, and without it the
+      // staleness check would keep reporting ignored files as newly added
+      ignore: ignorePatterns,
       unresolvedRoutes: knowledgeGraph?.unresolvedRoutes || [],
       routeStats: knowledgeGraph?.routeStats || null,
       uniPageStats: knowledgeGraph?.uniPageStats || null,
@@ -106,13 +124,97 @@ export async function analyze(dirPath, options = {}) {
   };
 }
 
-async function walkDir(dirPath, files) {
+/**
+ * Gitignore-ish glob → RegExp. Supports `**` (any depth), `*`, `?`; a pattern
+ * without a slash also matches any path segment, so `--ignore bench` and
+ * `--ignore bench/**` both do what people mean.
+ */
+export function globToRegExp(glob) {
+  const g = String(glob).trim().replace(/^\.\//, '');
+  if (!g) return null;
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*') {
+      if (g[i + 1] === '*') {
+        // `**/` (any dirs) or trailing `**` (everything below)
+        if (g[i + 2] === '/') { re += '(?:[^/]+/)*'; i += 2; }
+        else { re += '.*'; i += 1; }
+      } else re += '[^/]*';
+    } else if (c === '?') re += '[^/]';
+    else if ('.+^${}()|[]\\'.includes(c)) re += `\\${c}`;
+    else re += c;
+  }
+  // A bare name (no slash, no wildcard) matches the segment anywhere in the path.
+  const bare = !g.includes('/') && !/[?*]/.test(g);
+  if (bare) return new RegExp(`(?:^|/)${re}(?:/|$)`);
+  return new RegExp(`^${re}(?:/.*)?$`);
+}
+
+export function normalizeIgnore(ignore) {
+  if (!ignore) return [];
+  const list = Array.isArray(ignore) ? ignore : String(ignore).split(',');
+  return list.map((s) => String(s).trim()).filter(Boolean);
+}
+
+/** Build the predicate used by the walker *and* the post-filter. */
+export function makeIgnoreFilter(patterns) {
+  const res = normalizeIgnore(patterns).map(globToRegExp).filter(Boolean);
+  if (!res.length) return () => false;
+  const norm = (p) => String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '');
+  return (relPath) => {
+    const p = norm(relPath);
+    if (!p) return false;
+    return res.some((re) => re.test(p));
+  };
+}
+
+/**
+ * Drop nodes/edges that belong to an ignored path. `file:` nodes carry a path, and
+ * edges reference node ids, so filtering nodes is enough as long as edges whose
+ * endpoints vanished go too.
+ */
+export function pruneIgnored(knowledgeGraph, ignored) {
+  if (!knowledgeGraph) return knowledgeGraph;
+  const pathOf = (id) => {
+    const s = String(id);
+    if (s.startsWith('file:')) return s.slice(5);
+    if (s.startsWith('sym:')) return s.slice(4).split('::')[0];
+    return null;
+  };
+  const nodes = (knowledgeGraph.nodes || []).filter((n) => {
+    const p = pathOf(n.id) || n.file || null;
+    return !p || !ignored(p);
+  });
+  const keptIds = new Set(nodes.map((n) => String(n.id)));
+  const filePrefixOk = (id) => {
+    const s = String(id);
+    // layer:/dir:/route:/page:/flow:/comm: nodes are not per-file; page/route carry
+    // a file themselves and are filtered by the node pass above
+    if (!s.startsWith('file:') && !s.startsWith('sym:')) return true;
+    const p = pathOf(s);
+    return !p || !ignored(p);
+  };
+  const edges = (knowledgeGraph.edges || []).filter((e) => {
+    const from = String(e.from);
+    const to = String(e.to);
+    if ((from.startsWith('file:') || from.startsWith('sym:')) && !keptIds.has(from)) return false;
+    if ((to.startsWith('file:') || to.startsWith('sym:')) && !keptIds.has(to)) return false;
+    return filePrefixOk(from) && filePrefixOk(to);
+  });
+  const prunedCount = (knowledgeGraph.nodes || []).length - nodes.length;
+  return { ...knowledgeGraph, nodes, edges, prunedIgnored: prunedCount };
+}
+
+async function walkDir(dirPath, files, { ignored = () => false, baseDir = dirPath } = {}) {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(dirPath, entry.name);
     if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+    const rel = path.relative(baseDir, fullPath);
+    if (ignored(rel)) continue; // skip the directory early: nothing below it is wanted
     if (entry.isDirectory()) {
-      await walkDir(fullPath, files);
+      await walkDir(fullPath, files, { ignored, baseDir });
     } else if (entry.isFile() && /\.(js|ts|tsx|jsx|mjs|cjs|vue|py|go|rs|java|php|c|cpp|cc|cxx|h|hpp|hh|cs|rb|sh|bash|ps1|psm1|psd1)$/i.test(entry.name)) {
       files.push(fullPath);
     }
