@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { bladeRawOutputFindings, arityFindings, countArgs, parseSignature, reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks } from '../scripts/review-rules.mjs';
+import { bladeRawOutputFindings, arityFindings, countArgs, parseSignature, reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks, buildHarnessManifest } from '../scripts/review-rules.mjs';
 
 // a directory that deliberately does not exist: stack detection must then rely on
 // index node kinds alone (which is exactly what it does for a fresh clone)
@@ -821,6 +821,38 @@ test('modes: brief is the cheap default, explicit flags upgrade to the task shee
   assert.equal(asked.tier, 'core', 'but the tier stays brief unless told otherwise');
   assert.equal(applyMode({ ...base, checklistFlag: false, deepFlag: true }).checklist, false);
   assert.equal(applyMode({ ...base, mode: 'deep', checklistFlag: false }).checklist, false);
+
+  // `--all-rules` must survive applyMode: the preset assignment used to overwrite it,
+  // making the flag a silent no-op in brief mode (the only mode where it matters).
+  assert.equal(applyMode({ ...base, allRulesFlag: true }).tier, 'all', '--all-rules wins over the brief preset');
+  assert.equal(applyMode({ ...base, mode: 'standard', allRulesFlag: true }).tier, 'all');
+  assert.equal(applyMode({ ...base }).tier, 'core', 'absent the flag the preset still decides');
+});
+
+test('harness manifest names the harness: preset, resolved knobs, rule digest, flags', () => {
+  const base = { mode: 'brief', checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, dupKinds: [], compactFlag: null };
+  const briefOpts = applyMode({ ...base });
+  const brief = buildHarnessManifest({ opts: briefOpts, changes: { scope: 'unstaged', via: 'git', changed_files: [{ file: 'a.js' }] }, dir: '.', version: '0.0.0-test', flags: ['--json'] });
+  const standard = buildHarnessManifest({ opts: applyMode({ ...base, mode: 'standard' }), dir: '.', version: '0.0.0-test' });
+
+  // identity: the two tiers must not share a ruleset digest, or probes cannot tell them apart
+  assert.notEqual(brief.rules.ruleset, standard.rules.ruleset);
+  assert.equal(brief.rules.enabled, RULE_REGISTRY.length - EXTENDED_RULES.size);
+  assert.equal(standard.rules.enabled, RULE_REGISTRY.length);
+  assert.equal(brief.rules.registry, RULE_REGISTRY.length);
+
+  // resolved knobs, not the flags the operator typed
+  assert.equal(brief.preset, 'brief');
+  assert.equal(brief.tier, 'core');
+  assert.equal(brief.knobs.duplication, false);
+  assert.equal(standard.knobs.duplication, true, 'standard resolves duplication on');
+  assert.deepEqual(standard.knobs.dupKinds, ['renamed', 'similar']);
+  assert.equal(brief.knobs.model, undefined);
+  assert.equal(brief.model, null, 'the review loop is model-free');
+  assert.equal(brief.version, '0.0.0-test');
+  assert.deepEqual(brief.explicitFlags, ['--json']);
+  assert.deepEqual(brief.scope, { mode: 'unstaged', via: 'git', files: 1 });
+  assert.ok(brief.index.commit === null || typeof brief.index.commit === 'string');
 });
 
 test('tier=core drops the extended (noisy) rules from the findings', () => {
@@ -854,4 +886,72 @@ test('findings sort by severity and render with why + evidence', () => {
   assert.match(out, /为什么：/);
   assert.match(out, /证据：/);
   assert.match(out, /error 1/);
+});
+
+// ── blanking / arity / import resolution: the false-positive classes that this
+// repo's own dogfood run surfaced (each one was a wrong finding on real code) ──
+
+test('blankNonCode keeps code after a quote-bearing regex literal visible', () => {
+  // `/['"]/` used to open a phantom string that swallowed the rest of the file,
+  // which made every later identifier look unused (occurrences=0).
+  const src = "const re = /['\"]/; const keepName = 1; use(keepName, re);";
+  assert.deepEqual(scanContent('libs/a.js', src).filter((x) => x.rule === 'js-unused-binding'), []);
+});
+
+test('blankNonCode preserves offsets and blanks string/comment/regex contents', () => {
+  const src = "const s = 'a /* not a comment */ b'; // trailing\nconst t = /x\\/y/g; use(s, t);";
+  const blanked = blankLiterals(src);
+  assert.equal(blanked.length, src.length, 'offsets must be preserved');
+  assert.ok(blanked.includes('const s ='), 'code stays');
+  assert.ok(!blanked.includes('not a comment'), 'string content is blanked');
+  assert.ok(!blanked.includes('trailing'), 'comment content is blanked');
+});
+
+test('empty-catch ignores prose, string literals, and explained catches', () => {
+  const rules = (src) => scanContent('libs/a.js', src).filter((x) => x.rule === 'empty-catch');
+  assert.equal(rules('try { f(); } catch (e) {}').length, 1, 'a real empty catch is reported');
+  assert.deepEqual(rules('// prose: catch (e) {}'), [], 'a comment that mentions it is not code');
+  assert.deepEqual(rules("const s = 'catch (e) {}';"), [], 'a string literal is not code');
+  assert.deepEqual(rules('try { f(); } catch (e) { /* malformed json: skip */ }'), [], 'a comment explains the swallow');
+});
+
+test('js-debug-left-on ignores console.log inside a string literal', () => {
+  assert.deepEqual(scanContent('libs/a.js', "const t = 'console.log(res)'; ok();").filter((x) => x.rule === 'js-debug-left-on'), []);
+  assert.equal(scanContent('libs/a.js', 'function f() { console.log(res); }').filter((x) => x.rule === 'js-debug-left-on').length, 1);
+});
+
+test('ai-todo-left ignores a TODO marker that lives inside a string literal', () => {
+  assert.deepEqual(scanContent('api/order.js', "const note = '// TODO: 稍后补校验';").filter((x) => x.rule === 'ai-todo-left'), []);
+  assert.equal(scanContent('api/order.js', '// TODO: 稍后补校验').filter((x) => x.rule === 'ai-todo-left').length, 1);
+});
+
+test('arity: defaults survive the analyzer signature, and a local helper is not a global callee', () => {
+  const defaults = [{ name: 'finding', file: 'tests/t.test.mjs', signature: 'finding = (rule, severity, file, line = …) =>', exported: false, line_start: 1 }];
+  assert.deepEqual(arityFindings('tests/t.test.mjs', "finding('a', 'b', 'c', 4);", { symbols: defaults }), [],
+    'defaulted params are not required');
+
+  const local = [{ name: 'spawnImpl', file: 'tests/other.test.mjs', signature: 'spawnImpl = (bin, args) =>', exported: false, line_start: 3 }];
+  assert.deepEqual(arityFindings('scripts/z.mjs', "spawnImpl('python', ['-c'], { stdio: 'pipe' });", { symbols: local }), [],
+    'a non-exported helper in another file is not this call\'s definition');
+
+  const exported = [{ name: 'joinPosix', file: 'scripts/review-rules.mjs', signature: 'export function joinPosix(dir, spec)', exported: true, line_start: 1 }];
+  assert.equal(arityFindings('scripts/y.mjs', "joinPosix('a', 'b', 'c');", { symbols: exported }).length, 1,
+    'a real over-call on an exported helper is still reported');
+});
+
+test('arity: a comma inside a string literal is one argument, not two', () => {
+  const symbols = [{ name: 'scanX', file: 'scripts/x.mjs', signature: 'export function scanX(file, src)', exported: true, line_start: 1 }];
+  assert.deepEqual(arityFindings('scripts/y.mjs', "scanX('a', 'x,y');", { symbols }), []);
+});
+
+test('joinPosix joins more than two segments (python package __init__.py)', () => {
+  assert.equal(joinPosix('app/Http', 'Controllers', '__init__.py'), 'app/Http/Controllers/__init__.py');
+  assert.equal(joinPosix('', 'pkg', '__init__.py'), 'pkg/__init__.py');
+  assert.equal(joinPosix('a/b', 'c'), 'a/b/c', 'two-argument calls keep working');
+});
+
+test('python relative import resolves to a package __init__.py', () => {
+  const indexedFiles = new Set(['app/sub/__init__.py']);
+  const hits = hallucinationFindings('app/main.py', 'from .sub import thing', { indexedFiles, deps: new Set(), psr4: null });
+  assert.deepEqual(hits.filter((x) => x.rule === 'py-unresolved-local-import'), []);
 });

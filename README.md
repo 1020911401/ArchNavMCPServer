@@ -108,6 +108,14 @@ Explicit `--impact` / `--deep` / `--duplication` flags upgrade the output automa
 (`js-loose-equality` hits 160/333 files — opt-in by design); `--compact` / `--no-compact`
 control the JSON payload; `--no-checklist` prints findings only.
 
+**Item-by-item confirmation:** `--json --no-compact` is a machine-readable task sheet
+(`checklist.rows` + `findings` with `why`/`evidence`). `scripts/kanban-review.mjs` pushes it
+onto a Hermes Kanban board — one card per hit, confirmed one by one
+(`complete` / `block` / `archive` / `comment`), then `status --gate` reads the verdicts back
+and fails while any error/warn item has no conclusion. Waived items go back into the
+pipeline via `waivers` → `--waivers <file>`, which **refuses a waiver with no reason** and
+reports matched-nothing entries as stale. See [docs/kanban-review.md](docs/kanban-review.md).
+
 Two optional engines the checklist reports honestly:
 
 - **`--audit` / `--no-audit`** — dependency vulnerabilities via OSV (npm / Packagist / Go /
@@ -330,6 +338,13 @@ node scripts/test-select.mjs . --scope staged                         # 该跑�
 
 **门禁**：`--gate`（只看 error 级）、`--dup-max-new-clones N`（只算本次新引入的克隆，基于 jscpd 基线）、
 `--impact-max-risk` / `--module-max-risk`（都要显式开）。
+**逐项审核确认（接项目管理）**：`--json --no-compact` 产出机器可读任务书（`checklist.rows` +
+带 `why`/`evidence` 的 `findings`），`scripts/kanban-review.mjs push` 把它灌进 Hermes Kanban ——
+每条命中一张卡，逐项 `complete`（✅确认）/ `block`（⛔驳回）/ `archive`（➖豁免）/ `comment`（证据），
+`status --gate` 回读结论，未确认的 error/warn 项直接 exit 1；全部条目有结论后收口卡才可完成。
+看板上判为误报的条目可 `waivers` 导出成 `--waivers <file>` 的豁免清单回流（**没有理由的豁免不生效**，
+匹配不到的按失效报出，被摘掉的进 `waived[]` 可审计）。
+见 [docs/kanban-review.md](docs/kanban-review.md)。
 **产物**：SARIF 2.1.0（可上 GitHub code scanning）、`::error file=…,line=…` 注解、markdown 任务书
 （用作 PR 评论 / Step Summary）。CI 在 PR 与 push 两类事件上都跑（push 用 `--base HEAD~1`，
 让推送的提交真的被审一遍）。

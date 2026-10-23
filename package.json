@@ -10,7 +10,10 @@
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\"",
     "bench": "node bench/run_bench.mjs",
-    "analyze": "node src/index.js analyze"
+    "analyze": "node src/index.js analyze",
+    "review:kanban": "node scripts/kanban-review.mjs",
+    "probe": "node scripts/probe.mjs",
+    "labels": "node scripts/label-stats.mjs"
   },
   "dependencies": {
     "@arborium/go": "^2.18.1",

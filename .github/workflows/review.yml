@@ -80,7 +80,16 @@ jobs:
           # rule-table addition (Python patterns) produced 4 new *renamed* clones in
           # one file, and structuring data tables alike is not copy-paste. The real
           # incident (a 13-line verbatim copy) was 1 exact clone, still caught.
-          node scripts/review-rules.mjs . $SCOPE_ARGS \
+          #
+          # review-waivers.json = 本地逐项确认后从看板导出的豁免清单（见 docs/kanban-review.md）。
+          # 没有理由的豁免会被 review-rules 判为无效，所以放它进仓 = 让豁免跟着 PR 一起被 review；
+          # 文件不存在就不加这个参数，门禁行为跟以前完全一样。
+          WAIVER_ARGS=""
+          if [ -f review-waivers.json ]; then
+            WAIVER_ARGS="--waivers review-waivers.json"
+            echo "found review-waivers.json — waived items are not re-reported"
+          fi
+          node scripts/review-rules.mjs . $SCOPE_ARGS $WAIVER_ARGS \
             --mode deep \
             --impact --impact-depth 4 \
             --deep --no-audit \

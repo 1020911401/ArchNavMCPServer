@@ -20,6 +20,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
@@ -283,21 +284,110 @@ export function blankTemplateLiterals(src) {
 }
 
 /**
+ * Blank out string, comment and regex-literal *contents* in one pass, keeping the
+ * text length (so every offset still points at the same place).
+ *
+ * A single state machine, because the previous two regex passes could be fooled:
+ * a regex literal like `/['"]/` opened a phantom "string" that swallowed the rest
+ * of the file until the next quote, and a `/*` inside a string started a phantom
+ * block comment. Both silently blanked real code — which is how `js-unused-binding`
+ * reported five used bindings in this very file as unused (occurrences=0).
+ */
+export function blankNonCode(src) {
+  const text = String(src || '');
+  const out = text.split('');
+  const LINE_BREAKS = String.fromCharCode(13, 10);
+  const blank = (from, to) => {
+    for (let i = from; i < to; i++) {
+      const ch = out[i];
+      if (!LINE_BREAKS.includes(ch)) out[i] = ' ';
+    }
+  };
+  const REGEX_PRECEDERS = '(,=:[!&|?{};+-*%~^<>';
+  const REGEX_KEYWORDS = new Set(['return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'do', 'else', 'yield', 'await', 'instanceof']);
+  let i = 0;
+  let prev = '';          // last significant code character
+  let word = '';          // trailing identifier, for `return /re/` style keywords
+  while (i < text.length) {
+    const c = text[i];
+    const n = text[i + 1];
+    if (c === '/' && n === '/') {
+      let end = text.indexOf('\n', i);
+      if (end === -1) end = text.length;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '/' && n === '*') {
+      let end = text.indexOf('*/', i + 2);
+      end = end === -1 ? text.length : end + 2;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '\'' || c === '"') {
+      let j = i + 1;
+      while (j < text.length) {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === c || text[j] === '\n') break;
+        j++;
+      }
+      if (text[j] === c) {
+        blank(i + 1, j);
+        i = j + 1;
+        prev = c;
+        word = '';
+        continue;
+      }
+      i++;                                    // unterminated quote: never swallow the file
+      continue;
+    }
+    if (c === '/' && (prev === '' || REGEX_PRECEDERS.includes(prev) || REGEX_KEYWORDS.has(word))) {
+      let j = i + 1;
+      let inClass = false;
+      let closed = false;
+      while (j < text.length) {
+        const d = text[j];
+        if (d === '\\') { j += 2; continue; }
+        if (d === '\n') break;
+        if (d === '[') inClass = true;
+        else if (d === ']') inClass = false;
+        else if (d === '/' && !inClass) { closed = true; break; }
+        j++;
+      }
+      if (closed) {
+        blank(i + 1, j);
+        i = j + 1;
+        prev = '/';
+        word = '';
+        continue;
+      }
+      i++;                                    // division, not a regex
+      continue;
+    }
+    if (!/\s/.test(c)) {
+      prev = c;
+      word = /[\w$]/.test(c) ? word + c : '';
+    }
+    i++;
+  }
+  return out.join('');
+}
+
+/**
  * Blank out string/comment *contents* (length preserved, so offsets stay valid)
  * before matching operator-level traps: `where('x', '!=', 'y')` and `'a' == 'b'`
  * are operators inside literals, not loose comparisons.
  */
 export function blankLiterals(src) {
-  return src
-    .replace(/(['"])(?:\\.|(?!\1)[^\\\n])*\1/g, (m) => m[0] + ' '.repeat(Math.max(0, m.length - 2)) + m[m.length - 1])
-    .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length))
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  return blankNonCode(src);
 }
 
 /** POSIX join+normalize (`..`/`.` segments) for import-path resolution. */
-export function joinPosix(dir, spec) {
+export function joinPosix(dir, spec, ...more) {
   const out = [];
-  for (const part of [...String(dir).split('/'), ...String(spec).split('/')]) {
+  const segments = [dir, spec, ...more].flatMap((s) => String(s == null ? '' : s).split('/'));
+  for (const part of segments) {
     if (!part || part === '.') continue;
     if (part === '..') out.pop();
     else out.push(part);
@@ -479,7 +569,7 @@ export function scanContent(file, src) {
   // leftover debug statement (this is how the checker flagged its own scripts).
   const isCli = /^#!/.test(src);
   if (JS_OR_VUE && !isCli) {
-    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(src);
+    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(blanked);
     if (dbg) {
       findings.push({
         rule: 'js-debug-left-on', severity: 'warn', file: f, line: lineOf(dbg.index),
@@ -504,7 +594,14 @@ export function scanContent(file, src) {
   // "empty catch" and TODO stubs are code smells — scanning prose (README, rule
   // tables that *describe* `catch {}`) flagged the documentation instead.
   const isCode = /\.(php|js|ts|mjs|cjs|jsx|tsx|vue|py)$/i.test(file);
-  const emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(src) : null;
+  let emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(blanked) : null;
+  // A comment inside the braces *is* an explanation (`catch { /* malformed json */ }`),
+  // and the blanked source hides comments — so confirm against the raw text.
+  if (emptyCatch) {
+    const open = emptyCatch[0].indexOf('{');
+    const inner = src.slice(emptyCatch.index + open + 1, emptyCatch.index + emptyCatch[0].lastIndexOf('}'));
+    if (inner.trim()) emptyCatch = null;
+  }
   if (emptyCatch) {
     findings.push({
       rule: 'empty-catch', severity: 'warn', file: f, line: lineOf(emptyCatch.index),
@@ -515,8 +612,13 @@ export function scanContent(file, src) {
   }
 
   // TODO/FIXME only counts in a comment — the rule's own pattern lives in source
-  // code, and matching that made the checker flag itself.
-  const todo = isCode ? /(?:\/\/|#|\/\*|<!--|\*)[^\n]{0,80}?\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|先这样|临时方案|not implemented/.exec(src) : null;
+  // code, and matching that made the checker flag itself. The marker must not sit
+  // right after a quote: `'// TODO: …'` is a string a test *writes*, not a comment
+  // (that is how the tests' own fixtures got reported).
+  // The documented markers only (TODO/FIXME/未实现/not implemented). Vaguer Chinese
+  // phrases like 先这样 were dropped: they match ordinary prose and string literals
+  // (the tests' own fixture text), which is noise, not a stub.
+  const todo = isCode ? /(?<![`'"])(?:\/\/|#|\/\*|<!--|\*)[^\n]{0,80}?\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|临时方案|not implemented/.exec(src) : null;
   if (todo) {
     findings.push({
       rule: 'ai-todo-left', severity: 'info', file: f, line: lineOf(todo.index),
@@ -581,7 +683,10 @@ export function scanContent(file, src) {
 
   // ── JS/Vue: bindings that are never used (AI code leaves a lot of these) ────
   if (JS_OR_VUE) {
-    const withoutComments = src.replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length)).replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+    // Reuse the string/comment/regex-blanked source: counting uses on the raw text
+    // made `'foo'` in a string literal look like a use, and the old regex-pair
+    // blanking could swallow real code (regex literal `/['"]/` opened a phantom string).
+    const withoutComments = blanked;
     for (const m of src.matchAll(/^[ \t]*import\s+([^;\n]+?)\s+from\s+['"][^'"]+['"]/gm)) {
       const clause = m[1].trim();
       const bound = [];
@@ -884,9 +989,14 @@ export function arityFindings(file, src, { symbols = [] } = {}) {
     const before = src.slice(Math.max(0, m.index - 20), m.index);
     if (/(?:function|=>)\s*$/.test(before)) continue;          // definition site
     if (/(?:->|\.|::)\s*$/.test(before)) continue;             // method / property call
-    const argCount = countArgs(src, m.index + m[0].length - 1);
+    const argCount = countArgs(scrubbed, m.index + m[0].length - 1);
     if (argCount === null) continue;
     const def = defs[0];
+    // A non-exported symbol is local to its own file: a local `key()`/`spawnImpl()`
+    // in another file is not this call's callee (that produced cross-file arity
+    // findings on test helpers). Only when the index actually knows `exported === false`
+    // — an index without export info must keep the old behaviour.
+    if (def.exported === false && norm(def.file) !== f) continue;
     const { required, total, variadic } = parseSignature(def.signature);
     if (required === null || !total) continue;
     const line = src.slice(0, m.index).split(/\r?\n/).length;
@@ -1400,7 +1510,9 @@ export function applyMode(opts) {
   const preset = MODE_PRESETS[opts.mode] || MODE_PRESETS.brief;
   const anyAnalysisFlag = Boolean(opts.impactFlag || opts.deepFlag || opts.duplicationFlag);
   const out = { ...opts };
-  out.tier = preset.tier;
+  // explicit --all-rules must win over the preset tier (same failure mode as --compact:
+  // the preset assignment below runs after arg parsing, so without the flag it is a no-op)
+  out.tier = opts.allRulesFlag ? 'all' : preset.tier;
   out.impact = opts.impactFlag || (preset.impact && !opts.duplicationOnly);
   out.deep = opts.deepFlag || preset.deep;
   out.duplication = opts.duplicationFlag || preset.duplication;
@@ -1416,6 +1528,64 @@ export function applyMode(opts) {
   // compact off — `--json` then emitted the compact summary with no checklist/why/evidence).
   else out.compact = Boolean(opts.compactFlag);
   return out;
+}
+
+/**
+ * Harness manifest — the "what was the harness" half of an evaluation record.
+ *
+ * A review result is only comparable if the thing that produced it is named:
+ * preset, rule tier, the knob values the preset resolved to, the enabled rule
+ * set (digest), and the index it ran against. Without this block two runs cannot
+ * be attributed to two harnesses, so a before/after comparison has no evidence
+ * chain — that was the `review.json` gap `scripts/probe.mjs` needs closed.
+ * Deliberately model-free: the review layer never calls a model.
+ */
+export function rulesetDigest(tier) {
+  const enabled = tier === 'core'
+    ? RULE_REGISTRY.filter((r) => !EXTENDED_RULES.has(r.id))
+    : RULE_REGISTRY;
+  const ids = enabled.map((r) => r.id).sort();
+  return {
+    digest: crypto.createHash('sha256').update(ids.join('\n')).digest('hex').slice(0, 16),
+    enabled: ids.length,
+  };
+}
+
+export function buildHarnessManifest({ opts, changes = null, dir = '.', version = null, flags = [] }) {
+  const { digest: ruleset, enabled } = rulesetDigest(opts.tier);
+  return {
+    tool: 'archnav/review-rules',
+    version: version || pkgVersion(),
+    preset: opts.mode,
+    tier: opts.tier,
+    rules: { enabled, registry: RULE_REGISTRY.length, extended: EXTENDED_RULES.size, ruleset },
+    knobs: {
+      impact: Boolean(opts.impact), deep: Boolean(opts.deep), duplication: Boolean(opts.duplication),
+      dupKinds: [...(opts.dupKinds || [])], dupMinLines: opts.dupMinLines ?? null, dupMinTokens: opts.dupMinTokens ?? null,
+      dupMaxNewClones: opts.dupMaxNewClones ?? null,
+      audit: Boolean(opts.audit), semgrep: Boolean(opts.semgrep),
+      checklist: Boolean(opts.checklist), compact: Boolean(opts.compact),
+      pairingFloor: opts.pairingFloor ?? null, impactDepth: opts.impactDepth ?? null,
+      impactMaxRisk: opts.impactMaxRisk ?? null, moduleMaxRisk: opts.moduleMaxRisk ?? null,
+      clusterLevel: opts.deepClusterLevel || 'files',
+      waivers: opts.waivers ? String(opts.waivers) : null,
+    },
+    explicitFlags: [...flags],
+    scope: { mode: changes?.scope ?? null, via: changes?.via ?? null, files: (changes?.changed_files || []).length },
+    index: { commit: readIndexCommit(dir), dir: path.resolve(dir) },
+    // the loop is model-free: probes vary the harness, never the model
+    model: null,
+  };
+}
+
+function pkgVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version || null;
+  } catch { return null; }
+}
+
+function readIndexCommit(dir) {
+  try { return fs.readFileSync(path.join(dir, '.archnav', 'commit'), 'utf8').trim() || null; } catch { return null; }
 }
 /**
  * How Semgrep is located, in order (first candidate that starts wins):
@@ -1696,6 +1866,19 @@ export function renderMarkdown(checklist, findings = [], meta = {}, extra = {}) 
   }
   L.push(`**规则** ${checklist.summary.total} 条：✅ 通过 ${checklist.summary.pass} · ⚠️ 命中 ${checklist.summary.hit} · ➖ 不适用 ${checklist.summary.na}（findings ${checklist.summary.findings}）`);
   L.push('');
+  if (extra.waived?.length) {
+    L.push(`> ➖ 已逐项审核并豁免 **${extra.waived.length}** 条（每条都有理由，逐条可查）。`);
+    L.push('');
+    L.push('<details><summary>豁免清单</summary>');
+    L.push('');
+    for (const w of extra.waived.slice(0, 50)) {
+      L.push(`- \`${w.rule}\` ${w.file || ''}${w.line ? ':' + w.line : ''} — ${w.waiver?.reason || ''}${w.waiver?.by ? `（${w.waiver.by}）` : ''}`);
+    }
+    if (extra.waived.length > 50) L.push(`- ...其余 ${extra.waived.length - 50} 条见 \`--json\` 的 \`waived[]\``);
+    L.push('');
+    L.push('</details>');
+    L.push('');
+  }
   L.push('| 状态 | 条目 | 检查内容 | 命中 |');
   L.push('|---|---|---|---|');
   let group = null;
@@ -1782,15 +1965,62 @@ export function renderFindings(findings, { scope, via } = {}) {
   return L.join('\n');
 }
 
+/**
+ * `--waivers <file.json>` — 把「已逐项审核并豁免」的命中项从 findings 里摘出来。
+ *
+ * 与 `--dup-baseline-from-ref` 的区别：baseline 按「改动是否新引入」过滤，waiver 表达的是
+ * 「有人看过这条，写了理由，不认它」——所以它必须带 reason，也必须留痕：
+ *   - **没有 reason 的条目不生效**（否则豁免文件就成了无痕静音器，这正是审核里最危险的东西）
+ *   - 匹配不到的条目不静默丢弃，作为 `stale` 报出来（规则改了 / 位置漂了 → 该重审）
+ *   - 被摘掉的 findings 进 `waived[]`（含理由），进 JSON / markdown / 控制台，不是凭空消失
+ *
+ * 匹配键：rule 精确 + file 归一化精确 + line（`null` = 该规则该文件全豁免）。
+ */
+export function applyWaivers(findings, waivers) {
+  const list = Array.isArray(waivers) ? waivers : (waivers?.waivers || []);
+  const normFile = (s) => String(s ?? '').replace(/\\/g, '/').replace(/^\.\//, '');
+  const key = (rule, file, line) => `${rule}\u0000${normFile(file)}\u0000${line ?? '*'}`;
+  const index = new Map();
+  const invalid = [];
+  for (const w of list) {
+    if (!w || !w.rule || !w.file || !String(w.reason ?? '').trim()) { invalid.push(w); continue; }
+    const k = key(w.rule, w.file, w.line);
+    if (!index.has(k)) index.set(k, []);
+    index.get(k).push(w);
+  }
+  const used = new Set();
+  const kept = [];
+  const waived = [];
+  for (const f of findings) {
+    const hit = (index.get(key(f.rule, f.file, f.line)) || [])[0] || (index.get(key(f.rule, f.file, null)) || [])[0];
+    if (!hit) { kept.push(f); continue; }
+    used.add(hit);
+    waived.push({ ...f, waiver: { reason: String(hit.reason).trim(), by: hit.by ?? null, task: hit.task ?? null } });
+  }
+  const stale = [];
+  for (const ws of index.values()) for (const w of ws) if (!used.has(w)) stale.push(w);
+  return { kept, waived, invalid, stale };
+}
+
+/** `--waivers` 文件读入 + 形状校验（读不了就明确报错，不静默当“没有豁免”）。 */
+export function loadWaivers(file, { readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
+  const raw = readFile(path.resolve(file));
+  const parsed = JSON.parse(raw);
+  const list = Array.isArray(parsed) ? parsed : parsed?.waivers;
+  if (!Array.isArray(list)) throw new Error(`waivers 文件形状不对（要 {"waivers":[…]} 或数组）: ${file}`);
+  return { list, source: file };
+}
+
 function parseArgs(argv) {
   const out = {
     dir: '.', scope: 'unstaged', base: null, json: false, gate: false, backend: null, sarif: null, github: false, pairingFloor: 0.2,
     // modes: `brief` (default) = high-signal rules, findings only, compact JSON;
     // `standard` = full task sheet; `deep` = + repo-level deep analysis.
-    mode: 'brief', tier: 'core',
+    mode: 'brief', tier: 'core', allRulesFlag: false,
     checklistFlag: null, impactFlag: false, deepFlag: false, duplicationFlag: false, dupKindsFlag: false, compactFlag: null, auditFlag: null,
     checklist: false, duplication: false, impact: false, deep: false, compact: true,
     dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null,
+    waivers: null, harnessOut: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -1801,7 +2031,7 @@ function parseArgs(argv) {
     else if (a === '--mode') out.mode = String(argv[++i]).toLowerCase();
     else if (a === '--brief') out.mode = 'brief';
     else if (a === '--standard') out.mode = 'standard';
-    else if (a === '--all-rules') out.tier = 'all';
+    else if (a === '--all-rules') { out.tier = 'all'; out.allRulesFlag = true; }
     else if (a === '--compact') out.compactFlag = true;
     else if (a === '--no-compact') out.compactFlag = false;
     else if (a === '--no-checklist') out.checklistFlag = false;
@@ -1827,9 +2057,14 @@ function parseArgs(argv) {
     else if (a === '--sarif') out.sarif = argv[++i];
     else if (a === '--github') out.github = true;
     else if (a === '--pairing-floor') out.pairingFloor = Number(argv[++i]);
+    else if (a === '--waivers') out.waivers = argv[++i];
+    else if (a === '--harness-out') out.harnessOut = argv[++i];
     else if (a.startsWith('--')) { console.error(`unknown option ${a}`); process.exit(2); }
     else out.dir = a;
   }
+  // recorded verbatim in the harness manifest: what the operator asked for, as
+  // opposed to what the preset resolved to. A probe needs both halves.
+  out.flags = argv.filter((a) => a.startsWith('--'));
   return out;
 }
 
@@ -2029,6 +2264,40 @@ async function main() {
     }
   }
 
+  // ── 逐项豁免（--waivers）：从看板上「已确认豁免」的条目回流 ────────────────
+  // 放在所有 findings 汇齐之后、任务书汇总之前：摘掉的是「有人给了理由不认」的条目，
+  // 剩下的命中照旧进 checklist / SARIF / --gate。
+  let waiverResult = { kept: findings, waived: [], invalid: [], stale: [], source: null };
+  if (opts.waivers) {
+    let loaded;
+    try { loaded = loadWaivers(opts.waivers); }
+    catch (e) { console.error(`--waivers 读不了: ${e.message}`); process.exit(2); }
+    waiverResult = { ...applyWaivers(findings, loaded.list), source: loaded.source };
+    if (waiverResult.waived.length) {
+      findings.splice(0, findings.length, ...waiverResult.kept);
+      // 任务书的行是按 pre-waiver 的 findings 建的：不重建就会出现「规则行写着 命中(1)，
+      // 但 findings 里已经一条都没有」的自相矛盾。此刻 checklist.rows 里还只有规则行
+      // （dup/impact/deep 的行是在下面那个 merge 块里才追加的），所以整体重建是安全的。
+      const rebuilt = buildChecklist({ findings, meta });
+      checklist.rows = rebuilt.rows;
+      checklist.summary = rebuilt.summary;
+    }
+    if (waiverResult.waived.length || waiverResult.invalid.length || waiverResult.stale.length) {
+      checklist.rows.push({
+        id: 'waivers', group: '豁免', family: 'any',
+        title: '逐项豁免（有 reason 才生效；匹配不到的按失效报出）',
+        hits: waiverResult.waived.length,
+        status: waiverResult.waived.length ? 'hit' : 'pass',
+        reason: [
+          `${waiverResult.waived.length} 条已豁免（${loaded.source}）`,
+          waiverResult.invalid.length ? `${waiverResult.invalid.length} 条缺 reason → 未生效` : null,
+          waiverResult.stale.length ? `${waiverResult.stale.length} 条失效（找不到对应命中，建议重审）` : null,
+        ].filter(Boolean).join('；'),
+      });
+    }
+    checklist.summary = { ...checklist.summary, findings: findings.length };
+  }
+
   if (dupResult?.checklist || impactResult?.checklist || deepResult?.checklist || extraRows.length) {
     if (dupResult?.checklist) checklist.rows.push(...dupResult.checklist.rows);
     if (deepResult?.checklist) checklist.rows.push(...deepResult.checklist.rows);
@@ -2045,6 +2314,12 @@ async function main() {
     const sev = { error: 0, warn: 1, info: 2 };
     return (sev[a.severity] - sev[b.severity]) || String(a.file).localeCompare(String(b.file)) || (a.line ?? 0) - (b.line ?? 0);
   });
+  const harness = buildHarnessManifest({ opts, changes, dir, flags: opts.flags || [] });
+  if (opts.harnessOut) {
+    const hp = path.resolve(opts.harnessOut);
+    fs.writeFileSync(hp, JSON.stringify(harness, null, 2));
+    console.error(`Harness manifest written to ${hp}`);
+  }
   if (opts.sarif) {
     const out = opts.sarif === '-' ? null : path.resolve(opts.sarif);
     const sarif = JSON.stringify(toSarif(findings), null, 2);
@@ -2056,6 +2331,7 @@ async function main() {
       dupPercent: dupResult?.summary?.percent,
       risk: impactResult?.risk,
       impact: impactResult?.summary,
+      waived: waiverResult.waived,
     });
     if (opts.markdown === '-') console.log(md);
     else { fs.writeFileSync(path.resolve(opts.markdown), md); console.error(`Markdown written to ${path.resolve(opts.markdown)}`); }
@@ -2068,21 +2344,33 @@ async function main() {
       console.log(JSON.stringify({
         mode: opts.mode,
         tier: opts.tier,
-        summary: { ...checklist.summary, duplication: dupResult?.summary ?? null, risk: impactResult?.risk?.level ?? null },
+        harness: { preset: harness.preset, tier: harness.tier, ruleset: harness.rules.ruleset },
+        summary: { ...checklist.summary, duplication: dupResult?.summary ?? null, risk: impactResult?.risk?.level ?? null, waived: waiverResult.waived.length },
         findings: findings.map((f) => ({ rule: f.rule, severity: f.severity, file: f.file, line: f.line })),
       }));
     } else {
       console.log(JSON.stringify({
         scope: changes.scope, via: changes.via, backend: backendDir,
+        harness,
         checklist: { summary: checklist.summary, rows: checklist.rows },
         duplication: dupResult ? { summary: dupResult.summary } : null,
         findings,
+        waived: waiverResult.waived,
       }, null, 2));
     }
   } else if (!opts.sarif || opts.sarif !== '-') {
     if (opts.checklist) console.log(renderChecklist(checklist));
     console.log(renderFindings(findings, { scope: changes.scope, via: changes.via }));
     if (!opts.checklist) console.log('   （--no-checklist：只显示命中项，未展示检查过的条目）');
+    if (waiverResult.waived.length) {
+      console.log(`\n➖ 已豁免 ${waiverResult.waived.length} 条（--waivers ${waiverResult.source}）—— 每条都带理由，查得到：`);
+      for (const w of waiverResult.waived.slice(0, 20)) {
+        console.log(`   [${w.rule}] ${w.file || ''}${w.line ? ':' + w.line : ''} — ${w.waiver.reason}${w.waiver.by ? `（${w.waiver.by}${w.waiver.task ? ' / ' + w.waiver.task : ''}）` : ''}`);
+      }
+      if (waiverResult.waived.length > 20) console.log(`   ...其余 ${waiverResult.waived.length - 20} 条见 --json 的 waived[]`);
+    }
+    if (waiverResult.invalid.length) console.log(`\n⚠️  ${waiverResult.invalid.length} 条豁免因缺 reason 未生效（豁免必须有理由）`);
+    if (waiverResult.stale.length) console.log(`⚠️  ${waiverResult.stale.length} 条豁免已失效：命不中了（规则/位置变了），建议重审`);
   }
   if (opts.gate) {
     if (findings.some((f) => f.severity === 'error')) process.exit(1);
