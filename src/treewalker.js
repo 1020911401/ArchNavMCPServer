@@ -12,7 +12,6 @@ import path from 'path';
  */
 export function parseFileAst(filePath, baseDir) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const lines = content.split('\n');
   const relativePath = path.relative(baseDir, filePath);
   const symbols = [];
   const imports = [];
@@ -104,7 +103,7 @@ export function parseFileAst(filePath, baseDir) {
             file: relativePath,
             line_start: node.loc.start.line,
             line_end: node.loc.end.line,
-            signature: `${node.id.name} = (${(node.init.params || []).map(p => extractParamName(p)).join(', ')}) =>`,
+            signature: `${node.id.name} = (${(node.init.params || []).map(p => renderParam(p)).join(', ')}) =>`,
             params: (node.init.params || []).map(p => extractParamName(p)),
             exported: isExported(node, parent),
             async: node.init.async || false,
@@ -310,6 +309,16 @@ function extractSignature(content, node) {
   const start = node.start;
   const end = node.body ? node.body.start : Math.min(start + 80, content.length);
   return content.substring(start, end).split('\n')[0].trim().slice(0, 120);
+}
+
+function renderParam(param) {
+  if (!param) return '';
+  // Defaults must survive into `signature`: parseSignature decides "required" by
+  // looking for `=`, so `(a, b = 1)` rendered as `(a, b)` made every defaulted
+  // parameter look mandatory and produced false "missing argument" findings.
+  if (param.type === 'AssignmentPattern') return `${renderParam(param.left)} = …`;
+  if (param.type === 'RestElement') return `...${param.argument?.name || ''}`;
+  return extractParamName(param);
 }
 
 function extractParamName(param) {
