@@ -226,7 +226,28 @@ plus content drift). Everything is read-only, each git call is time-boxed, and a
 missing git or a non-repo directory degrades to nulls instead of throwing. `--json`
 gives the same data for scripts.
 
-### 🏗️ Architecture layers
+#### 📘 Playbook over MCP: prompts + resources
+
+The playbook (how to review a diff, how to self-review an ArchNav change, which tests to
+run, what the deep ops do and do not do) ships **with the server** instead of living only
+in an editor skill:
+
+| MCP surface | What it is |
+|---|---|
+| `prompts/list` · `prompts/get` | four workflows — `archnav_review_diff`, `archnav_self_review`, `archnav_test_select`, `archnav_deep` (optional `dir` argument) |
+| `resources/list` · `resources/read` | six markdown documents under `skill/archnav/` — `archnav://skill` plus `code-review`, `self-review`, `comparison`, `kanban-review`, `playbook-full` |
+
+Both are served from `skill/archnav/**` (the single source of truth; `resources/read`
+just returns those files). Tool descriptions stay under 40 words and the tool count is
+still 10 — the workflow text is pull-only, so clients that ignore prompts/resources lose
+nothing but the templates, and a bad prompt name / uri returns JSON-RPC `-32602` instead
+of a silent empty answer.
+
+`node scripts/sync-skill.mjs` installs the same files into the local Hermes skills tree
+(`--check` verifies without writing), so the editor skill and the MCP server cannot drift
+apart.
+
+## 🏗️ Architecture layers
 
 Detected from directory structure (`controllers/`, `services/`, `repositories/`,
 `models/`, `middleware/`, `config/`, `utils/`, …), matched **case-insensitively** — a

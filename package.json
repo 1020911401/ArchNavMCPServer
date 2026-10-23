@@ -13,7 +13,8 @@
     "analyze": "node src/index.js analyze",
     "review:kanban": "node scripts/kanban-review.mjs",
     "probe": "node scripts/probe.mjs",
-    "labels": "node scripts/label-stats.mjs"
+    "labels": "node scripts/label-stats.mjs",
+    "skill:sync": "node scripts/sync-skill.mjs"
   },
   "dependencies": {
     "@arborium/go": "^2.18.1",

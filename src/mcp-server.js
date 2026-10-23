@@ -22,6 +22,7 @@ import { analyze, saveIndex } from './analyzer.js';
 import * as codegraphEngine from './engines/codegraph.js';
 import * as gitnexusEngine from './engines/gitnexus.js';
 import { mergeCalls, confidenceOf } from './fusion.js';
+import { listResources, readResource, listPrompts, getPrompt } from './mcp-playbook.js';
 
 // ═══════════════════════════════════════════════════
 //  GitNexus MCP Proxy (lazy — only `explore` needs it)
@@ -522,7 +523,17 @@ process.stdin.on('data', async (chunk) => {
     try {
       switch (method) {
         case 'initialize':
-          send(id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo });
+          send(id, {
+            protocolVersion: '2024-11-05',
+            capabilities: {
+              tools: {},
+              // Playbook shipped with the server: workflows as prompts, long references as
+              // resources. Clients that ignore both lose nothing (the CLI is the same).
+              resources: { listChanged: false },
+              prompts: { listChanged: false },
+            },
+            serverInfo,
+          });
           break;
         case 'tools/list':
           send(id, { tools: TOOLS });
@@ -530,6 +541,24 @@ process.stdin.on('data', async (chunk) => {
         case 'tools/call': {
           const result = await handleToolCall(request.params?.name, request.params?.arguments || {});
           send(id, result);
+          break;
+        }
+        case 'resources/list':
+          send(id, { resources: listResources() });
+          break;
+        case 'resources/read': {
+          const res = readResource(request.params?.uri);
+          if (res.error) sendError(id, { ...ERRORS.INVALID_PARAMS, message: res.error });
+          else send(id, res);
+          break;
+        }
+        case 'prompts/list':
+          send(id, { prompts: listPrompts() });
+          break;
+        case 'prompts/get': {
+          const res = getPrompt(request.params?.name, request.params?.arguments || {});
+          if (res.error) sendError(id, { ...ERRORS.INVALID_PARAMS, message: res.error });
+          else send(id, res);
           break;
         }
         case 'notifications/initialized':
@@ -549,10 +578,12 @@ function sendError(id, error) { process.stdout.write(JSON.stringify({ jsonrpc: '
 
 const ERRORS = {
   INVALID_REQUEST: { code: -32600, message: 'Invalid Request' },
+  INVALID_PARAMS: { code: -32602, message: 'Invalid params' },
   METHOD_NOT_FOUND: { code: -32601, message: 'Method not found' },
   INTERNAL_ERROR: { code: -32603, message: 'Internal error' },
 };
 
+process.stderr.write(`[archnav] playbook: ${listPrompts().length} prompts, ${listResources().length} resources\n`);
 process.stderr.write(`[archnav] MCP server: ${TOOLS.length} tools; engine: archnav (default) — optional cross-check engines: codegraph, gitnexus\n`);
 
 export { TOOLS, handleToolCall, gatherCallersFromEngines, confidenceOf };

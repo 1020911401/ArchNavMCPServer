@@ -83,7 +83,11 @@ test('mcp: initialize + tools/list respond, tools are single-entry and ≤12', a
     assert.equal(init.jsonrpc, '2.0');
     assert.equal(init.id, 1);
     assert.ok(init.result, 'initialize must return a result');
-    assert.deepEqual(init.result.capabilities, { tools: {} });
+    assert.deepEqual(init.result.capabilities, {
+      tools: {},
+      resources: { listChanged: false },
+      prompts: { listChanged: false },
+    });
     assert.equal(init.result.serverInfo.name, 'archnav');
 
     const list = await call({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
@@ -148,6 +152,73 @@ test('mcp: unknown tool returns an error result, not a crash', async () => {
     });
     assert.equal(res.result.isError, true);
     assert.match(res.result.content[0].text, /Unknown tool/);
+  } finally {
+    child.kill();
+  }
+});
+
+// ── playbook over MCP: prompts are workflows, resources are the long references ──
+const EXPECTED_PROMPTS = ['archnav_deep', 'archnav_review_diff', 'archnav_self_review', 'archnav_test_select'];
+const EXPECTED_RESOURCES = [
+  'archnav://skill',
+  'archnav://skill/code-review',
+  'archnav://skill/self-review',
+  'archnav://skill/comparison',
+  'archnav://skill/kanban-review',
+  'archnav://skill/playbook-full',
+];
+
+test('mcp: prompts/list and prompts/get serve the workflows from skill/archnav', async () => {
+  const { child, call } = startServer();
+  try {
+    const list = await call({ jsonrpc: '2.0', id: 20, method: 'prompts/list' });
+    const names = list.result.prompts.map((p) => p.name).sort();
+    assert.deepEqual(names, EXPECTED_PROMPTS, 'prompt set is the four workflows');
+    for (const p of list.result.prompts) {
+      assert.ok(p.description && p.description.length > 10, `${p.name} needs a description`);
+      assert.ok(Array.isArray(p.arguments), `${p.name} exposes its optional dir argument`);
+    }
+
+    const get = await call({
+      jsonrpc: '2.0', id: 21, method: 'prompts/get',
+      params: { name: 'archnav_review_diff', arguments: { dir: 'C:/work/project' } },
+    });
+    const text = get.result.messages[0].content.text;
+    assert.equal(get.result.messages[0].role, 'user');
+    assert.match(text, /review-rules\.mjs/, 'the workflow names the actual command');
+    assert.match(text, /目标仓：`C:\/work\/project`/, 'the dir argument is carried into the prompt');
+
+    // unknown prompt is a protocol-level invalid-params error, not a silent empty result
+    const bad = await call({ jsonrpc: '2.0', id: 22, method: 'prompts/get', params: { name: 'nope' } });
+    assert.equal(bad.error?.code, -32602);
+    assert.match(bad.error?.message, /unknown prompt/);
+  } finally {
+    child.kill();
+  }
+});
+
+test('mcp: resources/list and resources/read serve the playbook, and a bad uri is an error', async () => {
+  const { child, call } = startServer();
+  try {
+    const list = await call({ jsonrpc: '2.0', id: 30, method: 'resources/list' });
+    const uris = list.result.resources.map((r) => r.uri).sort();
+    assert.deepEqual(uris, [...EXPECTED_RESOURCES].sort());
+    for (const r of list.result.resources) {
+      assert.equal(r.mimeType, 'text/markdown');
+      assert.ok(r.name && r.title, `${r.uri} needs name + title`);
+    }
+
+    const read = await call({ jsonrpc: '2.0', id: 31, method: 'resources/read', params: { uri: 'archnav://skill' } });
+    const skill = read.result.contents[0];
+    assert.equal(skill.uri, 'archnav://skill');
+    assert.match(skill.text, /^---\r?\nname: archnav/, 'the thin playbook keeps its frontmatter (Hermes can install it)');
+
+    const rules = await call({ jsonrpc: '2.0', id: 32, method: 'resources/read', params: { uri: 'archnav://skill/code-review' } });
+    assert.ok(rules.result.contents[0].text.length > 5000, 'the rule catalogue is served whole');
+
+    const bad = await call({ jsonrpc: '2.0', id: 33, method: 'resources/read', params: { uri: 'archnav://nope' } });
+    assert.equal(bad.error?.code, -32602);
+    assert.match(bad.error?.message, /unknown resource/);
   } finally {
     child.kill();
   }

@@ -282,7 +282,63 @@ const TAG_RE = /<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
  * e.g. `tests/selftest.mjs` "imports" a controller file it only writes out.
  */
 export function blankTemplateLiterals(src) {
-  return src.replace(/`(?:\\[\s\S]|[^\\`])*`/g, (m) => '`' + ' '.repeat(Math.max(0, m.length - 2)) + '`');
+  const text = String(src || '');
+  const out = text.split('');
+  const blank = (from, to) => {
+    for (let i = from; i < to; i++) if (out[i] !== '\n' && out[i] !== '\r') out[i] = ' ';
+  };
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== '`') { i++; continue; }
+    // Walk to the closing backtick: escapes, `${ ... }` nesting (braces) and nested
+    // templates all have to be understood. The old non-greedy regex stopped at the
+    // first inner backtick, so the rest of a nested template leaked into the "code"
+    // stream — that is how `mkText(`${a} files, ${b} symbols`)` was counted as two
+    // arguments.
+    let j = i + 1;
+    let depth = 0;
+    while (j < text.length) {
+      const c = text[j];
+      if (c === '\\') { j += 2; continue; }
+      if (depth === 0) {
+        if (c === '`') break;
+        if (c === '$' && text[j + 1] === '{') { depth = 1; j += 2; continue; }
+        j++;
+        continue;
+      }
+      if (c === '{') { depth++; j++; continue; }
+      if (c === '}') { depth--; j++; continue; }
+      if (c === '`') {                      // nested template inside ${ … }
+        let k = j + 1;
+        let inner = 0;
+        while (k < text.length) {
+          const d = text[k];
+          if (d === '\\') { k += 2; continue; }
+          if (inner === 0 && d === '`') break;
+          if (inner === 0 && d === '$' && text[k + 1] === '{') { inner = 1; k += 2; continue; }
+          if (inner > 0) { if (d === '{') inner++; else if (d === '}') inner--; }
+          k++;
+        }
+        j = k + 1;
+        continue;
+      }
+      if (c === '\'' || c === '"') {        // string inside ${ … }
+        const q = c;
+        let k = j + 1;
+        while (k < text.length) {
+          if (text[k] === '\\') { k += 2; continue; }
+          if (text[k] === q || text[k] === '\n') break;
+          k++;
+        }
+        j = k + 1;
+        continue;
+      }
+      j++;
+    }
+    blank(i + 1, j);
+    i = j + 1;
+  }
+  return out.join('');
 }
 
 /**
