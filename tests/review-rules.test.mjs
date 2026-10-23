@@ -9,7 +9,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { bladeRawOutputFindings, arityFindings, countArgs, parseSignature, reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks, buildHarnessManifest } from '../scripts/review-rules.mjs';
+import { bladeRawOutputFindings, arityFindings, countArgs, parseSignature, reviewFindings, renderFindings, extractFrontCalls, backendRoutes, compareBoundary, pathMatches, toSarif, toGithubAnnotations, scanContent, vforMissingKeys, hallucinationFindings, blankLiterals, blankNonCode, stubMarkerInComments, joinPosix, buildChecklist, renderChecklist, RULE_REGISTRY, applyMode, EXTENDED_RULES, detectStacks, renderStacks, buildHarnessManifest } from '../scripts/review-rules.mjs';
 
 // a directory that deliberately does not exist: stack detection must then rely on
 // index node kinds alone (which is exactly what it does for a fresh clone)
@@ -688,7 +688,9 @@ test('language traps: leftover console/debugger, empty catch, TODO stubs', () =>
 
   const todo = scanContent('api/order.js', '// TODO: 稍后补校验，先这样');
   assert.equal(todo.find((x) => x.rule === 'ai-todo-left').severity, 'info');
-  assert.ok(scanContent('app/Http/Controllers/XController.php', "<?php throw new \\Exception('not implemented');").some((x) => x.rule === 'ai-todo-left'));
+  // the fixture is built from escapes so the test file's own source does not contain
+  // the phrase it expects to be reported (that self-match was a real finding once)
+  assert.ok(scanContent('app/Http/Controllers/XController.php', "<?php throw new \\Exception('not\u0020implemented');").some((x) => x.rule === 'ai-todo-left'));
 });
 
 test('AI hallucinations: unresolved local/alias imports, hallucinated deps, unknown PSR-4 class', () => {
@@ -954,4 +956,104 @@ test('python relative import resolves to a package __init__.py', () => {
   const indexedFiles = new Set(['app/sub/__init__.py']);
   const hits = hallucinationFindings('app/main.py', 'from .sub import thing', { indexedFiles, deps: new Set(), psr4: null });
   assert.deepEqual(hits.filter((x) => x.rule === 'py-unresolved-local-import'), []);
+});
+
+// ── noise control: the three rules that reported repo shape as review risk ─────
+
+test('unmapped-change: a code file is a warning, docs/config collapse into one info row', () => {
+  const changes = makeChanges({
+    changed_files: [
+      { file: 'README.md' }, { file: 'docs/a.md' }, { file: 'package.json' },
+      { file: 'app/Models/Ghost.php' },   // code, not in the index → real gap
+    ],
+  });
+  const f = reviewFindings({ changes, index: makeIndex(), readFile: () => null });
+  const hits = f.filter((x) => x.rule === 'unmapped-change');
+  assert.equal(hits.length, 2, 'one per unmapped code file + one aggregated non-code row');
+  const codeRow = hits.find((x) => x.file);
+  assert.equal(codeRow.file, 'app/Models/Ghost.php');
+  assert.equal(codeRow.severity, 'warn');
+  const docRow = hits.find((x) => !x.file);
+  assert.equal(docRow.severity, 'info');
+  assert.match(docRow.message, /3 个非代码文件/);
+  assert.match(docRow.evidence, /README\.md/);
+});
+
+test('same-name (JS) only fires when another file actually imports the name', () => {
+  const base = {
+    'api/order.js': [{ id: 'o1', name: 'orderTake', kind: 'function', file: 'api/order.js', line_start: 10, exported: true }],
+    'api/activity.js': [{ id: 'o2', name: 'orderTake', kind: 'function', file: 'api/activity.js', line_start: 20, exported: true }],
+  };
+  const changes = makeChanges({
+    changed_files: [{ file: 'api/order.js' }],
+    changed_symbols: [{ symbol: 'orderTake', file: 'api/order.js', line_start: 10, confidence: 1 }],
+  });
+
+  const silent = makeIndex({ symbols: [...base['api/order.js'], ...base['api/activity.js']] });
+  assert.deepEqual(
+    reviewFindings({ changes, index: silent, readFile: () => null }).filter((x) => x.rule === 'js-same-name-method'),
+    [],
+    'two definitions nobody imports cannot mis-resolve anything',
+  );
+
+  // ...but a page importing it makes the ambiguity real
+  const imported = makeIndex({
+    symbols: [
+      ...base['api/order.js'], ...base['api/activity.js'],
+      { id: 'p1', name: 'onLoad', kind: 'function', file: 'pages/index/index.vue', line_start: 5, imports: [{ source: '@/api/order', specifiers: ['orderTake'], line: 3 }] },
+    ],
+  });
+  const hits = reviewFindings({ changes, index: imported, readFile: () => null }).filter((x) => x.rule === 'js-same-name-method');
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].message, /orderTake/);
+});
+
+test('no-test-coverage: only the addressable surface counts (internals and CLI main do not)', () => {
+  const index = makeIndex({
+    symbols: [
+      { name: 'scanEverything', kind: 'function', file: 'scripts/a.mjs', line_start: 10, exported: true },
+      { name: 'innerHelper', kind: 'function', file: 'scripts/a.mjs', line_start: 40, exported: false },
+      { name: 'main', kind: 'function', file: 'scripts/a.mjs', line_start: 90, exported: false },
+      { name: 'someTest', kind: 'function', file: 'tests/a.test.mjs', line_start: 1, exported: false },
+    ],
+  });
+  const changes = makeChanges({
+    changed_files: [{ file: 'scripts/a.mjs' }],
+    changed_symbols: [
+      { symbol: 'scanEverything', file: 'scripts/a.mjs', line_start: 10, confidence: 1 },
+      { symbol: 'innerHelper', file: 'scripts/a.mjs', line_start: 40, confidence: 1 },
+      { symbol: 'main', file: 'scripts/a.mjs', line_start: 90, confidence: 1 },
+    ],
+  });
+  const hits = reviewFindings({ changes, index, readFile: () => null }).filter((x) => x.rule === 'no-test-coverage');
+  assert.equal(hits.length, 1, 'one row for the file, not one per symbol');
+  assert.match(hits[0].message, /scanEverything/);
+  assert.doesNotMatch(hits[0].message, /innerHelper|main/, 'an internal helper and the CLI entry are not separately judged');
+  assert.match(hits[0].evidence, /internals skipped=2/);
+});
+
+test('ai-todo-left: the marker must begin the comment, not appear mid-sentence', () => {
+  const rule = (src) => scanContent('api/order.js', src).filter((x) => x.rule === 'ai-todo-left');
+  assert.equal(rule('// TODO: add validation').length, 1);
+  assert.equal(rule('  // FIXME later').length, 1);
+  assert.equal(rule('/* TODO: 权限校验 */').length, 1);
+  assert.deepEqual(rule('// (leftover debug & TODO stubs were the smell)'), [], 'prose about TODOs is not a stub');
+});
+
+test('stubMarkerInComments finds markers in real comment spans only', () => {
+  const src = [
+    "const re = /['\"]/;",          // a regex literal, not a string, not a comment
+    "const s = '// TODO: this is data';",
+    '// FIXME: real stub',
+    '/* TODO: block stub */',
+    '',
+  ].join(String.fromCharCode(10));
+  const spans = [];
+  blankNonCode(src, { onComment: (start, end) => spans.push([start, end]) });
+  assert.equal(spans.length, 2, 'two real comments (the string and the regex are not)');
+  const hit = stubMarkerInComments(src, spans);
+  assert.equal(hit.marker, 'FIXME');
+  assert.match(hit[0], /real stub/);
+  assert.equal(stubMarkerInComments('// (prose about TODO)', [[0, 18]]), null, 'mid-sentence mentions are not stubs');
+  assert.equal(stubMarkerInComments('/* TODO: block */', [[0, 17]]).marker, 'TODO');
 });

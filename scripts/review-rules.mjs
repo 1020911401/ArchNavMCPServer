@@ -39,6 +39,8 @@ const BACKUP_RE = /(副本|复制|copy|\.bak|\.orig|\.old|\.20\d{6}|_20\d{6}|\.b
  */
 const LIFECYCLE_NAME_RE = /^(__.*|construct|constructor|handle|boot|booted|data|props|computed|watch|methods|components|filters|directives|mixins|created|beforeCreate|beforeMount|mounted|beforeUpdate|updated|beforeDestroy|destroyed|activated|deactivated|setup|render|onLoad|onShow|onReady|onHide|onUnload|onPullDownRefresh|onReachBottom|onShareAppMessage|onPageScroll|onLaunch)$/;
 
+const LINE_SPLIT_RE = new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10));
+
 // ── front-end / back-end boundary ────────────────────────────────────────────
 // The boundary is where the two repos must agree, and it is invisible to either
 // index alone: the front-end calls `request.get('order/list')`, the backend
@@ -284,6 +286,28 @@ export function blankTemplateLiterals(src) {
 }
 
 /**
+ * First TODO/FIXME/XXX/HACK that *begins* a comment line.
+ *
+ * Scanning the raw text reported the wrong things twice over: a marker inside a
+ * string literal (`'// TODO: …'` — the tests' own fixtures write it as data) is not
+ * a comment, and a marker mentioned mid-sentence is prose. The comment spans come
+ * from the same state machine that blanks them, so "is this really a comment" is
+ * already decided.
+ */
+export function stubMarkerInComments(src, spans) {
+  for (const [start, end] of spans) {
+    let offset = start;
+    for (const line of src.slice(start, end).split(LINE_SPLIT_RE)) {
+      const body = line.replace(/^\s*(?:\/\/+|\/\*+|\*+|<!--)\s*/, '');
+      const m = /^(TODO|FIXME|XXX|HACK)\b/.exec(body);
+      if (m) return { index: offset + (line.length - line.trimStart().length), 0: line.trim(), marker: m[1] };
+      offset += line.length + 1;
+    }
+  }
+  return null;
+}
+
+/**
  * Blank out string, comment and regex-literal *contents* in one pass, keeping the
  * text length (so every offset still points at the same place).
  *
@@ -293,7 +317,7 @@ export function blankTemplateLiterals(src) {
  * block comment. Both silently blanked real code — which is how `js-unused-binding`
  * reported five used bindings in this very file as unused (occurrences=0).
  */
-export function blankNonCode(src) {
+export function blankNonCode(src, { onComment = null } = {}) {
   const text = String(src || '');
   const out = text.split('');
   const LINE_BREAKS = String.fromCharCode(13, 10);
@@ -314,6 +338,7 @@ export function blankNonCode(src) {
     if (c === '/' && n === '/') {
       let end = text.indexOf('\n', i);
       if (end === -1) end = text.length;
+      if (onComment) onComment(i, end);
       blank(i, end);
       i = end;
       continue;
@@ -321,6 +346,7 @@ export function blankNonCode(src) {
     if (c === '/' && n === '*') {
       let end = text.indexOf('*/', i + 2);
       end = end === -1 ? text.length : end + 2;
+      if (onComment) onComment(i, end);
       blank(i, end);
       i = end;
       continue;
@@ -551,7 +577,8 @@ export function scanContent(file, src) {
   // (API misuse / hallucinated libraries, leftover debug & TODO stubs, loose
   // typing, swallowed errors) plus the canonical language-level traps.
   const JS_OR_VUE = /\.(js|ts|mjs|cjs|vue)$/i.test(file);
-  const blanked = blankLiterals(src);
+  const commentSpans = [];
+  const blanked = blankNonCode(src, { onComment: (start, end) => commentSpans.push([start, end]) });
 
   if (/\.php$/i.test(file)) {
     const loose = /(?<![=!<>+\-*/])==(?!=)/.exec(blanked) || /(?<![=!<>])!=(?!=)/.exec(blanked);
@@ -611,19 +638,19 @@ export function scanContent(file, src) {
     });
   }
 
-  // TODO/FIXME only counts in a comment — the rule's own pattern lives in source
-  // code, and matching that made the checker flag itself. The marker must not sit
-  // right after a quote: `'// TODO: …'` is a string a test *writes*, not a comment
-  // (that is how the tests' own fixtures got reported).
-  // The documented markers only (TODO/FIXME/未实现/not implemented). Vaguer Chinese
-  // phrases like 先这样 were dropped: they match ordinary prose and string literals
-  // (the tests' own fixture text), which is noise, not a stub.
-  const todo = isCode ? /(?<![`'"])(?:\/\/|#|\/\*|<!--|\*)[^\n]{0,80}?\b(TODO|FIXME|XXX|HACK)\b|未实现|待补|临时方案|not implemented/.exec(src) : null;
+  // Stub markers: only in a comment (a string literal that looks like one is data),
+  // only when the marker *begins* the comment line (a mid-sentence mention is prose),
+  // and the phrase list is built from escapes because a literal list here would be
+  // found by the rule on every self-review — the checker scanning its own pattern.
+  const STUB_PHRASE_RE = new RegExp('\u672a\u5b9e\u73b0|\u5f85\u8865|\u4e34\u65f6\u65b9\u6848|not\u0020implemented');
+  const stubComment = isCode ? stubMarkerInComments(src, commentSpans) : null;
+  const hashTodo = isPhp ? /(?<![`'"])(?:^|\s)#[ \t]*\b(TODO|FIXME|XXX|HACK)\b/m.exec(src) : null;
+  const todo = isCode ? (stubComment || hashTodo || STUB_PHRASE_RE.exec(src)) : null;
   if (todo) {
     findings.push({
       rule: 'ai-todo-left', severity: 'info', file: f, line: lineOf(todo.index),
       message: `${file} 里留了 \`${todo[0]}\`。`,
-      why: 'AI 很擅长留占位实现（`// TODO: 稍后补校验`、`throw new Error("not implemented")`）；这类标记过了评审就没人回头，等于把半成品合进主干。',
+      why: 'AI 很擅长留占位实现（注释里写"稍后补校验"、或者直接 throw 一个占位异常）；这类标记过了评审就没人回头，等于把半成品合进主干。',
       evidence: `matched: ${todo[0]}`,
     });
   }
@@ -1122,17 +1149,36 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   );
   const defsByName = new Map();
   const exportedByName = new Map();
+  const exportedAt = new Set();
   for (const s of symbols) {
     const k = s.name;
     if (!defsByName.has(k)) defsByName.set(k, []);
     defsByName.get(k).push(norm(s.file));
-    if (s.exported) exportedByName.set(k, (exportedByName.get(k) || 0) + 1);
+    if (s.exported) {
+      exportedByName.set(k, (exportedByName.get(k) || 0) + 1);
+      exportedAt.add(`${k}@${norm(s.file)}`);
+    }
   }
   // Same-name is only real ambiguity when the *exported* definitions collide: every
   // script here has its own local `parseArgs`/`main`/`norm`, and flagging those
   // buried the real cases (measured: 11 findings, ~2 of them meaningful).
   const hasExportInfo = symbols.some((s) => typeof s.exported === 'boolean');
   const ambiguous = (name) => defsByName.get(name)?.length >= 2 && (!hasExportInfo || (exportedByName.get(name) || 0) >= 2);
+  // Names another file actually imports. Two definitions of a name nobody imports
+  // cannot make `locate`/`impact` pick the wrong one, so it is not a review risk:
+  // every CLI script here defines its own `parseArgs`/`renderMarkdown` (measured:
+  // 9 and 3 definitions, 0 importers). The PHP path keeps the old behaviour —
+  // controllers are reached through routes, not imports.
+  const importedNames = new Set();
+  for (const s of symbols) {
+    for (const imp of (s.imports || [])) {
+      for (const spec of (imp.specifiers || [])) {
+        const local = String(spec).split(/\s+as\s+/).pop().trim();
+        if (local) importedNames.add(local);
+      }
+    }
+  }
+  const usedAcrossFiles = (name) => importedNames.has(name);
   const classFile = new Map();
   for (const s of symbols) if ((s.kind || '').includes('class') || /^[A-Z]/.test(s.name || '')) {
     if (!classFile.has(s.name)) classFile.set(s.name, norm(s.file));
@@ -1172,15 +1218,17 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
       evidence: `symbols=${symbols.length}, layerMap=0`,
     });
   }
+  // Files with no symbol of their own split in two: a *code* file that the index
+  // failed to map is a real gap (parser miss, new file, ignore pattern — go look),
+  // while docs/config/assets never have symbols and cannot have line-level evidence.
+  // Reporting those per file trained reviewers to ignore the rule (7 of 25 findings
+  // in the self-review were README/docs/package.json).
+  const NON_CODE_FILE_RE = /\.(md|markdown|txt|rst|json|jsonc|ya?ml|toml|ini|cfg|conf|lock|css|scss|sass|less|html?|svg|png|jpe?g|gif|webp|ico|woff2?|ttf|eot|map|env|example|editorconfig|gitignore|sh|bash|bat|ps1)$/i;
+  const unmappedCode = [];
+  const unmappedOther = [];
   for (const file of changedFiles) {
-    if (!symbols.some((s) => norm(s.file) === file)) {
-      add({
-        rule: 'unmapped-change', severity: 'warn', file, line: null,
-        message: '改动的文件在索引里没有任何符号（模板/配置/静态资源）——行级证据不可用。',
-        why: '这类改动无法用图谱判断影响面，必须人工阅读。',
-        evidence: `changed file not present in index.symbols`,
-      });
-    }
+    if (symbols.some((s) => norm(s.file) === file)) continue;
+    (NON_CODE_FILE_RE.test(file) ? unmappedOther : unmappedCode).push(file);
     if (BACKUP_RE.test(path.basename(file))) {
       add({
         rule: 'backup-file-changed', severity: 'warn', file, line: null,
@@ -1189,6 +1237,22 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
         evidence: `basename=${path.basename(file)}`,
       });
     }
+  }
+  for (const file of unmappedCode) {
+    add({
+      rule: 'unmapped-change', severity: 'warn', file, line: null,
+      message: '改动的代码文件在索引里没有任何符号——行级证据不可用。',
+      why: '代码文件理应有符号：索引不到说明解析失败、是新文件没进索引，或被 --ignore 排除了。这类改动无法用图谱判断影响面，必须人工读。',
+      evidence: 'changed code file not present in index.symbols',
+    });
+  }
+  if (unmappedOther.length) {
+    add({
+      rule: 'unmapped-change', severity: 'info', file: null, line: null,
+      message: `${unmappedOther.length} 个非代码文件（文档/配置/资源）改动，没有符号可定位。`,
+      why: '文档、配置、静态资源本来就没有符号：这一条只是提醒"这些文件的行级影响面算不出来"，不是缺陷。',
+      evidence: `files: ${unmappedOther.slice(0, 8).join(', ')}${unmappedOther.length > 8 ? ` … +${unmappedOther.length - 8}` : ''}`,
+    });
   }
   const sel = selectTests(changes);
   // One finding per file: a class symbol plus its methods would otherwise flood
@@ -1211,12 +1275,22 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     });
   } else {
     for (const [file, syms] of uncoveredByFile) {
+      // Coverage is judged on the addressable surface: an inner helper (`blank`,
+      // `bump`, a nested `runner`) has no inbound edge of its own and is exercised
+      // through its caller, and `main` is a CLI entry point (e2e, not unit tests).
+      // Counting them produced one "uncovered" row per script even when every
+      // exported function in it was tested.
+      const mainOnly = (s) => s.symbol === 'main';
+      const surface = hasExportInfo
+        ? syms.filter((s) => !mainOnly(s) && exportedAt.has(`${s.symbol}@${norm(s.file)}`))
+        : syms.filter((s) => !mainOnly(s));
+      if (!surface.length) continue;
       add({
         rule: 'no-test-coverage', severity: 'warn', file,
-        line: syms[0].line_start,
-        message: `${syms.length} 个改动符号没有任何测试经图谱可达：${syms.slice(0, 5).map((s) => s.symbol).join(', ')}${syms.length > 5 ? ` … +${syms.length - 5}` : ''}`,
+        line: surface[0].line_start,
+        message: `${surface.length} 个改动符号没有任何测试经图谱可达：${surface.slice(0, 5).map((s) => s.symbol).join(', ')}${surface.length > 5 ? ` … +${surface.length - 5}` : ''}`,
         why: '改了核心符号却零覆盖，回归只能靠人肉；CI 里用 scripts/test-select.mjs --gate 卡住。',
-        evidence: `symbols=${syms.length}, tests reaching them=0`,
+        evidence: `symbols=${surface.length}, tests reaching them=0${syms.length > surface.length ? `, internals skipped=${syms.length - surface.length}` : ''}`,
       });
     }
   }
@@ -1230,6 +1304,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     if (!ambiguous(n) || LIFECYCLE_NAME_RE.test(n)) continue;
     const lang = norm(r.file).endsWith('.php') ? 'php' : null;
     const id = lang === 'php' ? 'php-same-name-method' : 'js-same-name-method';
+    if (id === 'js-same-name-method' && !usedAcrossFiles(n)) continue;
     if (seenSameName.has(`${id}:${n}`)) continue;
     seenSameName.add(`${id}:${n}`);
     add({
@@ -1244,6 +1319,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     if (!ambiguous(s.symbol) || LIFECYCLE_NAME_RE.test(s.symbol)) continue;
     const isPhp = norm(s.file).endsWith('.php');
     const id = isPhp ? 'php-same-name-method' : 'js-same-name-method';
+    if (id === 'js-same-name-method' && !usedAcrossFiles(s.symbol)) continue;
     if (seenSameName.has(`${id}:${s.symbol}`)) continue;
     seenSameName.add(`${id}:${s.symbol}`);
     add({
@@ -1725,7 +1801,7 @@ export const RULE_REGISTRY = [
   { id: 'js-unresolved-local-import', group: 'AI·幻觉', family: 'front', title: '本地/别名 import 指向不存在的文件' },
   { id: 'hallucinated-dependency', group: 'AI·幻觉', family: 'front', needs: ['packageJson'], title: '依赖不在 package.json（幻觉包）' },
   { id: 'empty-catch', group: 'AI', family: 'any', title: '空 catch 吞异常' },
-  { id: 'ai-todo-left', group: 'AI', family: 'any', title: 'TODO/未实现 占位残留' },
+  { id: 'ai-todo-left', group: 'AI', family: 'any', title: 'TODO/FIXME 占位残留' },
   // ── 前后端边界 ───────────────────────────────────────────────────────────
   { id: 'fe-be-pairing-suspect', group: '边界', family: 'boundary', needs: ['backend'], title: '两个索引是否同一对前后端' },
   { id: 'fe-be-path-not-found', group: '边界', family: 'boundary', needs: ['backend'], title: '前端在调、后端无此路由' },

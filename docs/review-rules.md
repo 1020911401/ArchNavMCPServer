@@ -71,11 +71,11 @@ of a legacy repo (the measured rate is in the last column).
 
 | rule | sev | fires when | measured |
 |---|---|---|---|
-| `unmapped-change` | W | a changed file has no indexed symbol (templates, config, assets) — line-level evidence is unavailable | Laravel fixture: Blade files |
+| `unmapped-change` | W / I | a changed **code** file has no indexed symbol (parser miss / not indexed / ignored) is a warning; docs, config and assets collapse into **one** info row (`files: …`) instead of one warning per file | Laravel fixture: Blade files |
 | `backup-file-changed` | W | the changed filename looks like a backup/copy (`副本`, `.bak`, `.20211102.php`, …) | caught `HomeController - 副本.php` + `index.blade.20211102.php` |
 | `layer-model-missing` | I | the index has symbols but no `layerMap` — architecture rules cannot judge this repo | fired on Laravel before the `/i` fix |
-| `no-test-coverage` / `repo-has-no-tests` | W / I | changed symbols no test reaches / the repo has no tests at all (reported once, not per symbol) | demo repo: 2 uncovered symbols |
-| `php-same-name-method` / `js-same-name-method` | W | a changed symbol name has ≥2 definitions (locate/callers need `--file`) | PHP `store` ×15, `index` ×19; JS `orderTake` in `api/order.js` + `api/activity.js` |
+| `no-test-coverage` / `repo-has-no-tests` | W / I | changed **exported** symbols no test reaches (one row per file; internal helpers are covered through their caller, `main` is an entry point — both skipped and counted as `internals skipped=N`) / the repo has no tests at all (reported once) | demo repo: 2 uncovered symbols |
+| `php-same-name-method` / `js-same-name-method` | W | a changed symbol name has ≥2 **exported** definitions (locate/callers need `--file`); the JS side additionally requires some file to actually **import** the name — two local helpers nobody imports cannot mis-resolve | PHP `store` ×15, `index` ×19; JS `orderTake` in `api/order.js` + `api/activity.js` |
 
 ### PHP / Laravel
 
@@ -116,7 +116,7 @@ of a legacy repo (the measured rate is in the last column).
 | rule | sev | fires when |
 |---|---|---|
 | `empty-catch` | W | an empty JS/PHP `catch {}`, or Python `except: pass` — errors swallowed with no log |
-| `ai-todo-left` | I | `TODO`/`FIXME`/`未实现`/`not implemented` left in the changed file |
+| `ai-todo-left` | I | `TODO`/`FIXME`/`未实现`/`not implemented` left in the changed file. The marker must **begin** the comment and must not sit right after a quote (that is a string literal a test writes) |
 | `py-*` (9 rules) | E/W/I | Python: `eval`/`exec`/`pickle`/`os.system`/`shell=True` (E), SQL f-string/`%`/concat (E), hardcoded secret (E), bare `except:` (W), `def f(x=[])` (W), `breakpoint()`/`pdb.set_trace()` (W), `requests.*` without `timeout=` (W), unresolved local import (W), `from x import *` (I, extended) |
 | `py-unresolved-local-import` | W | `from .mod import x` / `from app.mod import x` where no file matches |
 
