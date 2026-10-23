@@ -579,9 +579,15 @@ export function scanContent(file, src) {
   const JS_OR_VUE = /\.(js|ts|mjs|cjs|vue)$/i.test(file);
   const commentSpans = [];
   const blanked = blankNonCode(src, { onComment: (start, end) => commentSpans.push([start, end]) });
+  // Detection rules read `scannable`: template-literal contents are *other* code
+  // (scripts and tests hold fixtures/rule tables there), so a Go `if rows == nil`
+  // inside a template string must not be reported as a JS loose comparison. Binding
+  // counting keeps `blanked` — identifiers are used inside `${…}` expressions, and
+  // blanking those made every templated binding look unused.
+  const scannable = blankTemplateLiterals(blanked);
 
   if (/\.php$/i.test(file)) {
-    const loose = /(?<![=!<>+\-*/])==(?!=)/.exec(blanked) || /(?<![=!<>])!=(?!=)/.exec(blanked);
+    const loose = /(?<![=!<>+\-*/])==(?!=)/.exec(scannable) || /(?<![=!<>])!=(?!=)/.exec(scannable);
     if (loose) {
       findings.push({
         rule: 'php-loose-comparison', severity: 'warn', file: f, line: lineOf(loose.index),
@@ -596,7 +602,7 @@ export function scanContent(file, src) {
   // leftover debug statement (this is how the checker flagged its own scripts).
   const isCli = /^#!/.test(src);
   if (JS_OR_VUE && !isCli) {
-    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(blanked);
+    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(scannable);
     if (dbg) {
       findings.push({
         rule: 'js-debug-left-on', severity: 'warn', file: f, line: lineOf(dbg.index),
@@ -606,8 +612,8 @@ export function scanContent(file, src) {
       });
     }
     // Only loose comparisons that *decide* something (condition / return / ternary).
-    const looseJs = /(?:if|while|for|return|&&|\|\||\?)[^;\n{}]*?(?<![=!<>+\-*/])==(?!=)/.exec(blanked)
-      || /(?:if|while|for|return|&&|\|\||\?)[^;\n{}]*?(?<![=!<>])!=(?!=)/.exec(blanked);
+    const looseJs = /(?:if|while|for|return|&&|\|\||\?)[^;\n{}]*?(?<![=!<>+\-*/])==(?!=)/.exec(scannable)
+      || /(?:if|while|for|return|&&|\|\||\?)[^;\n{}]*?(?<![=!<>])!=(?!=)/.exec(scannable);
     if (looseJs) {
       findings.push({
         rule: 'js-loose-equality', severity: 'info', file: f, line: lineOf(looseJs.index),
@@ -621,7 +627,7 @@ export function scanContent(file, src) {
   // "empty catch" and TODO stubs are code smells — scanning prose (README, rule
   // tables that *describe* `catch {}`) flagged the documentation instead.
   const isCode = /\.(php|js|ts|mjs|cjs|jsx|tsx|vue|py)$/i.test(file);
-  let emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(blanked) : null;
+  let emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(scannable) : null;
   // A comment inside the braces *is* an explanation (`catch { /* malformed json */ }`),
   // and the blanked source hides comments — so confirm against the raw text.
   if (emptyCatch) {
