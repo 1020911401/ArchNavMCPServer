@@ -203,6 +203,7 @@ node src/index.js callers "showSelectOptions" \
 node src/index.js impact "departments"               # blast radius, depth-labelled
 node src/index.js read "calculateOrderTotal"         # the real code, re-read from disk
 node src/index.js changes --scope unstaged           # what does my diff break?
+node src/index.js version .                          # which version of this repo is this? (git + manifests + index)
 
 node src/mcp-server.js                               # MCP server (Hermes / Claude Code / Cursor)
 
@@ -215,6 +216,15 @@ npm run bench                                        # three-engine head-to-head
 Without git it falls back to content drift versus the index and states that in a `note`;
 files that changed but carry no symbol are reported as `unmapped` instead of being
 silently dropped.
+
+`version` answers "which version of the *target* code am I looking at", not ArchNav's
+own version (`-V`): git HEAD (short + full), branch, exact tag / nearest tag, dirty
+worktree with file count, last commit date/author/subject, commit count, the declared
+versions in `package.json` / `composer.json` / `pyproject.toml` / `go.mod`, and the
+commit the index was built from (with `index vs HEAD: same commit | different commit`
+plus content drift). Everything is read-only, each git call is time-boxed, and a
+missing git or a non-repo directory degrades to nulls instead of throwing. `--json`
+gives the same data for scripts.
 
 ### 🏗️ Architecture layers
 

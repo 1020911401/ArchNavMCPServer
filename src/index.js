@@ -10,6 +10,7 @@ import { Command } from 'commander';
 import { analyze, saveIndex } from './analyzer.js';
 import { archNav } from './navigation.js';
 import { readCode } from './reader.js';
+import { collectVersionInfo } from './version-info.js';
 import { readFile } from 'fs/promises';
 import path from 'path';
 
@@ -168,6 +169,21 @@ program
     const target = dir || process.cwd();
     const result = await archNav.status(path.resolve(target));
     outputResult(result, options.json);
+  });
+
+// === version ===
+program
+  .command('version [dir]')
+  .description('Version information of the target repository: git HEAD/branch/tag/dirty, manifest versions, and what the index was built from')
+  .option('--json', 'Output raw JSON')
+  .action(async (dir, options) => {
+    const target = dir || process.cwd();
+    const info = await collectVersionInfo(target, { toolVersion: pkg.version });
+    if (options.json) {
+      console.log(JSON.stringify(info, null, 2));
+      return;
+    }
+    printVersionInfo(info);
   });
 
 // === changes ===
@@ -431,7 +447,6 @@ function printTrace(r) {
 
 function printCallGraph(r) {
   if (r.ambiguous) return printAmbiguous(r);
-  const direction = r.type === 'calls' ? '→ calls' : '← called by';
   const header = r.type === 'calls' ? `🔽 ${r.symbol} calls:` : `🔼 ${r.symbol} is called by:`;
   console.log(`\n${header}`);
   
@@ -484,6 +499,35 @@ function printWhereami(r) {
     console.log(`   Layer: ${r.layer || '(unknown)'}`);
   } else {
     console.log(`   No symbol found at this position`);
+  }
+}
+
+function printVersionInfo(v) {
+  const r = v.repo || {};
+  console.log(`\n🏷️  Version info — ${v.repo?.dir || '?'}`);
+  console.log(`   ArchNav:        ${v.tool?.version || '?'} (node ${v.tool?.node || '?'})`);
+  if (r.is_git) {
+    console.log(`   Git HEAD:       ${r.short || '?'}${r.exact_tag ? `  (tag ${r.exact_tag})` : r.tag ? `  (nearest tag ${r.tag})` : ''}`);
+    console.log(`   Branch:         ${r.branch || '?'}${r.dirty ? `  ⚠️  ${r.dirty_files} uncommitted file(s)` : '  ✅ clean worktree'}`);
+    console.log(`   Last commit:    ${r.date || '?'}  ${r.author || '?'}  ${r.subject || ''}`);
+    console.log(`   History:        ${r.commits ?? '?'} commit(s)${r.describe ? `, ${r.describe}` : ''}`);
+  } else {
+    console.log(`   Git:            (not a git repository — no commit-level version available)`);
+  }
+  const manifests = Object.entries(v.manifests || {});
+  if (manifests.length) {
+    console.log(`   Manifests:`);
+    for (const [file, m] of manifests) {
+      const bits = [m.name, m.version ? `v${m.version}` : null, m.go ? `go ${m.go}` : null].filter(Boolean).join(' ');
+      console.log(`      ${file.padEnd(14)} ${bits || '(no version field)'}`);
+    }
+  }
+  if (v.index) {
+    const i = v.index;
+    console.log(`   Index:          built from ${i.indexed_commit?.substring(0, 8) || 'N/A'} (age ${i.age || '?'})`);
+    console.log(`   Index vs HEAD:  ${i.matches_head ? '✅ same commit' : '⚠️  index is from a different commit'}${i.stale ? `, ${i.changed_files} file(s) drifted` : ', content fresh'}`);
+  } else {
+    console.log(`   Index:          (none — run \`archnav analyze\` first)`);
   }
 }
 
