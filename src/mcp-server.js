@@ -180,7 +180,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         projectDir: { type: 'string' },
-        scope: { type: 'string', description: 'unstaged | staged | all | compare', enum: ['unstaged', 'staged', 'all', 'compare'] },
+        scope: { type: 'string', description: 'unstaged | staged | all | compare | corpus (whole indexed file set, no diff)', enum: ['unstaged', 'staged', 'all', 'compare', 'corpus'] },
         base: { type: 'string', description: 'base ref for scope=compare (e.g. main)' },
       },
     },
@@ -260,7 +260,7 @@ const TOOLS = [
       properties: {
         projectDir: { type: 'string', description: 'Project root' },
         level: { type: 'string', enum: ['off', 'A', 'B', 'C', 'full'], description: 'Override the config file level' },
-        scope: { type: 'string', enum: ['unstaged', 'staged', 'all', 'compare'], description: 'Which diff to judge' },
+        scope: { type: 'string', enum: ['unstaged', 'staged', 'all', 'compare', 'corpus'], description: 'Which diff to judge; corpus = every indexed file (recall audit, no impact)' },
         base: { type: 'string', description: 'Base ref for scope=compare' },
         constraints: { type: 'string', description: 'Path to a constraints JSON (level B+). Defaults to .archnav/constraints.json from the config' },
         trajectory: { type: 'string', description: 'Path to a JSONL trajectory (level C+)' },

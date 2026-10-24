@@ -190,7 +190,7 @@ program
 program
   .command('changes [dir]')
   .description('Change-impact analysis: map a diff (or content drift) to the symbols it touches and what breaks')
-  .option('--scope <scope>', 'unstaged | staged | all | compare', 'unstaged')
+  .option('--scope <scope>', 'unstaged | staged | all | compare | corpus', 'unstaged')
   .option('--base <ref>', 'Base ref for --scope compare (e.g. main)')
   .option('--json', 'Output raw JSON')
   .action(async (dir, options) => {

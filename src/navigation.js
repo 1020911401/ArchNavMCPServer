@@ -830,12 +830,48 @@ export const archNav = {
 
     // Invalid input must fail loudly. Without this, a typo'd --scope fell through
     // to the drift fallback and silently answered a different question.
-    const VALID_SCOPES = new Set(['unstaged', 'staged', 'all', 'compare']);
+    const VALID_SCOPES = new Set(['unstaged', 'staged', 'all', 'compare', 'corpus']);
     if (!VALID_SCOPES.has(scope)) {
-      return { type: 'changes', error: `Unknown scope "${scope}" (use unstaged | staged | all | compare)`, scope };
+      return { type: 'changes', error: `Unknown scope "${scope}" (use unstaged | staged | all | compare | corpus)`, scope };
     }
     if (scope === 'compare' && !base) {
       return { type: 'changes', error: 'Scope "compare" requires --base <ref> (e.g. --base main)', scope, base: null };
+    }
+
+    // ── corpus: the whole indexed file set, not a diff ────────────────────────
+    // "What does this rule set say about the repo today?" is a question no diff scope
+    // can answer — it is how rule recall gets measured. Everything downstream of this
+    // function is symbol- and impact-centric, so the corpus answer carries files only:
+    // no symbol mapping, no impact, no drift fallback.
+    if (scope === 'corpus') {
+      const CODE_EXT = /\.(php|js|mjs|cjs|jsx|ts|tsx|vue|py|go|rb|java|kt|cs|rs|sql)$/i;
+      // Dependencies are indexed (an index built without --ignore contains vendor/), but
+      // they are never "your code": measured on a Laravel repo, 8574 of 9821 indexed files
+      // were vendor/, and scanning them tripled the N+1 count with library code.
+      const DEPENDENCY_RE = /(^|\/)(node_modules|vendor|bower_components|dist|build|coverage|Pods|\.venv|venv|site-packages)\//;
+      const files = Object.keys(index.fileHashes || {})
+        .filter((f) => CODE_EXT.test(f) && !DEPENDENCY_RE.test(f))
+        .sort();
+      const rows = files.map((file) => ({ file: normSep(file), ranges: null, symbols: [] }));
+      return {
+        type: 'changes',
+        scope,
+        base: null,
+        via: 'corpus',
+        changed_files: rows,
+        changed_symbols: [],
+        impacted: [],
+        direct_impact: [],
+        indirect_impact: [],
+        affected_routes: [],
+        affected_pages: [],
+        unmapped_files: [],
+        summary: {
+          changed_files: rows.length, changed_symbols: 0, direct: 0, indirect: 0,
+          affected_routes: 0, affected_pages: 0, unmapped_files: 0,
+        },
+        confidence: 1,
+      };
     }
 
     const git = changedLinesFromGit(dirPath, scope, base);

@@ -174,3 +174,22 @@ test('changes: unknown scope and compare-without-base fail loudly', async () => 
   const noBase = await archNav.changes(root, { scope: 'compare' });
   assert.ok(noBase.error && /base/i.test(noBase.error), `expected a loud error, got ${JSON.stringify(noBase)}`);
 });
+
+test('changes: scope=corpus returns every indexed code file and no impact', async () => {
+  const root = tmpRepo('archnav-changes-corpus-');
+  scaffold(root, { git: true });
+  // A doc file the index records but no rule should classify as "unmapped change".
+  write(root, 'docs/notes.md', '# notes\n');
+  await indexRepo(root);
+
+  const r = await archNav.changes(root, { scope: 'corpus' });
+  assert.equal(r.error, undefined);
+  assert.equal(r.via, 'corpus');
+  const files = r.changed_files.map((f) => f.file);
+  assert.ok(files.includes('app/Http/Controllers/Controller.php'), `expected the controller, got ${files}`);
+  assert.ok(files.every((f) => !/\.md$/.test(f)), 'corpus carries code files only');
+  assert.ok(r.changed_files.every((f) => f.ranges === null), 'a corpus file is whole-file, not a hunk');
+  assert.deepEqual(r.changed_symbols, [], 'corpus must not claim symbols changed');
+  assert.deepEqual(r.impacted, [], 'corpus must not invent an impact set');
+  assert.equal(r.summary.changed_files, r.changed_files.length);
+});

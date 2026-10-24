@@ -9,7 +9,7 @@
  * real disk read — the same "navigate via graph, verify on disk" principle).
  *
  * Usage:
- *   node scripts/review-rules.mjs [dir] [--scope unstaged|staged|all|compare]
+ *   node scripts/review-rules.mjs [dir] [--scope unstaged|staged|all|compare|corpus]
  *                                 [--base <ref>] [--json] [--gate]
  *
  *   --gate  exit 1 when any finding has severity `error`.
@@ -941,6 +941,9 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   const add = (f) => findings.push(f);
 
   const changedFiles = (changes.changed_files || []).map((r) => norm(r.file));
+  // corpus = every indexed file, not a diff: rules that describe *this change* have no
+  // meaning there (nothing "changed"), while the per-file content rules are the point.
+  const corpusMode = changes.scope === 'corpus';
   const changedSymbols = changes.changed_symbols || [];
   const impacted = changes.impacted || [];
   const kg = index?.knowledgeGraph || {};
@@ -1048,6 +1051,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     }
   }
   for (const file of unmappedCode) {
+    if (corpusMode) continue;   // "this change touched an unmapped file" needs a change
     add({
       rule: 'unmapped-change', severity: 'warn', file, line: null,
       message: '改动的代码文件在索引里没有任何符号——行级证据不可用。',
@@ -1055,7 +1059,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
       evidence: 'changed code file not present in index.symbols',
     });
   }
-  if (unmappedOther.length) {
+  if (unmappedOther.length && !corpusMode) {
     add({
       rule: 'unmapped-change', severity: 'info', file: null, line: null,
       message: `${unmappedOther.length} 个非代码文件（文档/配置/资源）改动，没有符号可定位。`,
@@ -1992,6 +1996,11 @@ async function main() {
   }
   const changes = await archNav.changes(dir, { scope: opts.scope, base: opts.base });
   if (changes.error) { console.error(changes.error); process.exit(2); }
+  const corpusMode = opts.scope === 'corpus';
+  if (corpusMode) {
+    console.error(`ℹ️  scope=corpus：扫全仓 ${changes.summary.changed_files} 个已索引代码文件；impact 与 ANCHOR 变更预算不适用（它们相对某次改动）。`);
+    if (!opts.anchor) opts.anchor = 'off';
+  }
   const index = getIndex(dir);
   if (!index) { console.error('No index — run `archnav analyze ' + dir + '` first'); process.exit(2); }
   const backendDir = opts.backend ? path.resolve(opts.backend) : null;
@@ -2042,7 +2051,7 @@ async function main() {
     const r = dup.runDuplication(dir, {
       minLines: opts.dupMinLines, minTokens: opts.dupMinTokens,
       kinds: opts.dupKinds,
-      changed: isGit && !opts.dupBaselineFromRef,
+      changed: isGit && !corpusMode && !opts.dupBaselineFromRef,
       baselineFromRef: isGit ? (opts.dupBaselineFromRef || null) : null,
       changedFiles: isGit ? null : changedFiles,        // 非 git 仓退回图谱口径
     });
@@ -2080,7 +2089,7 @@ async function main() {
   // ── optional: impact analysis (entry points, flows, risk) in the same sheet ─
   let impactResult = null;
   const changedSymbolsRaw = (changes.changed_symbols || []).map((s) => ({ symbol: s.symbol, file: norm(s.file), line_start: s.line_start }));
-  if (opts.impact) {
+  if (opts.impact && !corpusMode) {
     const imp = await import('./impact.mjs');
     const seedNodes = [];
     for (const cs of changedSymbolsRaw) {
