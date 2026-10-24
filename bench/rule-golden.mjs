@@ -19,7 +19,7 @@ const CORPUS_DIRS = ['scripts', 'src', 'tests', 'bench'];
 const EXTRA = [
   ['app/Http/Controllers/OrderController.php', "<?php\nclass A {\n  public function x() { if ($a == $b) { dd($a); } }\n}\n"],
   ['app/Service.php', "<?php\n$q = DB::select(\"select * from u where id = {$_GET['id']}\");\n"],
-  ['resources/js/app.js', "const data = {};\nconsole.log(data);\nif (x == null) {}\n// TODO: later\n"],
+  ['resources/js/app.js', "const payload = {};\nconsole.log(payload);\nif (x == null) {}\n// TODO: later\n"],
   ['resources/js/Comp.vue', "<template><div v-for=\"i in list\">{{ i.nope }}</div></template>\n<script>export default { methods: { go() { this.$refs.a.x(); } } }</script>\n"],
   ['tools/t.py', "def f(x):\n    try:\n        pass\n    except:\n        pass\n    return eval(x)\n"],
   ['tools/t.go', "package main\nfunc f() { os.Exit(0) }\n"],

@@ -14,6 +14,8 @@
  */
 
 /** Execute declarative rules over one file. Errors bubble: a crashing rule must be loud. */
+export { ANY_RULES } from './any.mjs';
+
 export function runRules(rules, ctx) {
   const out = [];
   for (const rule of rules) out.push(...(rule.run(ctx) || []));

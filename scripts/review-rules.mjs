@@ -24,7 +24,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
-import { runRules, GO_RULES } from './rules/index.mjs';
+import { runRules, GO_RULES, ANY_RULES } from './rules/index.mjs';
 import { selectTests } from './test-select.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -643,63 +643,12 @@ export function scanContent(file, src) {
   // blanking those made every templated binding look unused.
   const scannable = blankTemplateLiterals(blanked);
 
-  if (/\.php$/i.test(file)) {
-    const loose = /(?<![=!<>+\-*/])==(?!=)/.exec(scannable) || /(?<![=!<>])!=(?!=)/.exec(scannable);
-    if (loose) {
-      findings.push({
-        rule: 'php-loose-comparison', severity: 'warn', file: f, line: lineOf(loose.index),
-        message: `PHP 用了松散比较 \`${loose[0]}\`（${file}）。`,
-        why: 'PHP 的类型杂耍是长期漏洞来源（0 == "abc"、"1e2" == "100"）：校验/鉴权分支必须用 === / !==，或先做类型转换。',
-        evidence: `matched: ${loose[0]} @${lineOf(loose.index)}`,
-      });
-    }
-  }
-
-  // A shebang means this file *is* a CLI: console.log is its interface, not a
-  // leftover debug statement (this is how the checker flagged its own scripts).
+  // ── PHP/JS language rules now live in scripts/rules/any.mjs (declarative) ───
   const isCli = /^#!/.test(src);
-  if (JS_OR_VUE && !isCli) {
-    const dbg = /(?<![\w.$])console\.(log|debug|info)\s*\(|(?<![\w.$])debugger\s*(?:;|$)/m.exec(scannable);
-    if (dbg) {
-      findings.push({
-        rule: 'js-debug-left-on', severity: 'warn', file: f, line: lineOf(dbg.index),
-        message: `${file} 残留调试输出 \`${dbg[0].trim()}\`。`,
-        why: '和 PHP 的 dd() 同一类问题：console.log 会泄漏接口返回与用户数据，debugger 会在打开控制台时中断。',
-        evidence: `matched: ${dbg[0].trim()}`,
-      });
-    }
-    // Only loose comparisons that *decide* something (condition / return / ternary).
-    const looseJs = /(?:if|while|for|return|&&|\|\||\?)[^;\n{}]*?(?<![=!<>+\-*/])==(?!=)/.exec(scannable)
-      || /(?:if|while|for|return|&&|\|\||\?)[^;\n{}]*?(?<![=!<>])!=(?!=)/.exec(scannable);
-    if (looseJs) {
-      findings.push({
-        rule: 'js-loose-equality', severity: 'info', file: f, line: lineOf(looseJs.index),
-        message: `${file} 在判断里用了松散相等 \`${looseJs[0].trim().slice(0, 60)}\`。`,
-        why: '== 会做隐式转换（\'\' == 0、null == undefined）：AI 生成代码里很常见，建议 === / !==。',
-        evidence: `matched: ${looseJs[0].trim().slice(0, 60)}`,
-      });
-    }
-  }
-
-  // "empty catch" and TODO stubs are code smells — scanning prose (README, rule
-  // tables that *describe* `catch {}`) flagged the documentation instead.
   const isCode = /\.(php|js|ts|mjs|cjs|jsx|tsx|vue|py)$/i.test(file);
-  let emptyCatch = isCode ? /catch\s*(\([^)]*\))?\s*\{\s*\}/.exec(scannable) : null;
-  // A comment inside the braces *is* an explanation (`catch { /* malformed json */ }`),
-  // and the blanked source hides comments — so confirm against the raw text.
-  if (emptyCatch) {
-    const open = emptyCatch[0].indexOf('{');
-    const inner = src.slice(emptyCatch.index + open + 1, emptyCatch.index + emptyCatch[0].lastIndexOf('}'));
-    if (inner.trim()) emptyCatch = null;
-  }
-  if (emptyCatch) {
-    findings.push({
-      rule: 'empty-catch', severity: 'warn', file: f, line: lineOf(emptyCatch.index),
-      message: `${file} 有空 catch 块（吞掉异常）。`,
-      why: 'AI 生成代码最常见的"看起来能跑"写法：异常被吞后线上只剩空数据没有日志，排查成本极高。至少要记日志或向上抛。',
-      evidence: `matched: ${emptyCatch[0].replace(/\s+/g, ' ').trim()}`,
-    });
-  }
+  findings.push(...runRules(ANY_RULES, {
+    file: f, src, scannable, lineOf, isCode, isJsOrVue: JS_OR_VUE, isCli,
+  }));
 
   // Stub markers: only in a comment (a string literal that looks like one is data),
   // only when the marker *begins* the comment line (a mid-sentence mention is prose),

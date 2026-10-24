@@ -942,9 +942,9 @@ test('ai-todo-left reports a real stub but not prose that merely says "not imple
 });
 
 test('declarative rules are registered: every {id} in a rule module exists in RULE_REGISTRY', async () => {
-  const { GO_RULES } = await import('../scripts/rules/index.mjs');
+  const { GO_RULES, ANY_RULES } = await import('../scripts/rules/index.mjs');
   const registered = new Set(RULE_REGISTRY.map((r) => r.id));
-  for (const rule of GO_RULES) {
+  for (const rule of [...GO_RULES, ...ANY_RULES]) {
     assert.ok(registered.has(rule.id), `${rule.id} runs but is not in RULE_REGISTRY (checklist would miss it)`);
   }
   // and the reverse: every go-family registry entry has an implementation

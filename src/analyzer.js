@@ -771,13 +771,13 @@ export function saveIndex(baseDir, data) {
   const indexDir = path.join(baseDir, '.archnav');
   fs.mkdirSync(indexDir, { recursive: true });
   const target = path.join(indexDir, 'index.json');
-  const tmp = `${target}.${process.pid}.tmp`;
+  const tmpPath = `${target}.${process.pid}.tmp`;
   data.schemaVersion = INDEX_SCHEMA_VERSION;
   // Atomic replace: this used to be a direct 1.8 MB writeFileSync, so a Ctrl-C, a full
   // disk or a crash left truncated JSON behind and *every* query failed until the next
   // analyze. rename(2) on the same filesystem publishes either the old file or the new.
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, target);
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpPath, target);
   // Save commit hash for staleness tracking
   try {
     const headContent = fs.readFileSync(path.join(baseDir, '.git', 'HEAD'), 'utf-8').trim();
