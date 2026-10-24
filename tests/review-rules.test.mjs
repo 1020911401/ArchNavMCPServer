@@ -941,6 +941,20 @@ test('ai-todo-left reports a real stub but not prose that merely says "not imple
     .filter((x) => x.rule === 'ai-todo-left').length, 1, 'a thrown placeholder is still a stub');
 });
 
+test('declarative rules are registered: every {id} in a rule module exists in RULE_REGISTRY', async () => {
+  const { GO_RULES } = await import('../scripts/rules/index.mjs');
+  const registered = new Set(RULE_REGISTRY.map((r) => r.id));
+  for (const rule of GO_RULES) {
+    assert.ok(registered.has(rule.id), `${rule.id} runs but is not in RULE_REGISTRY (checklist would miss it)`);
+  }
+  // and the reverse: every go-family registry entry has an implementation
+  const goIds = new Set(GO_RULES.map((r) => r.id));
+  const registryGo = RULE_REGISTRY.filter((r) => r.family === 'go').map((r) => r.id);
+  for (const id of registryGo) {
+    assert.ok(goIds.has(id), `${id} is registered as a Go rule but no rule module implements it`);
+  }
+});
+
 test('arity: defaults survive the analyzer signature, and a local helper is not a global callee', () => {
   const defaults = [{ name: 'finding', file: 'tests/t.test.mjs', signature: 'finding = (rule, severity, file, line = …) =>', exported: false, line_start: 1 }];
   assert.deepEqual(arityFindings('tests/t.test.mjs', "finding('a', 'b', 'c', 4);", { symbols: defaults }), [],

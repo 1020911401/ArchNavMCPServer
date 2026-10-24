@@ -1,0 +1,78 @@
+/**
+ * Golden snapshot for rule-model refactors: run every rule over a fixed file corpus and
+ * dump the findings as sorted JSON. Any refactor must reproduce this byte-for-byte —
+ * that is the only honest way to prove "declarative rewrite, same behaviour".
+ *
+ * Usage: node bench/rule-golden.mjs [--write]
+ *   --write   create/overwrite bench/rule-golden.json (do this BEFORE the refactor)
+ *   (default) compare against it and exit 1 on any difference
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { scanContent } from '../scripts/review-rules.mjs';
+
+const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const TARGET = path.join(ROOT, 'bench', 'rule-golden.json');
+
+// A corpus that exercises every family: PHP-ish, JS/Vue-ish, Python-ish, docs, configs.
+const CORPUS_DIRS = ['scripts', 'src', 'tests', 'bench'];
+const EXTRA = [
+  ['app/Http/Controllers/OrderController.php', "<?php\nclass A {\n  public function x() { if ($a == $b) { dd($a); } }\n}\n"],
+  ['app/Service.php', "<?php\n$q = DB::select(\"select * from u where id = {$_GET['id']}\");\n"],
+  ['resources/js/app.js', "const data = {};\nconsole.log(data);\nif (x == null) {}\n// TODO: later\n"],
+  ['resources/js/Comp.vue', "<template><div v-for=\"i in list\">{{ i.nope }}</div></template>\n<script>export default { methods: { go() { this.$refs.a.x(); } } }</script>\n"],
+  ['tools/t.py', "def f(x):\n    try:\n        pass\n    except:\n        pass\n    return eval(x)\n"],
+  ['tools/t.go', "package main\nfunc f() { os.Exit(0) }\n"],
+  ['docs/a.md', "# Title\nTODO: fill in\n"],
+  ['conf/a.yaml', "key: value\nnot implemented: true\n"],
+];
+
+const files = [];
+for (const dir of CORPUS_DIRS) {
+  const abs = path.join(ROOT, dir);
+  if (!fs.existsSync(abs)) continue;
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.name === 'node_modules' || e.name === '.archnav' || e.name === '.git') continue;
+      if (e.isDirectory()) walk(p);
+      else if (/\.(php|js|mjs|cjs|ts|vue|py|go|md|ya?ml|json)$/.test(e.name)) files.push(path.relative(ROOT, p).split(path.sep).join('/'));
+    }
+  };
+  walk(abs);
+}
+for (const [rel, text] of EXTRA) {
+  const abs = path.join(ROOT, rel);
+  if (fs.existsSync(abs)) continue;                       // never clobber a real file
+  files.push(rel);
+  files[files.length - 1] = { rel, text };
+}
+
+const rows = [];
+for (const entry of files) {
+  const rel = typeof entry === 'string' ? entry : entry.rel;
+  const src = typeof entry === 'string' ? fs.readFileSync(path.join(ROOT, rel), 'utf8') : entry.text;
+  for (const f of scanContent(rel, src)) {
+    rows.push({ rule: f.rule, severity: f.severity, file: rel, line: f.line ?? null, message: f.message });
+  }
+}
+rows.sort((a, b) => (a.file + a.rule + String(a.line)).localeCompare(b.file + b.rule + String(b.line)));
+
+const payload = { corpusFiles: files.length, findings: rows.length, rows };
+if (process.argv.includes('--write')) {
+  fs.writeFileSync(TARGET, JSON.stringify(payload, null, 2) + '\n');
+  console.log(`golden written: ${TARGET} — ${rows.length} findings over ${files.length} files`);
+} else {
+  if (!fs.existsSync(TARGET)) { console.error('no golden file — run with --write first'); process.exit(2); }
+  const before = JSON.parse(fs.readFileSync(TARGET, 'utf8'));
+  const same = JSON.stringify(before.rows) === JSON.stringify(rows);
+  console.log(`golden compare: ${same ? 'IDENTICAL' : 'DIFFERS'} — before ${before.findings} / now ${rows.length} findings`);
+  if (!same) {
+    const key = (r) => `${r.file}|${r.rule}|${r.line}`;
+    const b = new Map(before.rows.map((r) => [key(r), r]));
+    const n = new Map(rows.map((r) => [key(r), r]));
+    for (const [k, r] of b) if (!n.has(k)) console.log('  missing now:', k, '|', r.message.slice(0, 60));
+    for (const [k, r] of n) if (!b.has(k)) console.log('  new now   :', k, '|', r.message.slice(0, 60));
+    process.exit(1);
+  }
+}

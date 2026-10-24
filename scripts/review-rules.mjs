@@ -24,6 +24,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
+import { runRules, GO_RULES } from './rules/index.mjs';
 import { selectTests } from './test-select.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -822,39 +823,8 @@ export function scanContent(file, src) {
     }
   }
 
-  // ── Go: the two mistakes that cost real money in services ───────────────────
-  if (/\.go$/i.test(file)) {
-    const ignoredMatches = [...src.matchAll(/,\s*_\s*:?=\s*\w|\(\s*_\s*\)/g)];
-    const ignored = ignoredMatches[0];
-    if (ignored) {
-      findings.push({
-        rule: 'go-ignored-error', severity: 'warn', file: f, line: lineOf(ignored.index),
-        message: `${f}:${lineOf(ignored.index)} 丢弃返回值 ${ignoredMatches.length} 处，例如 \`${ignored[0].replace(/\s+/g, ' ').slice(0, 40)}\`。`,
-        why: 'Go 里 `, _ :=` 最常见的用途就是丢掉 error：线上表现为"什么都没发生"，而错误被永久吞掉。至少要 log 或显式注释为什么安全。',
-        evidence: `occurrences=${ignoredMatches.length}, first=${ignored[0].replace(/\s+/g, ' ').slice(0, 50)}`,
-      });
-    }
-    const isMainPkg = /^\s*package\s+main\b/m.test(src);
-    const panicMatches = [...src.matchAll(/\bpanic\s*\(/g)];
-    const panics = panicMatches[0];
-    if (panics && !isMainPkg) {
-      findings.push({
-        rule: 'go-panic-in-library', severity: 'warn', file: f, line: lineOf(panics.index),
-        message: `${f}:${lineOf(panics.index)} 非 main 包里调用 panic ${panicMatches.length} 处。`,
-        why: '库/business 层 panic 会把调用方（可能是 HTTP handler）整条请求打挂，而且没法被调用方兜住；返回 error 让上层决定。',
-        evidence: `package=non-main, occurrences=${panicMatches.length}`,
-      });
-    }
-    const sqlConcat = /\b(?:db|tx|conn)\.(?:query|QueryContext|Query|exec|ExecContext|Exec|raw|Raw)\s*\([^)]*(?:fmt\.Sprintf|\+|\$\{)/i.exec(src.replace(/\n/g, ' '));
-    if (sqlConcat) {
-      findings.push({
-        rule: 'go-sql-injection', severity: 'error', file: f, line: lineOf(sqlConcat.index),
-        message: `${f} 用拼接/格式化构造 SQL：\`${sqlConcat[0].replace(/\s+/g, ' ').slice(0, 60)}\``,
-        why: 'SQL 注入；Go 的 database/sql 用占位符（? / $1）传参，不要 fmt.Sprintf 拼进语句。',
-        evidence: `matched: ${sqlConcat[0].replace(/\s+/g, ' ').slice(0, 70)}`,
-      });
-    }
-  }
+  // ── Go: rules now live in scripts/rules/index.mjs (declarative {id, run}) ───
+  if (/\.go$/i.test(file)) findings.push(...runRules(GO_RULES, { file: f, src, lineOf }));
 
   return findings;
 }

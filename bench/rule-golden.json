@@ -1,0 +1,195 @@
+{
+  "corpusFiles": 105,
+  "findings": 27,
+  "rows": [
+    {
+      "rule": "php-debug-left-on",
+      "severity": "warn",
+      "file": "app/Http/Controllers/OrderController.php",
+      "line": 3,
+      "message": "app/Http/Controllers/OrderController.php 命中 debug-left-on：`dd(`"
+    },
+    {
+      "rule": "php-loose-comparison",
+      "severity": "warn",
+      "file": "app/Http/Controllers/OrderController.php",
+      "line": 3,
+      "message": "PHP 用了松散比较 `==`（app/Http/Controllers/OrderController.php）。"
+    },
+    {
+      "rule": "js-debug-left-on",
+      "severity": "warn",
+      "file": "bench/rule-golden.mjs",
+      "line": 64,
+      "message": "bench/rule-golden.mjs 残留调试输出 `console.log(`。"
+    },
+    {
+      "rule": "ai-todo-left",
+      "severity": "info",
+      "file": "resources/js/app.js",
+      "line": 4,
+      "message": "resources/js/app.js 里留了 `// TODO: later`。"
+    },
+    {
+      "rule": "js-debug-left-on",
+      "severity": "warn",
+      "file": "resources/js/app.js",
+      "line": 2,
+      "message": "resources/js/app.js 残留调试输出 `console.log(`。"
+    },
+    {
+      "rule": "js-loose-equality",
+      "severity": "info",
+      "file": "resources/js/app.js",
+      "line": 3,
+      "message": "resources/js/app.js 在判断里用了松散相等 `if (x ==`。"
+    },
+    {
+      "rule": "vue-vfor-missing-key",
+      "severity": "warn",
+      "file": "resources/js/Comp.vue",
+      "line": 1,
+      "message": "1 处 v-for 没有 :key（首个 <div> 在第 1 行）。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "scripts/audit-deps.mjs",
+      "line": 24,
+      "message": "scripts/audit-deps.mjs:24 声明了 `norm` 但从未被读取。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "scripts/deep.mjs",
+      "line": 212,
+      "message": "scripts/deep.mjs:212 声明了 `kf` 但从未被读取。"
+    },
+    {
+      "rule": "empty-catch",
+      "severity": "warn",
+      "file": "src/analyzer.js",
+      "line": 389,
+      "message": "src/analyzer.js 有空 catch 块（吞掉异常）。"
+    },
+    {
+      "rule": "js-debug-left-on",
+      "severity": "warn",
+      "file": "src/comparison.js",
+      "line": 14,
+      "message": "src/comparison.js 残留调试输出 `console.log(`。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "src/comparison.js",
+      "line": 214,
+      "message": "src/comparison.js:214 声明了 `hasViolations` 但从未被读取。"
+    },
+    {
+      "rule": "js-loose-equality",
+      "severity": "info",
+      "file": "src/confidence.js",
+      "line": 196,
+      "message": "src/confidence.js 在判断里用了松散相等 `if (indexMtimeMs !=`。"
+    },
+    {
+      "rule": "js-loose-equality",
+      "severity": "info",
+      "file": "src/mcp-playbook.js",
+      "line": 57,
+      "message": "src/mcp-playbook.js 在判断里用了松散相等 `if (text ==`。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "warn",
+      "file": "src/navigation.js",
+      "line": 7,
+      "message": "src/navigation.js:7 import 了 `analyze` 但整个文件没再用过。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "src/parsers/python.js",
+      "line": 11,
+      "message": "src/parsers/python.js:11 声明了 `PY_SCRIPT` 但从未被读取。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "src/parsers/typescript.js",
+      "line": 14,
+      "message": "src/parsers/typescript.js:14 声明了 `lines` 但从未被读取。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "src/parsers/wasmParser.js",
+      "line": 19,
+      "message": "src/parsers/wasmParser.js:19 声明了 `WASM_DIR` 但从未被读取。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "info",
+      "file": "src/reader.js",
+      "line": 62,
+      "message": "src/reader.js:62 声明了 `expectedSignature` 但从未被读取。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "warn",
+      "file": "tests/confidence.test.mjs",
+      "line": 12,
+      "message": "tests/confidence.test.mjs:12 import 了 `test` 但整个文件没再用过。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "warn",
+      "file": "tests/php-calls.test.mjs",
+      "line": 10,
+      "message": "tests/php-calls.test.mjs:10 import 了 `test` 但整个文件没再用过。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "warn",
+      "file": "tests/php-parse-cache.test.mjs",
+      "line": 13,
+      "message": "tests/php-parse-cache.test.mjs:13 import 了 `test` 但整个文件没再用过。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "warn",
+      "file": "tests/resolver/scan.test.mjs",
+      "line": 7,
+      "message": "tests/resolver/scan.test.mjs:7 import 了 `test` 但整个文件没再用过。"
+    },
+    {
+      "rule": "js-unused-binding",
+      "severity": "warn",
+      "file": "tests/routes.test.mjs",
+      "line": 18,
+      "message": "tests/routes.test.mjs:18 import 了 `test` 但整个文件没再用过。"
+    },
+    {
+      "rule": "empty-catch",
+      "severity": "warn",
+      "file": "tools/t.py",
+      "line": 4,
+      "message": "tools/t.py 用 except: pass 静默吞掉了异常。"
+    },
+    {
+      "rule": "py-bare-except",
+      "severity": "warn",
+      "file": "tools/t.py",
+      "line": 4,
+      "message": "tools/t.py 命中 bare-except：`except:`"
+    },
+    {
+      "rule": "py-dangerous-function",
+      "severity": "error",
+      "file": "tools/t.py",
+      "line": 6,
+      "message": "tools/t.py 命中 dangerous-function：`eval(`"
+    }
+  ]
+}
