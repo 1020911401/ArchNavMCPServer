@@ -23,7 +23,7 @@ import { collectDiff, anchorRuleFindings, ANCHOR_A_RULES } from './anchor-rules.
 import { loadConstraints, evaluateConstraints, evaluateRelations, computeMetrics, renderConstraints, constraintTemplate } from './anchor-constraints.mjs';
 import { loadTrajectory, trajectoryChecks, llmJudge } from './anchor-trajectory.mjs';
 
-export const CONFIG_FILE = '.archnav/review.config.json';
+const CONFIG_FILE = '.archnav/review.config.json';
 const CONFIG_DIR = '.archnav';
 
 /** Read `.archnav/review.config.json` (missing file = empty config, broken file = error). */
