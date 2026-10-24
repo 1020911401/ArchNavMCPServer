@@ -1,0 +1,128 @@
+# ANCHOR taxonomy (arXiv:2610.16859v2 Table 2) — tab-separated on purpose:
+# jscpd only scans source languages, so a uniform data table is not counted as
+# copy-paste. Edit rows here; the shape/validation lives in anchor-taxonomy.mjs.
+#CATEGORIES	id	code	name	nameZh	intent	evidence	atoms
+1	C1	Tool Execution Protocol	工具执行协议	工具怎么被调用：选择、参数、失败处理、结果复检	trajectory	371
+2	C2	Workflow & Behaviour	工作流与行为	任务在时间上怎么被推进：顺序、确认、信息透明、提交纪律	trajectory	512
+3	C3	Modification Scope & Change Budget	改动范围与变更预算	改动的空间、数量、语义边界	diff	518
+4	C4	Code Style & Engineering Standards	代码风格与工程规范	格式、命名、类型、注释、结构	diff	223
+5	C5	Code Implementation	实现约束	算法、错误处理、副作用、性能、技术选型	diff	283
+6	C6	Environment	运行环境	版本、平台兼容、隔离	diff	70
+7	C7	Dependency & Build Strategy	依赖与构建	能不能加依赖、lock/CI/构建产物	diff	49
+8	C8	Security & Dangerous Operations	安全与危险操作	破坏性命令、权限、泄露、注入	diff,trajectory	49
+9	C9	Testing	测试	写测试、跑测试、静态检查、报告结果	diff,trajectory	530
+10	C10	Output Format & Reporting	输出与汇报	报告怎么写：语言、模板、引用、证据	report	231
+#SUBCATEGORIES	id	name	nameZh
+1.1	Tool selection	工具选择
+1.2	Invocation parameters	调用参数
+1.3	Execution results	执行结果
+2.1	Execution order	执行顺序
+2.2	User confirmation	用户确认
+2.3	Information disclosure	信息透明
+2.4	Commit conventions	提交规范
+3.1	Spatial scope	空间范围
+3.2	Quantity budget	数量预算
+3.3	Semantic scope	语义范围
+4.1	Formatting	格式
+4.2	Naming	命名
+4.3	Type system	类型系统
+4.4	Comments & documentation	注释与文档
+4.5	Code structure	代码结构
+5.1	Algorithm & strategy	算法与策略
+5.2	Coding style	写法
+5.3	Performance requirements	性能要求
+5.4	Technology choice	技术选型
+6.1	Runtime versions	运行时版本
+6.2	Platform compatibility	平台兼容
+6.3	Isolation	隔离
+7.1	Dependency changes	依赖变更
+7.2	Version management	版本管理
+7.3	Build pipeline	构建管线
+8.1	Dangerous commands & privileges	危险命令与权限
+8.2	Information leakage	信息泄露
+8.3	Code security	代码安全
+9.1	Test writing	测试编写
+9.2	Test execution	测试执行
+9.3	Test reporting	测试汇报
+10.1	Language & tone	语言与语气
+10.2	Structure & templates	结构与模板
+10.3	Citation & evidence	引用与证据
+#LEAVES	subId	id	name	nameZh	atoms	evidence	level	check	native
+1.1	1.1.1	Tool Preference & Substitution	工具偏好与替代	44	trajectory	C	tool_preference	
+1.1	1.1.2	Tool prohibition	禁止使用的工具	1	trajectory	C	tool_prohibition	
+1.1	1.1.3	Tool Composition & Pipeline	工具组合顺序	1	trajectory	C	tool_pipeline	
+1.2	1.2.1	Required parameters	必需参数	74	trajectory	B	required_params	
+1.2	1.2.2	Forbidden parameters	禁止参数	36	trajectory	C	forbidden_params	
+1.3	1.3.1	Truthfulness & Completeness	如实汇报执行	24	trajectory,report	C	claim_truthfulness	
+1.3	1.3.2	Failure Handling & Retry	失败处理与重试	32	trajectory	C	failure_handling	
+1.3	1.3.3	Result verification	改后复检	159	trajectory	C	result_verification	
+2.1	2.1.1	Task-level order	任务级顺序	200	trajectory	C	task_order	
+2.1	2.1.2	Operation-level order	操作级顺序（先读后改）	9	trajectory	C	read_before_edit	
+2.2	2.2.1	Pre-action confirmation	动作前确认	1	trajectory	C	pre_action_confirmation	
+2.2	2.2.2	Escalation triggers	升级触发点	4	trajectory	C	escalation	
+2.3	2.3.2	Decision explanation	解释选择理由	87	report	L	decision_explanation	
+2.3	2.3.3	Capability Boundary Declaration	能力边界声明	9	report	L	capability_boundary	
+2.4	2.4.1	Commit message format	提交信息格式	21	commit	C	commit_format	
+2.4	2.4.2	Commit Granularity & Strategy	提交粒度	54	commit	C	commit_granularity	
+2.4	2.4.3	Pre-commit checks	提交前检查	127	trajectory,commit	C	pre_commit_checks	
+3.1	3.1.1	Directory-level constraints	目录级约束	77	diff	B	path_scope	
+3.1	3.1.2	File-level constraints	文件级约束	28	diff	B	file_scope	
+3.1	3.1.3	Code-level constraints	代码级约束（只改函数体）	2	diff	L	code_level_scope	
+3.2	3.2.1	File-count limits	文件数上限	42	diff	A	max_files	
+3.2	3.2.2	Line-count limits	行数上限	84	diff	A	max_lines	
+3.3	3.3.1	Task Boundary	任务边界（不顺手重构/加功能）	158	diff,report	L	task_boundary	
+3.3	3.3.2	Interface compatibility	接口兼容（保持 API 路径/响应）	127	diff	B	interface_stability	
+4.1	4.1.1	Lint & Formatter Tools	lint/formatter 通过	30	diff,trajectory	C	lint_run	
+4.1	4.1.2	Whitespace & Layout Rules	缩进与空白	3	diff	B	whitespace	
+4.1	4.1.3	Syntax Format Preferences	引号/风格偏好	3	diff	B	syntax_preference	
+4.2	4.2.1	Naming style	命名风格（snake/camel）	10	diff	B	naming_style	
+4.2	4.2.2	Naming quality	命名质量（tmp/data 这类）	12	diff	A	naming_quality	
+4.3	4.3.1	Type annotation requirements	必须写类型标注	9	diff	B	type_annotation	
+4.3	4.3.2	Type-safety restrictions	禁止 any 之类	27	diff	A	no_any	
+4.4	4.4.1	Inline comments	行内注释（写为什么）	13	diff	L	inline_comments	
+4.4	4.4.2	Docstrings	docstring	8	diff	L	docstrings	
+4.4	4.4.3	Project documentation	项目文档同步（README）	26	diff	A	docs_sync	
+4.5	4.5.1	Modularity	抽出重复逻辑	73	diff	B	modularity	duplication
+4.5	4.5.2	Complexity limits	嵌套深度上限	1	diff	B	complexity	
+4.5	4.5.3	Design patterns	设计模式偏好	8	diff	L	design_patterns	
+5.1	5.1.1	Algorithm Selection	算法选择	37	diff	L	algorithm_choice	
+5.1	5.1.2	Concurrency & Synchronization Strategy	并发模型	2	diff	L	concurrency	
+5.1	5.1.3	Retry & Fault Tolerance Strategy	重试/退避	2	diff	L	retry_strategy	
+5.1	5.1.4	Error handling	错误处理	115	diff	A	error_handling	empty-catch|py-bare-except
+5.1	5.1.5	Side-effect control	副作用控制	32	diff	B	side_effects	
+5.2	5.2.1	Syntax restrictions	语法禁用	3	diff	B	syntax_ban	
+5.2	5.2.2	Paradigm requirements	范式要求（async/await）	1	diff	L	paradigm	
+5.2	5.2.3	Language features	语言特性偏好	41	diff	L	language_features	
+5.3	5.3.1	Complexity constraints	复杂度上限	5	diff	L	perf_complexity	
+5.3	5.3.2	Resource constraints	资源上限	10	diff	L	perf_resource	
+5.3	5.3.3	Data processing strategy	数据处理策略（流式）	12	diff	L	perf_data	
+5.4	5.4.1	Required libraries	必须用某库	12	diff	B	required_libs	
+5.4	5.4.2	Forbidden libraries	禁用某库	11	diff	B	forbidden_libs	hallucinated-dependency
+6.1	6.1.1	Language Version	语言版本兼容	18	diff	B	lang_version	
+6.1	6.1.2	Framework & Platform Version	框架/平台版本	4	diff	B	framework_version	
+6.2	6.2.1	Path & Filesystem	路径可移植（不写死 /tmp）	3	diff	A	portable_path	
+6.2	6.2.2	Encoding & Runtime Environment	编码显式声明	5	diff	A	explicit_encoding	
+6.3	6.3.1	Filesystem isolation	不写到仓库外	28	diff	A	fs_isolation	
+6.3	6.3.2	System environment isolation	不改全局配置	12	diff	A	sys_isolation	
+7.1	7.1.1	Addition Restrictions	禁止新增依赖	41	diff	A	no_new_dependency	
+7.2	7.2.1	Lock File Policy	lock 文件策略	4	diff	A	lock_untouched	
+7.2	7.2.2	Version Range Policy	版本范围策略	1	diff	B	version_range	
+7.3	7.3.1	CI/CD configuration	CI 配置禁改	1	diff	A	ci_untouched	
+7.3	7.3.2	Build Scripts & Output	构建脚本/产物路径	2	diff	A	build_output_untouched	
+8.1	8.1.1	Destructive commands	破坏性命令	24	diff,trajectory	A	destructive_command	
+8.1	8.1.2	Privilege & System Operations	提权与系统操作	14	diff,trajectory	A	privilege_ops	
+8.2	8.2.1	Secret & Credential Protection	密钥/凭据不外泄	3	diff,trajectory	A	secret_leak	
+8.2	8.2.3	System Information Protection	内部路径不外泄	2	diff	A	internal_path_leak	
+8.3	8.3.1	Injection protection	防注入	5	diff	A	injection	taint-source-to-sink|php-raw-sql-interpolation|py-raw-sql|go-sql-injection
+8.3	8.3.3	Encryption & Secure Coding	加密与安全编码	1	diff	A	weak_crypto	
+9.1	9.1.1	Test Coverage Requirements	回归测试覆盖	156	diff	A	test_added	no-test-coverage
+9.1	9.1.2	Test quality standards	测试独立性	104	diff	B	test_quality	
+9.2	9.2.1	Test Suite Selection	先跑受影响用例	155	trajectory	C	test_selection	
+9.2	9.2.2	Static Analysis & Checks	静态检查跑过	45	trajectory	C	static_checks	
+9.3	9.3.1	Result summary	逐项测试结果	4	report	C	test_report	
+9.3	9.3.2	Reproduction & Comparison	修复前后对比	66	diff,report	C	before_after	
+10.1	10.1.1	Language Choice	语言选择	62	report	L	report_language	
+10.1	10.1.2	Tone & Style	语气与风格	66	report	L	report_tone	
+10.2	10.2.1	Report Template	报告模板	5	report	C	report_template	
+10.3	10.3.1	Code References	引用文件:行号	45	report	C	code_references	
+10.3	10.3.2	Execution Evidence	命令输出当证据	53	report	C	execution_evidence	
