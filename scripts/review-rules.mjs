@@ -24,11 +24,11 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
-import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES } from './rules/index.mjs';
-// The stub detector moved into its rule module; re-exported here because the tests (and
-// one older caller) import it from this entry point.
+import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES, vforMissingKeys } from './rules/index.mjs';
+// The stub detector and the v-for/:key finder moved into their rule modules; re-exported
+// here because the tests (and one older caller) import them from this entry point.
 import { stubMarkerInComments } from './rules/stub.mjs';
-export { stubMarkerInComments };
+export { stubMarkerInComments, vforMissingKeys };
 import { selectTests } from './test-select.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -272,7 +272,7 @@ const PLACEHOLDER_VALUE_RE = /^(your|my|change|example|dummy|test|xxx|xxxx|place
 // The controller-shape regexes (query-in-loop / pagination / mass input / validation
 // present) moved into scripts/rules/php.mjs, where the rules that read them live.
 
-const TAG_RE = /<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+// The v-for/:key tag regex moved into scripts/rules/vue.mjs.
 
 /**
  * Blank *template literal* contents (backticks only, length preserved). Our own
@@ -457,17 +457,8 @@ export function joinPosix(dir, spec, ...more) {
   return out.join('/');
 }
 
-/** Opening tags that use v-for without a :key (attribute-window check, not line). */
-export function vforMissingKeys(src) {
-  const out = [];
-  for (const m of src.matchAll(TAG_RE)) {
-    const attrs = m[2];
-    if (!/\bv-for\s*=/.test(attrs)) continue;
-    if (/(:key|v-bind:key|\bkey\s*=)/.test(attrs)) continue;
-    out.push({ tag: m[1], line: src.slice(0, m.index).split(/\r?\n/).length });
-  }
-  return out;
-}
+// v-for/:key detection lives in scripts/rules/vue.mjs with the rule that uses it;
+// re-exported here because the tests import it from this entry point.
 
 export function scanContent(file, src) {
   const findings = [];
@@ -562,18 +553,8 @@ export function scanContent(file, src) {
   const phpCtx = { file: f, f, src, lineOf, isPhp, isController, isRequestPath };
   findings.push(...runRules(PHP_RULES, phpCtx));
 
-  // front-end: v-for without :key
-  if (/\.vue$/i.test(file)) {
-    const rows = vforMissingKeys(src);
-    if (rows.length) {
-      findings.push({
-        rule: 'vue-vfor-missing-key', severity: 'warn', file: f, line: rows[0].line,
-        message: `${rows.length} 处 v-for 没有 :key（首个 <${rows[0].tag}> 在第 ${rows[0].line} 行）。`,
-        why: '缺 key 会让 Vue 复用错节点：列表增删后内容/输入框状态串行，渲染也变慢。key 必须写在带 v-for 的那个标签上。',
-        evidence: `v-for without :key = ${rows.length}（属性窗口判定，不是整行判定）`,
-      });
-    }
-  }
+  // (the v-for/:key rule joined the Vue family in scripts/rules/vue.mjs — one call site,
+  // further down, runs all four Vue rules)
 
   // ── language traps + AI-code smells (diff-local, content only) ─────────────
   // Grounded in the pitfall classes the 2024-2026 LLM-code studies report most

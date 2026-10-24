@@ -55,6 +55,13 @@ jobs:
       - name: Build index
         run: node src/index.js analyze .
 
+      # The rule model is only as trustworthy as this snapshot: every rule refactor has
+      # to reproduce bench/rule-golden.json byte-for-byte, or the diff means behaviour
+      # moved. Cheap (no index needed) and deterministic — the corpus is the tracked
+      # files under scripts/src/tests/bench plus the inline fixtures in the harness.
+      - name: Rule golden snapshot (behaviour-drift gate)
+        run: node bench/rule-golden.mjs
+
       # Functional self-check: every designed capability, on a throwaway repo
       # (fixture-dependent checks skip themselves when bench/ is absent).
       - name: Self-test (designed capabilities)

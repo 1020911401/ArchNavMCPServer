@@ -11,6 +11,26 @@
 
 const finding = ({ rule, severity, file, line, message, why, evidence }) => ({ rule, severity, file, line, message, why, evidence });
 
+const TAG_RE = /<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
+
+/**
+ * Tags carrying `v-for` without any key binding.
+ *
+ * Exported because it is also the definition of "has a key" for the test suite — the
+ * check is per *attribute window*, not per line, so a `:key` written on the next line
+ * still counts (that distinction was a real false positive).
+ */
+export function vforMissingKeys(src) {
+  const out = [];
+  for (const m of src.matchAll(TAG_RE)) {
+    const attrs = m[2];
+    if (!/\bv-for\s*=/.test(attrs)) continue;
+    if (/(:key|v-bind:key|\bkey\s*=)/.test(attrs)) continue;
+    out.push({ tag: m[1], line: src.slice(0, m.index).split(/\r?\n/).length });
+  }
+  return out;
+}
+
 export const VUE_RULES = [
   {
     id: 'vue-mutating-props', family: 'front', severity: 'warn', title: '子组件直接改 prop',
@@ -63,6 +83,21 @@ export const VUE_RULES = [
         message: `${f}:${lineOf(m.index)} 用了 setInterval 但整个文件没有 clearInterval。`,
         why: '页面/组件销毁后定时器还在跑：拿着已卸载组件的状态发请求、刷数据，内存与请求都泄漏。在 onUnload/beforeDestroy/unmounted 里 clearInterval。',
         evidence: 'setInterval present, clearInterval absent',
+      })];
+    },
+  },
+  {
+    // front-end: v-for without :key
+    id: 'vue-vfor-missing-key', family: 'front', severity: 'warn', title: 'v-for 缺 :key',
+    run: ({ file, f, src }) => {
+      if (!/\.vue$/i.test(file)) return [];
+      const rows = vforMissingKeys(src);
+      if (!rows.length) return [];
+      return [finding({
+        rule: 'vue-vfor-missing-key', severity: 'warn', file: f, line: rows[0].line,
+        message: `${rows.length} 处 v-for 没有 :key（首个 <${rows[0].tag}> 在第 ${rows[0].line} 行）。`,
+        why: '缺 key 会让 Vue 复用错节点：列表增删后内容/输入框状态串行，渲染也变慢。key 必须写在带 v-for 的那个标签上。',
+        evidence: `v-for without :key = ${rows.length}（属性窗口判定，不是整行判定）`,
       })];
     },
   },

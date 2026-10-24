@@ -941,6 +941,16 @@ test('ai-todo-left reports a real stub but not prose that merely says "not imple
     .filter((x) => x.rule === 'ai-todo-left').length, 1, 'a thrown placeholder is still a stub');
 });
 
+test('vue-vfor-missing-key: fires from the module, a key on the next line counts, non-vue skipped', async () => {
+  const { VUE_RULES, runRules } = await import('../scripts/rules/index.mjs');
+  const run = (file, src) => runRules(VUE_RULES, { file, f: file, src, lineOf: (i) => src.slice(0, i).split(/\r?\n/).length })
+    .filter((x) => x.rule === 'vue-vfor-missing-key');
+  assert.equal(run('a.vue', '<template><view v-for="i in list">{{ i.n }}</view></template>').length, 1);
+  assert.deepEqual(run('a.vue', '<template><view v-for="i in list"\n        :key="i.id">{{ i.n }}</view></template>'), [],
+    'a key on the attribute window (next line) counts');
+  assert.deepEqual(run('a.js', '<view v-for="i in list">'), [], 'the rule is .vue only');
+});
+
 test('declarative rules are registered: every {id} in a rule module exists in RULE_REGISTRY', async () => {
   const { GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES } = await import('../scripts/rules/index.mjs');
   const registered = new Set(RULE_REGISTRY.map((r) => r.id));

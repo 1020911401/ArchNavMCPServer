@@ -96,6 +96,17 @@ if (process.argv.includes('--write')) {
     const n = new Map(rows.map((r) => [key(r), r]));
     for (const [k, r] of b) if (!n.has(k)) console.log('  missing now:', k, '|', r.message.slice(0, 60));
     for (const [k, r] of n) if (!b.has(k)) console.log('  new now   :', k, '|', r.message.slice(0, 60));
+    // A row can also change *in place* — severity or message only. Without this the
+    // report says DIFFERS and lists nothing (measured: a severity edit looked like a
+    // clean run), which is exactly when a reviewer needs the detail.
+    for (const [k, r] of n) {
+      const was = b.get(k);
+      if (!was) continue;
+      const d = ['severity', 'message'].filter((f) => was[f] !== r[f]);
+      if (!d.length) continue;
+      console.log(`  changed   : ${k} [${d.join(', ')}]`);
+      for (const f of d) console.log(`      ${f}: ${JSON.stringify(was[f])} -> ${JSON.stringify(r[f])}`);
+    }
     process.exit(1);
   }
 }
