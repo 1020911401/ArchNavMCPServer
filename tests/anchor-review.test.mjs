@@ -177,8 +177,6 @@ test('constraint template is self-consistent (loads and evaluates)', () => {
 
 // ── tier C: trajectory ──────────────────────────────────────────────────────
 
-const mk = (i, e) => normalizeEvent({ ...e, i });
-
 test('event normalization accepts the three common shapes', () => {
   assert.equal(normalizeEvent({ type: 'tool_call', name: 'read_file', args: { path: 'a.php' } }).tool, 'read_file');
   assert.equal(normalizeEvent({ tool: 'bash', arguments: { command: 'pytest -q' } }).cmd, 'pytest -q');

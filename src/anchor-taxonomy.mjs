@@ -35,7 +35,6 @@
 import fs from 'node:fs';
 
 const RAW = fs.readFileSync(new URL('./anchor-taxonomy.data.tsv', import.meta.url), 'utf8');
-const rows = RAW.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.trim() && !l.startsWith('#'));
 
 /** Sectioned TSV: CAREGORIES / SUBCATEGORIES / LEAVES are split by their header comment. */
 const SECTION = /^#(CATEGORIES|SUBCATEGORIES|LEAVES)\t/;
