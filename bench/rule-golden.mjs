@@ -27,6 +27,13 @@ const EXTRA = [
   // the vue rules, so a migration could have broken them silently.
   ['pages/detail/detail.vue', "<template>\n  <view v-for=\"(it, i) in list\" v-if=\"it.show\">{{ it.name }}</view>\n</template>\n<script>\nexport default {\n  props: { orderId: { type: String, required: true }, total: Number },\n  methods: {\n    bump() { this.total = 0; this.orderId = 'x'; },\n    tick() { setInterval(() => this.bump(), 1000); },\n  },\n};\n</script>\n"],
   ['pages/ok.vue', "<template><view v-for=\"i in list\" :key=\"i.id\">{{ i.name }}</view></template>\n<script>export default { data() { return { t: null }; }, mounted() { this.t = setInterval(()=>{}, 1000); }, beforeDestroy() { clearInterval(this.t); } };</script>\n"],
+  // PHP read-modify-write + the other two stub branches (hash comment / thrown
+  // placeholder). Written with \u escapes so this file's own source does not itself
+  // read like a leftover stub — the checker scans bench/ too, and a fixture that
+  // tripped the rule it was written to cover would be its own false positive.
+  ['app/Service/Counter.php', "<?php\nfunction bump($order) {\n  $order->pay_count = $order->pay_count + 1;\n  $ok = $order->total - 1;\n  return $ok;\n}\n"],
+  ['app/Service/HashTodo.php', "<?php\nfunction todo() {\n  # TODO: switch to atomic increment\n  return 1;\n}\n"],
+  ['app/Service/Stub.php', "<?php\nfunction stub() {\n  throw new Error('\u672a\u5b9e\u73b0');\n}\n"],
   ['docs/a.md', "# Title\nTODO: fill in\n"],
   ['conf/a.yaml', "key: value\nnot implemented: true\n"],
 ];

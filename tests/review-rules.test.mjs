@@ -942,9 +942,9 @@ test('ai-todo-left reports a real stub but not prose that merely says "not imple
 });
 
 test('declarative rules are registered: every {id} in a rule module exists in RULE_REGISTRY', async () => {
-  const { GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES } = await import('../scripts/rules/index.mjs');
+  const { GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES } = await import('../scripts/rules/index.mjs');
   const registered = new Set(RULE_REGISTRY.map((r) => r.id));
-  for (const rule of [...GO_RULES, ...ANY_RULES, ...VUE_RULES, ...BINDING_RULES]) {
+  for (const rule of [...GO_RULES, ...ANY_RULES, ...VUE_RULES, ...BINDING_RULES, ...PHP_RULES, ...STUB_RULES]) {
     assert.ok(registered.has(rule.id), `${rule.id} runs but is not in RULE_REGISTRY (checklist would miss it)`);
   }
   // and the reverse: every go-family registry entry has an implementation
@@ -953,6 +953,37 @@ test('declarative rules are registered: every {id} in a rule module exists in RU
   for (const id of registryGo) {
     assert.ok(goIds.has(id), `${id} is registered as a Go rule but no rule module implements it`);
   }
+});
+
+// A migrated rule must be runnable on its own — that is the whole point of the ctx
+// argument. These two tests call the module directly (no scanContent), so a future
+// scanner refactor cannot quietly change what they guarantee.
+test('php-read-modify-write: only the self-referential assignment fires', async () => {
+  const { PHP_RULES, runRules } = await import('../scripts/rules/index.mjs');
+  const run = (src, file = 'app/A.php') => runRules(PHP_RULES, {
+    file, f: file, src, lineOf: (i) => src.slice(0, i).split(/\r?\n/).length,
+  });
+  assert.equal(run('<?php\n$o->n = $o->n + 1;\n').length, 1);
+  assert.equal(run('<?php\n$o->n = $o->m + 1;\n').length, 0, 'a different field is not read-modify-write');
+  assert.equal(run('<?php\n$o->n = $o->n + 1;\n', 'app/A.mjs').length, 0, 'the php rule never touches JS');
+});
+
+test('ai-todo-left: comment stub, php hash stub and thrown placeholder fire; prose and strings do not', async () => {
+  const { STUB_RULES, runRules } = await import('../scripts/rules/index.mjs');
+  const run = (file, src) => {
+    const spans = [];
+    blankNonCode(src, { onComment: (s, e) => spans.push([s, e]) });
+    return runRules(STUB_RULES, {
+      file, f: file, src, lineOf: (i) => src.slice(0, i).split(/\r?\n/).length,
+      isCode: /\.(php|js|mjs|cjs|ts|vue|py)$/i.test(file), isPhp: /\.php$/i.test(file), commentSpans: spans,
+    });
+  };
+  assert.equal(run('a.js', '// TODO: later\nconst x = 1;\n').length, 1, 'comment stub');
+  assert.equal(run('a.php', '<?php\n# TODO: switch to atomic\n').length, 1, 'php hash stub');
+  assert.equal(run('a.php', `<?php\nthrow new Error('${String.fromCharCode(26410, 23454, 29616)}');\n`).length, 1, 'thrown placeholder');
+  assert.equal(run('a.js', "const s = '// TODO: not a comment';\n").length, 0, 'a string literal is data');
+  assert.equal(run('a.js', '// prose that mentions TODO mid-sentence\n').length, 0, 'mid-sentence mentions are prose');
+  assert.equal(run('a.md', '// TODO: docs are not code\n').length, 0, 'non-code files are skipped');
 });
 
 test('arity: defaults survive the analyzer signature, and a local helper is not a global callee', () => {

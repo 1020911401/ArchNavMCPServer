@@ -17,6 +17,8 @@
 export { ANY_RULES } from './any.mjs';
 export { VUE_RULES } from './vue.mjs';
 export { BINDING_RULES } from './bindings.mjs';
+export { PHP_RULES } from './php.mjs';
+export { STUB_RULES, stubMarkerInComments } from './stub.mjs';
 
 export function runRules(rules, ctx) {
   const out = [];

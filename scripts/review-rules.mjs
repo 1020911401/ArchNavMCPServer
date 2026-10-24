@@ -24,7 +24,11 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
-import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES } from './rules/index.mjs';
+import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES } from './rules/index.mjs';
+// The stub detector moved into its rule module; re-exported here because the tests (and
+// one older caller) import it from this entry point.
+import { stubMarkerInComments } from './rules/stub.mjs';
+export { stubMarkerInComments };
 import { selectTests } from './test-select.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -39,9 +43,6 @@ const BACKUP_RE = /(副本|复制|copy|\.bak|\.orig|\.old|\.20\d{6}|_20\d{6}|\.b
  * in every diff, which trains the reviewer to ignore the rule.
  */
 const LIFECYCLE_NAME_RE = /^(__.*|construct|constructor|handle|boot|booted|data|props|computed|watch|methods|components|filters|directives|mixins|created|beforeCreate|beforeMount|mounted|beforeUpdate|updated|beforeDestroy|destroyed|activated|deactivated|setup|render|onLoad|onShow|onReady|onHide|onUnload|onPullDownRefresh|onReachBottom|onShareAppMessage|onPageScroll|onLaunch)$/;
-
-const LINE_SPLIT_RE = new RegExp(String.fromCharCode(13) + '?' + String.fromCharCode(10));
-
 // ── front-end / back-end boundary ────────────────────────────────────────────
 // The boundary is where the two repos must agree, and it is invisible to either
 // index alone: the front-end calls `request.get('order/list')`, the backend
@@ -342,27 +343,8 @@ export function blankTemplateLiterals(src) {
   return out.join('');
 }
 
-/**
- * First TODO/FIXME/XXX/HACK that *begins* a comment line.
- *
- * Scanning the raw text reported the wrong things twice over: a marker inside a
- * string literal (`'// TODO: …'` — the tests' own fixtures write it as data) is not
- * a comment, and a marker mentioned mid-sentence is prose. The comment spans come
- * from the same state machine that blanks them, so "is this really a comment" is
- * already decided.
- */
-export function stubMarkerInComments(src, spans) {
-  for (const [start, end] of spans) {
-    let offset = start;
-    for (const line of src.slice(start, end).split(LINE_SPLIT_RE)) {
-      const body = line.replace(/^\s*(?:\/\/+|\/\*+|\*+|<!--)\s*/, '');
-      const m = /^(TODO|FIXME|XXX|HACK)\b/.exec(body);
-      if (m) return { index: offset + (line.length - line.trimStart().length), 0: line.trim(), marker: m[1] };
-      offset += line.length + 1;
-    }
-  }
-  return null;
-}
+// stubMarkerInComments now lives in scripts/rules/stub.mjs, together with the rule that
+// uses it (and re-exported at the top of this file).
 
 /**
  * Blank out string, comment and regex-literal *contents* in one pass, keeping the
@@ -650,45 +632,11 @@ export function scanContent(file, src) {
     file: f, src, scannable, lineOf, isCode, isJsOrVue: JS_OR_VUE, isCli,
   }));
 
-  // Stub markers: only in a comment (a string literal that looks like one is data),
-  // only when the marker *begins* the comment line (a mid-sentence mention is prose),
-  // and the phrase list is built from escapes because a literal list here would be
-  // found by the rule on every self-review — the checker scanning its own pattern.
-  // Third fallback: only a *real* stub — the phrase attached to throw / Error(...) / TODO.
-  // This used to be a bare `STUB_PHRASE_RE.exec(src)` over the whole file, which walked
-  // straight past the two guards above: a doc line explaining that a leaf is "not
-  // implemented → na" was reported as a leftover stub (measured on this repo: 1 hit,
-  // 100% false positive, 0 real stubs). Prose now stays out while a thrown placeholder
-  // still fires. Phrase list built from escapes so the checker never matches its own
-  // pattern — and this comment avoids quoting the phrase next to `throw`, or the rule
-  // would flag the very line that documents it (it did, twice).
-  const STUB_FORM_RE = new RegExp(
-    '(?:throw|new\\s+Error\\s*\\(|TODO|FIXME)[^\\n]{0,60}(?:\\u672a\\u5b9e\\u73b0|\\u5f85\\u8865|\\u4e34\\u65f6\\u65b9\\u6848|not\\u0020implemented)',
-  );
-  const stubComment = isCode ? stubMarkerInComments(src, commentSpans) : null;
-  const hashTodo = isPhp ? /(?<![`'"])(?:^|\s)#[ \t]*\b(TODO|FIXME|XXX|HACK)\b/m.exec(src) : null;
-  const todo = isCode ? (stubComment || hashTodo || STUB_FORM_RE.exec(src)) : null;
-  if (todo) {
-    findings.push({
-      rule: 'ai-todo-left', severity: 'info', file: f, line: lineOf(todo.index),
-      message: `${file} 里留了 \`${todo[0]}\`。`,
-      why: 'AI 很擅长留占位实现（注释里写"稍后补校验"、或者直接 throw 一个占位异常）；这类标记过了评审就没人回头，等于把半成品合进主干。',
-      evidence: `matched: ${todo[0]}`,
-    });
-  }
+  // ── stub markers now live in scripts/rules/stub.mjs (declarative) ──────────
+  findings.push(...runRules(STUB_RULES, { file, f, src, lineOf, isCode, isPhp, commentSpans }));
 
-  // ── PHP: read-modify-write on a model attribute (race / lost update) ────────
-  if (isPhp) {
-    const rmw = /\$(\w+)->(\w+)\s*=\s*\$\1->\2\s*[+\-*/]/.exec(src);
-    if (rmw) {
-      findings.push({
-        rule: 'php-read-modify-write', severity: 'warn', file: f, line: lineOf(rmw.index),
-        message: `${f}:${lineOf(rmw.index)} 读-改-写同一字段：\`${rmw[0].replace(/\s+/g, ' ').slice(0, 50)}\``,
-        why: '并发下会丢更新（两人同时读到同一个值）；用原子 increment()/decrement()，或包在事务 + lockForUpdate() 里。',
-        evidence: `matched: ${rmw[0].replace(/\s+/g, ' ').slice(0, 60)}`,
-      });
-    }
-  }
+  // ── PHP read-modify-write now lives in scripts/rules/php.mjs (declarative) ──
+  findings.push(...runRules(PHP_RULES, { file, f, src, lineOf }));
 
   // ── Vue family now lives in scripts/rules/vue.mjs (declarative) ────────────
   findings.push(...runRules(VUE_RULES, { file, f, src, lineOf }));

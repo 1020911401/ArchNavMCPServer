@@ -1,6 +1,6 @@
 {
-  "corpusFiles": 111,
-  "findings": 31,
+  "corpusFiles": 117,
+  "findings": 34,
   "rows": [
     {
       "rule": "php-debug-left-on",
@@ -17,10 +17,31 @@
       "message": "PHP 用了松散比较 `==`（app/Http/Controllers/OrderController.php）。"
     },
     {
+      "rule": "php-read-modify-write",
+      "severity": "warn",
+      "file": "app/Service/Counter.php",
+      "line": 3,
+      "message": "app/Service/Counter.php:3 读-改-写同一字段：`$order->pay_count = $order->pay_count +`"
+    },
+    {
+      "rule": "ai-todo-left",
+      "severity": "info",
+      "file": "app/Service/HashTodo.php",
+      "line": 3,
+      "message": "app/Service/HashTodo.php 里留了 ` # TODO`。"
+    },
+    {
+      "rule": "ai-todo-left",
+      "severity": "info",
+      "file": "app/Service/Stub.php",
+      "line": 3,
+      "message": "app/Service/Stub.php 里留了 `throw new Error('未实现`。"
+    },
+    {
       "rule": "js-debug-left-on",
       "severity": "warn",
       "file": "bench/rule-golden.mjs",
-      "line": 68,
+      "line": 75,
       "message": "bench/rule-golden.mjs 残留调试输出 `console.log(`。"
     },
     {
