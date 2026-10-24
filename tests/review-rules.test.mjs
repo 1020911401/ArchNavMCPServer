@@ -986,6 +986,31 @@ test('ai-todo-left: comment stub, php hash stub and thrown placeholder fire; pro
   assert.equal(run('a.md', '// TODO: docs are not code\n').length, 0, 'non-code files are skipped');
 });
 
+test('php controller-shape rules: all three fire, validation/pagination suppress, non-controllers skipped', async () => {
+  const { PHP_RULES, runRules } = await import('../scripts/rules/index.mjs');
+  const run = (file, src) => runRules(PHP_RULES, {
+    file, f: file, src, lineOf: (i) => src.slice(0, i).split(/\r?\n/).length,
+    isPhp: /\.php$/i.test(file),
+    isController: /controller/i.test(file),
+    isRequestPath: /(^|\/)(Http\/Controllers|Controllers|Services|Repositories|Presenters|Validators)\//i.test(file),
+  });
+  const ctrl = 'app/Http/Controllers/BulkController.php';
+  const dirty = run(ctrl, "<?php\n$data = $request->all();\nforeach ($data as $r) {\n  User::where('id', 1)->first();\n}\nreturn User::where('a', 1)->get();\n");
+  assert.deepEqual(dirty.map((x) => x.rule).sort(),
+    ['php-n-plus-one', 'php-unbounded-query', 'php-unvalidated-mass-input']);
+
+  const clean = run(ctrl, "<?php\n$d = $request->validate([]);\n$q = User::where('a', 1);\n$rows = User::where('a', 1)->get();\nreturn $q->paginate(10);\n");
+  assert.deepEqual(clean, [], 'validate() and ->paginate() both suppress their rule');
+
+  // Severity is positional: a console/batch loop is an info, a request-path loop a warn.
+  const loop = "<?php\nforeach ($rows as $r) {\n  User::where('id', $r['id'])->first();\n}\n";
+  assert.equal(run('app/Http/Controllers/BulkController.php', loop)[0].severity, 'warn');
+  assert.equal(run('app/Console/Batch.php', loop)[0].severity, 'info');
+
+  // `isController` is a filename test, so a non-controller file is never the "unbounded query" case.
+  assert.deepEqual(run('app/Service/Report.php', "<?php\nreturn User::where('a', 1)->get();\n"), []);
+});
+
 test('arity: defaults survive the analyzer signature, and a local helper is not a global callee', () => {
   const defaults = [{ name: 'finding', file: 'tests/t.test.mjs', signature: 'finding = (rule, severity, file, line = …) =>', exported: false, line_start: 1 }];
   assert.deepEqual(arityFindings('tests/t.test.mjs', "finding('a', 'b', 'c', 4);", { symbols: defaults }), [],

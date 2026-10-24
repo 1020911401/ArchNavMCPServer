@@ -269,11 +269,8 @@ const VALIDATION_RULE_VALUE_RE = /^(required|nullable|sometimes|bail|string|nume
 // Placeholders in shipped example configs are not credentials.
 const PLACEHOLDER_VALUE_RE = /^(your|my|change|example|dummy|test|xxx|xxxx|placeholder|todo|fake|sk_test|\.\.\.)/i;
 
-const QUERY_IN_LOOP_RE = /->(where|orWhere|find|findOrFail|first|firstOrFail|get|pluck|count|value|update|save|create|insert)\s*\(/;
-const PAGINATION_RE = /->(paginate|simplePaginate|cursorPaginate)\s*\(/;
-const MASS_INPUT_RE = /->all\s*\(\s*\)/;
-// A `XxxRequest $request` type-hint IS validation — the rules live in the FormRequest class.
-const VALIDATION_PRESENT_RE = /(->validate\s*\(|extends\s+FormRequest|validate\s*\(\s*\$request|\w+Request\s+\$)/;
+// The controller-shape regexes (query-in-loop / pagination / mass input / validation
+// present) moved into scripts/rules/php.mjs, where the rules that read them live.
 
 const TAG_RE = /<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g;
 
@@ -558,45 +555,12 @@ export function scanContent(file, src) {
     }
   }
 
-  // security: unvalidated mass input in a controller
+  // ── controller-shape rules now live in scripts/rules/php.mjs (declarative) ──
+  // `isController` is a filename test, not a language test — the unbounded-query rule
+  // has always keyed off it alone, which the module documents and the golden holds.
   const isController = /controller/i.test(file);
-  if (isPhp && isController && MASS_INPUT_RE.test(src) && !VALIDATION_PRESENT_RE.test(src)) {
-    const m = MASS_INPUT_RE.exec(src);
-    findings.push({
-      rule: 'php-unvalidated-mass-input', severity: 'warn', file: f, line: lineOf(m.index),
-      message: `${file} 用了 $request->all()，但文件里没有任何 validate()/FormRequest。`,
-      why: '未校验的 all() 一旦喂给 create()/update() 就是批量赋值；即使 Model 有 $fillable，字段语义也没被约束。',
-      evidence: '$request->all() present, validate()/FormRequest absent',
-    });
-  }
-
-  // performance: query inside a loop (N+1 smell) — PHP only: the pattern itself
-  // (`foreach (…) { … ->first(`) appears verbatim inside this file's own regexes.
-  for (const m of isPhp ? src.matchAll(/foreach\s*\([^)]*\)\s*\{/g) : []) {
-    const window = src.slice(m.index, m.index + 400);
-    const q = QUERY_IN_LOOP_RE.exec(window);
-    if (!q) continue;
-    findings.push({
-      rule: 'php-n-plus-one', severity: isRequestPath ? 'warn' : 'info', file: f, line: lineOf(m.index),
-      message: `循环体内有查询调用 \`${q[0].trim()}\`，疑似 N+1。`,
-      why: '静态启发式（不判决对错）：循环里查库会随数据量线性放大；先看能不能 with() 预加载或 whereIn 批量查。请求路径上的循环降级为 info（批处理/命令行里往往可接受）。',
-      evidence: `loop@${lineOf(m.index)}, query=${q[0].trim()}, requestPath=${isRequestPath}`,
-    });
-    break; // one per file is enough to send a human looking
-  }
-
-  // performance: unbounded query in a controller
-  if (isController) {
-    const m = /(->get\s*\(\s*\)|::all\s*\(\s*\))/.exec(src);
-    if (m && !PAGINATION_RE.test(src)) {
-      findings.push({
-        rule: 'php-unbounded-query', severity: 'info', file: f, line: lineOf(m.index),
-        message: `${file} 有无上限的取数（${m[0].trim()}）且全文件没有 paginate()。`,
-        why: '无分页的全量取数随数据增长变慢并吃内存；列表接口应有分页。（本 fixture 里 8 个控制器有 paginate，可作为对照写法）',
-        evidence: `${m[0].trim()} present, paginate() absent`,
-      });
-    }
-  }
+  const phpCtx = { file: f, f, src, lineOf, isPhp, isController, isRequestPath };
+  findings.push(...runRules(PHP_RULES, phpCtx));
 
   // front-end: v-for without :key
   if (/\.vue$/i.test(file)) {
@@ -634,9 +598,6 @@ export function scanContent(file, src) {
 
   // ── stub markers now live in scripts/rules/stub.mjs (declarative) ──────────
   findings.push(...runRules(STUB_RULES, { file, f, src, lineOf, isCode, isPhp, commentSpans }));
-
-  // ── PHP read-modify-write now lives in scripts/rules/php.mjs (declarative) ──
-  findings.push(...runRules(PHP_RULES, { file, f, src, lineOf }));
 
   // ── Vue family now lives in scripts/rules/vue.mjs (declarative) ────────────
   findings.push(...runRules(VUE_RULES, { file, f, src, lineOf }));

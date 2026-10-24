@@ -1,7 +1,35 @@
 {
-  "corpusFiles": 117,
-  "findings": 34,
+  "corpusFiles": 120,
+  "findings": 38,
   "rows": [
+    {
+      "rule": "php-n-plus-one",
+      "severity": "info",
+      "file": "app/Console/Batch.php",
+      "line": 3,
+      "message": "循环体内有查询调用 `->first(`，疑似 N+1。"
+    },
+    {
+      "rule": "php-n-plus-one",
+      "severity": "warn",
+      "file": "app/Http/Controllers/BulkController.php",
+      "line": 9,
+      "message": "循环体内有查询调用 `->first(`，疑似 N+1。"
+    },
+    {
+      "rule": "php-unbounded-query",
+      "severity": "info",
+      "file": "app/Http/Controllers/BulkController.php",
+      "line": 12,
+      "message": "app/Http/Controllers/BulkController.php 有无上限的取数（->get()）且全文件没有 paginate()。"
+    },
+    {
+      "rule": "php-unvalidated-mass-input",
+      "severity": "warn",
+      "file": "app/Http/Controllers/BulkController.php",
+      "line": 8,
+      "message": "app/Http/Controllers/BulkController.php 用了 $request->all()，但文件里没有任何 validate()/FormRequest。"
+    },
     {
       "rule": "php-debug-left-on",
       "severity": "warn",
@@ -41,7 +69,7 @@
       "rule": "js-debug-left-on",
       "severity": "warn",
       "file": "bench/rule-golden.mjs",
-      "line": 75,
+      "line": 85,
       "message": "bench/rule-golden.mjs 残留调试输出 `console.log(`。"
     },
     {

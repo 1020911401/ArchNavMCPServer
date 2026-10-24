@@ -34,6 +34,16 @@ const EXTRA = [
   ['app/Service/Counter.php', "<?php\nfunction bump($order) {\n  $order->pay_count = $order->pay_count + 1;\n  $ok = $order->total - 1;\n  return $ok;\n}\n"],
   ['app/Service/HashTodo.php', "<?php\nfunction todo() {\n  # TODO: switch to atomic increment\n  return 1;\n}\n"],
   ['app/Service/Stub.php', "<?php\nfunction stub() {\n  throw new Error('\u672a\u5b9e\u73b0');\n}\n"],
+  // The three PHP controller-shape rules had zero coverage. One file trips all three
+  // (mass input + loop query + unbounded get), one proves the N+1 severity downgrade
+  // outside a request path, and one is the negative control (validate + paginate).
+  ['app/Http/Controllers/BulkController.php', "<?php\nnamespace App\\Http\\Controllers;\n\nclass BulkController extends Controller\n{\n    public function store()\n    {\n        $data = $request->all();\n        foreach ($data as $row) {\n            $u = User::where('id', $row['id'])->first();\n        }\n        return User::where('active', 1)->get();\n    }\n}\n"],
+  ['app/Console/Batch.php', "<?php\nfunction batch($rows) {\n    foreach ($rows as $row) {\n        $u = User::where('id', $row['id'])->first();\n    }\n}\n"],
+  // The negative control has to use the shapes the rules actually recognize: the
+  // pagination guard matches `->paginate(`, and the loop query needs `->first(`.
+  // (`User::paginate(10)` slips past the guard — a real blind spot, tracked separately
+  // so this commit stays behaviour-preserving.)
+  ['app/Http/Controllers/CleanController.php', "<?php\nnamespace App\\Http\\Controllers;\n\nclass CleanController extends Controller\n{\n    public function index(Request $request)\n    {\n        $data = $request->validate(['page' => 'integer']);\n        $query = User::where('active', 1);\n        $rows = User::where('active', 1)->get();\n        return $query->paginate(10);\n    }\n}\n"],
   ['docs/a.md', "# Title\nTODO: fill in\n"],
   ['conf/a.yaml', "key: value\nnot implemented: true\n"],
 ];
