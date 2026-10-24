@@ -23,6 +23,7 @@ const EXPECTED_TOOLS = [
   'archnav_impact',
   'archnav_locate',
   'archnav_read',
+  'archnav_review',
   'archnav_status',
   'archnav_trace',
 ];
@@ -165,6 +166,7 @@ const EXPECTED_RESOURCES = [
   'archnav://skill/self-review',
   'archnav://skill/comparison',
   'archnav://skill/kanban-review',
+  'archnav://skill/anchor-review',
   'archnav://skill/playbook-full',
 ];
 

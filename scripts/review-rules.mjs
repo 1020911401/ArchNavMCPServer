@@ -2159,6 +2159,8 @@ function parseArgs(argv) {
     checklist: false, duplication: false, impact: false, deep: false, compact: true,
     dupKinds: [], dupMinLines: 10, dupMinTokens: 70, dupMaxNewClones: null, markdown: null,
     waivers: null, harnessOut: null,
+    // ANCHOR layer: null = 交给 .archnav/review.config.json 决定，缺省即 off
+    anchor: null, anchorConstraints: null, anchorTrajectory: null, anchorMaxFiles: null, anchorMaxLines: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -2197,6 +2199,13 @@ function parseArgs(argv) {
     else if (a === '--pairing-floor') out.pairingFloor = Number(argv[++i]);
     else if (a === '--waivers') out.waivers = argv[++i];
     else if (a === '--harness-out') out.harnessOut = argv[++i];
+    // ── ANCHOR 层开关（可切换核心）：--anchor off|A|B|C|full ─────────────────
+    else if (a === '--anchor') out.anchor = String(argv[++i] || '').toLowerCase();
+    else if (a === '--anchor-constraints') out.anchorConstraints = argv[++i];
+    else if (a === '--anchor-trajectory') out.anchorTrajectory = argv[++i];
+    else if (a === '--anchor-max-files') out.anchorMaxFiles = Number(argv[++i]);
+    else if (a === '--anchor-max-lines') out.anchorMaxLines = Number(argv[++i]);
+    else if (a === '--anchor-init') out.anchorInit = true;
     else if (a.startsWith('--')) { console.error(`unknown option ${a}`); process.exit(2); }
     else out.dir = a;
   }
@@ -2209,6 +2218,31 @@ function parseArgs(argv) {
 async function main() {
   const opts = applyMode(parseArgs(process.argv.slice(2)));
   const dir = path.resolve(opts.dir);
+  // `--anchor-init`: 把两层配置的骨架写出来，人只需要改内容。不覆盖已有文件。
+  if (opts.anchorInit) {
+    const { configTemplate, constraintTemplate } = await import('./anchor-review.mjs');
+    const cfgDir = path.join(dir, '.archnav');
+    fs.mkdirSync(cfgDir, { recursive: true });
+    const cfgPath = path.join(cfgDir, 'review.config.json');
+    const conPath = path.join(cfgDir, 'constraints.json');
+    let wrote = 0;
+    if (!fs.existsSync(cfgPath)) { fs.writeFileSync(cfgPath, JSON.stringify(configTemplate(), null, 2) + '\n'); wrote++; console.error(`✓ ${cfgPath}`); }
+    else console.error(`· 已存在，跳过：${cfgPath}`);
+    if (!fs.existsSync(conPath)) { fs.writeFileSync(conPath, JSON.stringify(constraintTemplate(), null, 2) + '\n'); wrote++; console.error(`✓ ${conPath}`); }
+    else console.error(`· 已存在，跳过：${conPath}`);
+    const trajPath = path.join(cfgDir, 'trajectory.jsonl');
+    if (!fs.existsSync(trajPath)) {
+      fs.writeFileSync(trajPath, [
+        JSON.stringify({ type: 'tool_call', tool: 'read_file', args: { path: '<被改的文件>' } }),
+        JSON.stringify({ type: 'tool_call', tool: 'bash', args: { command: '<复现命令>' } }),
+        JSON.stringify({ type: 'tool_result', ok: false, text: '<失败输出>' }),
+      ].join('\n') + '\n');
+      wrote++;
+      console.error(`✓ ${trajPath}（示例事件，替换成真实轨迹）`);
+    }
+    console.error(`ANCHOR 层已初始化 ${wrote} 个文件。level 默认 A——改 review.config.json 的 level 切到 B/C。`);
+    return;
+  }
   const changes = await archNav.changes(dir, { scope: opts.scope, base: opts.base });
   if (changes.error) { console.error(changes.error); process.exit(2); }
   const index = getIndex(dir);
@@ -2448,11 +2482,46 @@ async function main() {
       findings: findings.length,
     };
   }
+  // ── ANCHOR 层：A(diff 规则) / B(任务约束+ACR/CCR/FCCR) / C(执行轨迹) ────────
+  // 默认 off；开关来自 .archnav/review.config.json 或 --anchor。放在汇总之前，
+  // 这样它的 findings / rows / 门禁和 61 条规则走同一条出口。
+  let anchorResult = null;
+  try {
+    const { loadConfig, runAnchorReview } = await import('./anchor-review.mjs');
+    const cfg = loadConfig(dir);
+    anchorResult = await runAnchorReview({ dir, changes, meta, opts, config: cfg.config });
+  } catch (e) {
+    // 配置写坏了不能静默当"没开"：那等于把审核关掉还不告诉人
+    console.error(`ANCHOR 层未运行：${e.message}`);
+  }
+  if (anchorResult) {
+    findings.push(...anchorResult.findings);
+    checklist.rows.push(...anchorResult.checklistRows);
+    checklist.summary = {
+      total: checklist.rows.length,
+      hit: checklist.rows.filter((r) => r.status === 'hit').length,
+      pass: checklist.rows.filter((r) => r.status === 'pass').length,
+      na: checklist.rows.filter((r) => r.status === 'na').length,
+      findings: findings.length,
+    };
+  }
+
   findings.sort((a, b) => {
     const sev = { error: 0, warn: 1, info: 2 };
     return (sev[a.severity] - sev[b.severity]) || String(a.file).localeCompare(String(b.file)) || (a.line ?? 0) - (b.line ?? 0);
   });
   const harness = buildHarnessManifest({ opts, changes, dir, flags: opts.flags || [] });
+  if (anchorResult) {
+    harness.anchor = {
+      level: anchorResult.level,
+      coveragePct: anchorResult.coverage.atoms.pct,
+      leavesReachable: anchorResult.coverage.leaves.reachable,
+      metrics: anchorResult.metrics,
+      gate: anchorResult.gate,
+      constraintsFile: anchorResult.config.constraintsFile,
+      trajectoryFile: anchorResult.config.trajectoryFile,
+    };
+  }
   if (opts.harnessOut) {
     const hp = path.resolve(opts.harnessOut);
     fs.writeFileSync(hp, JSON.stringify(harness, null, 2));
@@ -2484,6 +2553,13 @@ async function main() {
         tier: opts.tier,
         harness: { preset: harness.preset, tier: harness.tier, ruleset: harness.rules.ruleset },
         summary: { ...checklist.summary, duplication: dupResult?.summary ?? null, risk: impactResult?.risk?.level ?? null, waived: waiverResult.waived.length },
+        anchor: anchorResult ? {
+          level: anchorResult.level,
+          coveragePct: anchorResult.coverage.atoms.pct,
+          metrics: anchorResult.metrics,
+          gate: anchorResult.gate,
+          trajectory: anchorResult.trajectory?.stats ?? null,
+        } : null,
         findings: findings.map((f) => ({ rule: f.rule, severity: f.severity, file: f.file, line: f.line })),
       }));
     } else {
@@ -2492,6 +2568,20 @@ async function main() {
         harness,
         checklist: { summary: checklist.summary, rows: checklist.rows },
         duplication: dupResult ? { summary: dupResult.summary } : null,
+        anchor: anchorResult ? {
+          level: anchorResult.level,
+          coverage: anchorResult.coverage,
+          metrics: anchorResult.metrics,
+          gate: anchorResult.gate,
+          constraints: anchorResult.constraints ? {
+            task: anchorResult.constraints.task,
+            file: anchorResult.constraints.file,
+            atomics: anchorResult.constraints.atomics,
+            relations: anchorResult.constraints.relations,
+          } : null,
+          trajectory: anchorResult.trajectory ? { file: anchorResult.trajectory.file, stats: anchorResult.trajectory.stats, rows: anchorResult.trajectory.rows } : null,
+          llm: anchorResult.llm,
+        } : null,
         findings,
         waived: waiverResult.waived,
       }, null, 2));
@@ -2499,6 +2589,11 @@ async function main() {
   } else if (!opts.sarif || opts.sarif !== '-') {
     if (opts.checklist) console.log(renderChecklist(checklist));
     console.log(renderFindings(findings, { scope: changes.scope, via: changes.via }));
+    if (anchorResult) {
+      const { renderAnchorReport } = await import('./anchor-review.mjs');
+      console.log('');
+      console.log(renderAnchorReport(anchorResult));
+    }
     if (!opts.checklist) console.log('   （--no-checklist：只显示命中项，未展示检查过的条目）');
     if (waiverResult.waived.length) {
       console.log(`\n➖ 已豁免 ${waiverResult.waived.length} 条（--waivers ${waiverResult.source}）—— 每条都带理由，查得到：`);
@@ -2512,6 +2607,11 @@ async function main() {
   }
   if (opts.gate) {
     if (findings.some((f) => f.severity === 'error')) process.exit(1);
+    // ANCHOR 层自带门禁：error 级命中，或 ACR/FCCR 低于 failOn 阈值
+    if (anchorResult?.gate?.fail) {
+      console.error(`ANCHOR(level=${anchorResult.level}) gate failed: ${anchorResult.gate.reasons.slice(0, 5).join('；')}`);
+      process.exit(1);
+    }
     if (opts.dupMaxNewClones !== null && dupResult && (dupResult.summary.new_clones || 0) > opts.dupMaxNewClones) process.exit(1);
     const order = { LOW: 0, MEDIUM: 1, HIGH: 2 };
     if (opts.impactMaxRisk && impactResult && order[impactResult.risk.level] >= (order[opts.impactMaxRisk] ?? 2)) {

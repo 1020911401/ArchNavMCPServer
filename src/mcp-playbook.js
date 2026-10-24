@@ -27,6 +27,7 @@ const RESOURCE_FILES = [
   { uri: 'archnav://skill/self-review', file: 'references/self-review.md', name: 'self-review', title: 'False-positive classes and noise control' },
   { uri: 'archnav://skill/comparison', file: 'references/comparison.md', name: 'comparison', title: 'Three-engine benchmark (evidence, not a dependency)' },
   { uri: 'archnav://skill/kanban-review', file: 'references/kanban-review.md', name: 'kanban-review', title: 'Per-item confirmation and waiver flow' },
+  { uri: 'archnav://skill/anchor-review', file: 'references/anchor-review.md', name: 'anchor-review', title: 'ANCHOR review layer (levels A/B/C, constraints, ACR/CCR/FCCR, trajectory)' },
   { uri: 'archnav://skill/playbook-full', file: 'references/playbook-full.md', name: 'playbook-full', title: 'Full playbook (CLI, changes pipeline, harness probe, history)' },
 ];
 

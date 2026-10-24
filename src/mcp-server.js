@@ -252,6 +252,23 @@ const TOOLS = [
       required: ['name'],
     },
   },
+  {
+    name: 'archnav_review',
+    description: '[ArchNav] ANCHOR review layer, switchable by level: A = diff rules, B = + task constraints (ACR/CCR/IPR/FCCR, AND/THEN/PRIORITY), C = + trajectory judging (tool protocol, order, reporting), full = + LLM judge. Config: .archnav/review.config.json.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectDir: { type: 'string', description: 'Project root' },
+        level: { type: 'string', enum: ['off', 'A', 'B', 'C', 'full'], description: 'Override the config file level' },
+        scope: { type: 'string', enum: ['unstaged', 'staged', 'all', 'compare'], description: 'Which diff to judge' },
+        base: { type: 'string', description: 'Base ref for scope=compare' },
+        constraints: { type: 'string', description: 'Path to a constraints JSON (level B+). Defaults to .archnav/constraints.json from the config' },
+        trajectory: { type: 'string', description: 'Path to a JSONL trajectory (level C+)' },
+        maxFiles: { type: 'number', description: 'Tier-A file budget' },
+        maxLines: { type: 'number', description: 'Tier-A line budget' },
+      },
+    },
+  },
 ];
 
 // Folded GitNexus proxy operations (formerly 13 standalone tools).
@@ -480,6 +497,27 @@ async function handleToolCall(name, args) {
       return mkText(result.stale
         ? `⚠️ STALE (${result.changedFiles} changed)\nHEAD: ${result.currentHead?.substring(0, 8)}\nConfidence: ${(result.overallConfidence * 100).toFixed(0)}%`
         : '✅ Fresh');
+    }
+
+    case 'archnav_review': {
+      const { runAnchorReview, renderAnchorReport } = await import('../scripts/anchor-review.mjs');
+      const level = args.level || null;
+      const changes = await archNav.changes(dir, { scope: args.scope || 'unstaged', base: args.base || null });
+      const result = await runAnchorReview({
+        dir, changes, opts: {
+          anchor: level,
+          anchorConstraints: args.constraints || null,
+          anchorTrajectory: args.trajectory || null,
+          anchorMaxFiles: args.maxFiles ?? null,
+          anchorMaxLines: args.maxLines ?? null,
+          scope: args.scope || 'unstaged',
+          base: args.base || null,
+        },
+      });
+      if (!result) {
+        return mkText('ANCHOR 层未运行（level=off）。传 level=A|B|C|full，或在 .archnav/review.config.json 里设 { "level": "A" }。');
+      }
+      return mkText(renderAnchorReport(result));
     }
 
     case 'archnav_analyze': {
