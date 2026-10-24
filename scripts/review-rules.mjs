@@ -184,7 +184,11 @@ const SEC_PATTERNS = [
     rule: 'php-raw-sql-interpolation', severity: 'error',
     // Only double-quoted interpolation or concatenation — `'name = $q'` in single
     // quotes is a literal in PHP, so flagging it would be a false positive.
-    re: /(?:whereRaw|orderByRaw|selectRaw|havingRaw|DB::raw)\s*\(\s*(?:"[^"]*\$[^"]*"|'[^']*'\s*\.\s*\$)/,
+    // Covered shapes: interpolation inside either quote style, and concatenation of
+    // either quote style. `DB::select/statement/unprepared` join `whereRaw`/`DB::raw`
+    // because they take a raw string just the same — a real repo interpolated a table
+    // name into `DB::select("PRAGMA table_info(\`{$t}\`)")` and the narrower rule missed it.
+    re: /(?:whereRaw|orderByRaw|selectRaw|havingRaw|DB::(?:raw|select|statement|unprepared|insert|update|delete))\s*\(\s*(?:"[^"]*\$[^"]*"|[^'"]*(['"])[^'"]*\1\s*\.\s*\$)/,
     why: '原始 SQL 里直接插值/拼接变量就是 SQL 注入。改用绑定参数（whereRaw($sql, [$x])）或查询构造器。',
   },
   {

@@ -1,6 +1,6 @@
 {
-  "corpusFiles": 121,
-  "findings": 37,
+  "corpusFiles": 124,
+  "findings": 40,
   "rows": [
     {
       "rule": "php-n-plus-one",
@@ -45,6 +45,13 @@
       "message": "PHP 用了松散比较 `==`（app/Http/Controllers/OrderController.php）。"
     },
     {
+      "rule": "php-raw-sql-interpolation",
+      "severity": "error",
+      "file": "app/Service.php",
+      "line": 2,
+      "message": "app/Service.php 命中 raw-sql-interpolation：`DB::select(\"select * from u where id = {`"
+    },
+    {
       "rule": "php-read-modify-write",
       "severity": "warn",
       "file": "app/Service/Counter.php",
@@ -57,6 +64,20 @@
       "file": "app/Service/HashTodo.php",
       "line": 3,
       "message": "app/Service/HashTodo.php 里留了 ` # TODO`。"
+    },
+    {
+      "rule": "php-n-plus-one",
+      "severity": "info",
+      "file": "app/Service/ReportService.php",
+      "line": 4,
+      "message": "循环体内有查询调用 `::where(`，疑似 N+1。"
+    },
+    {
+      "rule": "php-raw-sql-interpolation",
+      "severity": "error",
+      "file": "app/Service/SqlService.php",
+      "line": 3,
+      "message": "app/Service/SqlService.php 命中 raw-sql-interpolation：`DB::select(\"PRAGMA table_info(`{$name}`)`"
     },
     {
       "rule": "ai-todo-left",

@@ -941,6 +941,35 @@ test('ai-todo-left reports a real stub but not prose that merely says "not imple
     .filter((x) => x.rule === 'ai-todo-left').length, 1, 'a thrown placeholder is still a stub');
 });
 
+test('php-raw-sql-interpolation: DB::select interpolation and either-quote concat fire, bound params do not', () => {
+  const run = (src) => scanContent('app/S.php', src).filter((x) => x.rule === 'php-raw-sql-interpolation');
+  assert.equal(run('<?php\nDB::select("PRAGMA table_info(`{$t}`)");\n').length, 1, 'interpolated identifier');
+  assert.equal(run('<?php\nDB::select("select * from t where n = " . $n);\n').length, 1,
+    'concatenation needs no interpolation *inside* the literal');
+  assert.equal(run("<?php\nDB::select('select * from t where id = ?', [$id]);\n").length, 0, 'bound parameters are safe');
+  assert.equal(run("<?php\nDB::select('select * from t where n = $n');\n").length, 0,
+    'single quotes are literal in PHP, so this is not injection');
+  assert.equal(run('<?php\nwhereRaw($sql, [$id]);\n').length, 0, 'a variable SQL string is not interpolation');
+});
+
+test('php-n-plus-one: counted loops count, and ->get($key) lookups are not queries', async () => {
+  const { PHP_RULES, runRules } = await import('../scripts/rules/index.mjs');
+  const run = (src, file = 'app/Http/Controllers/ReportController.php') => runRules(PHP_RULES, {
+    file, f: file, src, lineOf: (i) => src.slice(0, i).split(/\r?\n/).length,
+    isPhp: /\.php$/i.test(file), isController: /controller/i.test(file),
+    isRequestPath: /(^|\/)(Http\/Controllers|Controllers|Services|Repositories|Presenters|Validators)\//i.test(file),
+  }).filter((x) => x.rule === 'php-n-plus-one');
+
+  const forLoop = "<?php\nfor ($i = 0; $i < 30; $i++) {\n  $n = Order::where('day', $i)->count();\n}\n";
+  assert.equal(run(forLoop).length, 1, 'a counted loop doing one query per iteration is the expensive shape');
+  assert.equal(run("<?php\nwhile ($i--) {\n  $rows = DB::table('t')->get();\n}\n").length, 1, 'while loops too');
+
+  const lookups = "<?php\nforeach ($rows as $row) {\n  $a = $cache->get($row->id);\n  $b = $request->get('flag');\n}\n";
+  assert.deepEqual(run(lookups), [], 'Collection/Request get() takes an argument and is not a query');
+  assert.equal(run("<?php\nforeach ($rows as $r) {\n  $x = User::where('id', $r->id)->get();\n}\n").length, 1,
+    'Eloquent ->get() (no argument) still counts');
+});
+
 test('vue-vfor-missing-key: fires from the module, a key on the next line counts, non-vue skipped', async () => {
   const { VUE_RULES, runRules } = await import('../scripts/rules/index.mjs');
   const run = (file, src) => runRules(VUE_RULES, { file, f: file, src, lineOf: (i) => src.slice(0, i).split(/\r?\n/).length })

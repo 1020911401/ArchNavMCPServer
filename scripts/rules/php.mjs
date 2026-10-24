@@ -20,7 +20,12 @@ const finding = ({ rule, severity, file, line, message, why, evidence }) => ({ r
 // instance form, and keying only on `->` made the rules miss them — a loop over
 // `User::find()` was silently clean, and `User::paginate(10)` was not recognized as
 // pagination at all.
-const QUERY_IN_LOOP_RE = /(?:::|->)(where|orWhere|find|findOrFail|first|firstOrFail|get|pluck|count|value|update|save|create|insert)\s*\(/;
+//
+// `get` is the one method with two meanings: Eloquent's `->get()` (a query, no argument)
+// and Request/Collection's `->get($key)` (an in-memory lookup). Matching bare `get(`
+// reported `$cache->get($row->id)` and `$request->get('flag')` as N+1 — measured on a
+// 962-file Laravel repo: 3 of 70 reported files were this false positive.
+const QUERY_IN_LOOP_RE = /(?:::|->)(where|orWhere|find|findOrFail|first|firstOrFail|pluck|count|value|update|save|create|insert)\s*\(|(?:::|->)get\s*\(\s*\)/;
 const PAGINATION_RE = /(?:::|->)(paginate|simplePaginate|cursorPaginate)\s*\(/;
 const MASS_INPUT_RE = /->all\s*\(\s*\)/;
 const VALIDATION_PRESENT_RE = /(->validate\s*\(|extends\s+FormRequest|validate\s*\(\s*\$request|\w+Request\s+\$)/;
@@ -60,10 +65,13 @@ export const PHP_RULES = [
     // (`foreach (…) { … ->first(`) appears verbatim inside this file's own regexes.
     // Severity depends on where the file sits: a loop on the request path is a warn,
     // a batch/console loop is only an info (there the cost is usually accepted).
+    // Counted loops are included because the expensive shape in practice is not
+    // `foreach` — it is `for ($i = 0; $i < 30; $i++) { … ->count() }` (a dashboard
+    // doing one query per day, 60 queries per request on a real repo).
     id: 'php-n-plus-one', family: 'php', severity: 'warn', title: '循环里查库（N+1）',
     run: ({ f, src, lineOf, isPhp, isRequestPath }) => {
       if (!isPhp) return [];
-      for (const m of src.matchAll(/foreach\s*\([^)]*\)\s*\{/g)) {
+      for (const m of src.matchAll(/\b(?:foreach|for|while)\s*\([^)]*\)\s*\{/g)) {
         const window = src.slice(m.index, m.index + 400);
         const q = QUERY_IN_LOOP_RE.exec(window);
         if (!q) continue;

@@ -46,6 +46,13 @@ const EXTRA = [
   // Pagination in its *static* form: `User::paginate(10)` is pagination just as much as
   // `$query->paginate(10)`, so a file that has a `->get()` next to it is not "unbounded".
   ['app/Http/Controllers/StaticPaginateController.php', "<?php\nnamespace App\\Http\\Controllers;\n\nclass StaticPaginateController extends Controller\n{\n    public function index()\n    {\n        $rows = User::where('active', 1)->get();\n        return User::paginate(10);\n    }\n}\n"],
+  // Raw SQL: one interpolated identifier (fires), one bound parameter (must not), one
+  // string-concatenated value (fires). The middle case is the reason the rule exists.
+  ['app/Service/SqlService.php', "<?php\nfunction a($name) {\n    return DB::select(\"PRAGMA table_info(`{$name}`)\");\n}\nfunction b($name) {\n    return DB::select('select * from t where id = ?', [$name]);\n}\nfunction c($name) {\n    return DB::select(\"select * from t where n = \" . $name);\n}\n"],
+  // A counted loop that queries once per iteration (real N+1), next to two lookups that
+  // are *not* queries: a keyed collection and a request parameter.
+  ['app/Service/ReportService.php', "<?php\nfunction trend($days) {\n    $out = [];\n    for ($i = 0; $i < $days; $i++) {\n        $out[] = Order::where('day', $i)->count();\n    }\n    return $out;\n}\n"],
+  ['app/Service/LookupService.php', "<?php\nfunction map($rows, $cache) {\n    $out = [];\n    foreach ($rows as $row) {\n        $out[] = $cache->get($row->id);\n        $flag = $request->get('flag');\n    }\n    return $out;\n}\n"],
   ['docs/a.md', "# Title\nTODO: fill in\n"],
   ['conf/a.yaml', "key: value\nnot implemented: true\n"],
 ];
