@@ -10,6 +10,7 @@
  * Run: node --test tests/impact.test.mjs
  */
 import { test } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +40,7 @@ function assertEvidence(rel, where) {
 
 // ── (a) direct impact comes from real call sites ────────────────────────────
 
-test('impact(departments) direct impact covers the 6 real call sites', async () => {
+testWithFixtures('impact(departments) direct impact covers the 6 real call sites', async () => {
   const r = await archNav.impact('departments', PHP);
   assert.equal(r.type, 'impact');
   assert.notEqual(r.ambiguous, true);
@@ -66,7 +67,7 @@ test('impact(departments) direct impact covers the 6 real call sites', async () 
 
 // ── (b) depth=2 indirect impact, reached through a caller, with `via` ───────
 
-test('impact(departments) reports depth=2 indirect relations, each with a via', async () => {
+testWithFixtures('impact(departments) reports depth=2 indirect relations, each with a via', async () => {
   const r = await archNav.impact('departments', PHP);
   const ind = r.indirect_relations ?? r.indirect_impact;
   assert.ok(Array.isArray(ind), 'indirect_relations must be an array');
@@ -89,7 +90,7 @@ test('impact(departments) reports depth=2 indirect relations, each with a via', 
 
 // ── (c) no import-basename heuristic in the impact result ───────────────────
 
-test('impact(departments) emits only graph-evidenced relations (no import-heuristic)', async () => {
+testWithFixtures('impact(departments) emits only graph-evidenced relations (no import-heuristic)', async () => {
   const r = await archNav.impact('departments', PHP);
   const rels = allRelations(r);
   assert.ok(rels.length > 0, 'impact must not be empty');
@@ -105,7 +106,7 @@ test('impact(departments) emits only graph-evidenced relations (no import-heuris
 
 // ── (d) the known false positive is gone ────────────────────────────────────
 
-test('impact(orderTake, {file: api/order.js}) drops the import-only mixin false positive', async () => {
+testWithFixtures('impact(orderTake, {file: api/order.js}) drops the import-only mixin false positive', async () => {
   const r = await archNav.impact('orderTake', VUE, { file: 'api/order.js' });
   assert.notEqual(r.ambiguous, true);
   assert.equal(posix(r.file), 'api/order.js');
@@ -126,7 +127,7 @@ test('impact(orderTake, {file: api/order.js}) drops the import-only mixin false 
 
 // ── (e) ambiguity is preserved ──────────────────────────────────────────────
 
-test('impact(orderTake) without --file stays ambiguous with candidates', async () => {
+testWithFixtures('impact(orderTake) without --file stays ambiguous with candidates', async () => {
   const r = await archNav.impact('orderTake', VUE);
   assert.equal(r.ambiguous, true);
   assert.ok(Array.isArray(r.candidates));
@@ -138,7 +139,7 @@ test('impact(orderTake) without --file stays ambiguous with candidates', async (
 
 // ── file:-prefixed call sites (Blade / .vue) are files, not symbols ─────────
 
-test('impact(showSelectOptions, {file: DepartmentPresenter}) reports Blade call sites as files', async () => {
+testWithFixtures('impact(showSelectOptions, {file: DepartmentPresenter}) reports Blade call sites as files', async () => {
   const r = await archNav.impact('showSelectOptions', PHP, { file: 'app/Presenters/DepartmentPresenter.php' });
   assert.notEqual(r.ambiguous, true);
 
@@ -153,7 +154,7 @@ test('impact(showSelectOptions, {file: DepartmentPresenter}) reports Blade call 
 
 // ── backward compatibility ─────────────────────────────────────────────────
 
-test('impact() keeps direct_impact/indirect_impact field names', async () => {
+testWithFixtures('impact() keeps direct_impact/indirect_impact field names', async () => {
   const r = await archNav.impact('departments', PHP);
   assert.ok(Array.isArray(r.direct_impact));
   assert.ok(Array.isArray(r.indirect_impact), 'indirect_impact is kept as the legacy alias');

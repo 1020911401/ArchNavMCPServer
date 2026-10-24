@@ -5,6 +5,7 @@
  * from the repository root, e.g. `node --test tests/resolver/`.
  */
 import { test } from 'node:test';
+import { testWithFixtures } from '../helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +19,7 @@ import {
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-test('scanTemplateCalls: showSelectOptions → >=40 sites across >=19 files', () => {
+testWithFixtures('scanTemplateCalls: showSelectOptions → >=40 sites across >=19 files', () => {
   const calls = scanTemplateCalls('bench/php-app');
   const sel = calls.filter(c => c.callee === 'showSelectOptions');
   assert.ok(sel.length >= 40, `call sites >= 40, got ${sel.length}`);
@@ -28,12 +29,12 @@ test('scanTemplateCalls: showSelectOptions → >=40 sites across >=19 files', ()
   assert.ok(sel.every(c => typeof c.file === 'string' && typeof c.var === 'string' && typeof c.line === 'number'));
 });
 
-test('scanTemplateCalls: absolute repoDir behaves the same', () => {
+testWithFixtures('scanTemplateCalls: absolute repoDir behaves the same', () => {
   const calls = scanTemplateCalls(path.join(repo, 'bench', 'php-app'));
   assert.ok(calls.filter(c => c.callee === 'showSelectOptions').length >= 40);
 });
 
-test('scanCallbackCalls: orderTake@1316 is recovered as a callback call', () => {
+testWithFixtures('scanCallbackCalls: orderTake@1316 is recovered as a callback call', () => {
   const calls = scanCallbackCalls(path.join(repo, 'bench', 'vue-app'));
   const hit = calls.find(c => c.callee === 'orderTake'
     && c.file === 'pages/goods/order_details/index.vue'
@@ -43,7 +44,7 @@ test('scanCallbackCalls: orderTake@1316 is recovered as a callback call', () => 
   assert.match(String(hit.enclosing), /success/);
 });
 
-test('scanImportEdges: getUserInfo covers >=30 distinct `from` files', () => {
+testWithFixtures('scanImportEdges: getUserInfo covers >=30 distinct `from` files', () => {
   const edges = scanImportEdges(path.join(repo, 'bench', 'vue-app'));
   const g = edges.filter(e => e.symbol === 'getUserInfo');
   const froms = new Set(g.map(e => e.from));
@@ -52,7 +53,7 @@ test('scanImportEdges: getUserInfo covers >=30 distinct `from` files', () => {
   assert.ok(g.every(e => typeof e.line === 'number' && typeof e.to === 'string'));
 });
 
-test('toEdges: unified {from,to,line,type,source_kind} shape for all three kinds', () => {
+testWithFixtures('toEdges: unified {from,to,line,type,source_kind} shape for all three kinds', () => {
   const edges = toEdges(repo);
   assert.ok(edges.length > 0, 'edges produced');
   assert.ok(edges.every(e =>

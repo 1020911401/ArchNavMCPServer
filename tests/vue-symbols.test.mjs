@@ -9,6 +9,7 @@
  * Run: node --test tests/vue-symbols.test.mjs
  */
 import { test } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,7 +22,7 @@ const VUE = path.resolve(here, '..', 'bench', 'vue-app');
 const parse = (rel) => parseVueFile(path.join(VUE, rel), VUE);
 const names = (r) => r.symbols.map((s) => s.name);
 
-test('components/payment/index.vue yields its real option-API methods (goPay @121) and no noise', () => {
+testWithFixtures('components/payment/index.vue yields its real option-API methods (goPay @121) and no noise', () => {
   const r = parse('components/payment/index.vue');
   const byName = new Map(r.symbols.map((s) => [s.name, s]));
 
@@ -44,7 +45,7 @@ test('components/payment/index.vue yields its real option-API methods (goPay @12
   }
 });
 
-test('pages/goods/order_details/index.vue lists its hooks and methods with real line numbers', () => {
+testWithFixtures('pages/goods/order_details/index.vue lists its hooks and methods with real line numbers', () => {
   const r = parse('pages/goods/order_details/index.vue');
   const byName = new Map(r.symbols.map((s) => [s.name, s]));
 
@@ -66,7 +67,7 @@ test('pages/goods/order_details/index.vue lists its hooks and methods with real 
   assert.ok(!names(r).some((n) => /✖/.test(n)));
 });
 
-test('every .vue in the corpus parses without a single garbage symbol', () => {
+testWithFixtures('every .vue in the corpus parses without a single garbage symbol', () => {
   const walk = (dir, acc = []) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       if (e.name.startsWith('.') || e.name === 'node_modules') continue;

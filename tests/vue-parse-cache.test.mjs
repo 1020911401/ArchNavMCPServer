@@ -17,6 +17,7 @@
  * Run: node --test tests/vue-parse-cache.test.mjs
  */
 import { test, before, after } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -206,7 +207,7 @@ test('two repos with the same relative path never share a blocks entry', () => {
   assert.match(extractScriptBlocks(b)[0].body, /fromB/, 'repo B is untouched');
 });
 
-test('clearParseCache() really empties both caches', () => {
+testWithFixtures('clearParseCache() really empties both caches', () => {
   extractVueCalls(vue('components/payment/index.vue'));
   assert.ok(cacheSizes().ast > 0 && cacheSizes().blocks > 0);
   clearParseCache();

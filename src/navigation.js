@@ -371,34 +371,46 @@ function normSep(p) {
  * `ok:false` means git was unusable (not a repo, no git binary, bad ref) — the
  * caller then falls back to content drift.
  */
-function changedLinesFromGit(dirPath, scope = 'unstaged', baseRef = null, timeoutMs = 20000) {
-  // `core.quotepath=false` keeps non-ASCII paths verbatim: git otherwise emits
-  // them octal-escaped and quoted ("b/app/.../\345\211\257\346\234\254.php"),
-  // which never matches a symbol path — Chinese file names (副本/复制) silently
-  // fell out of every change-impact report.
+/**
+ * The single place `git diff` is invoked. Symbol ranges and ANCHOR's added-lines both
+ * come from here, so scope names, quotepath handling and the "untracked files count as
+ * changes" rule cannot drift apart between callers.
+ *
+ * `core.quotepath=false` keeps non-ASCII paths verbatim: git otherwise emits them
+ * octal-escaped and quoted ("b/app/.../\345\211\257\346\234\254.php"), which never
+ * matches a symbol path — Chinese file names (副本/复制) silently fell out of every
+ * change-impact report.
+ */
+export function gitDiffPatch(dirPath, { scope = 'unstaged', base = null, timeoutMs = 20000, spawn = spawnSync } = {}) {
   const args = ['-c', 'core.quotepath=false', 'diff', '--unified=0', '--no-color', '--no-ext-diff'];
   if (scope === 'staged') args.push('--cached');
   else if (scope === 'all') args.push('HEAD');
   else if (scope === 'compare') {
-    if (!baseRef) return { ok: false, files: new Map(), error: 'scope "compare" needs --base <ref>', scope, base: null };
-    args.push(`${baseRef}...HEAD`);
+    if (!base) return { ok: false, error: 'scope "compare" needs --base <ref>', scope, base: null };
+    args.push(`${base}...HEAD`);
   } else if (scope !== 'unstaged') {
-    return { ok: false, files: new Map(), error: `unknown scope "${scope}" (use unstaged|staged|all|compare)`, scope, base: null };
+    return { ok: false, error: `unknown scope "${scope}" (use unstaged|staged|all|compare)`, scope, base: null };
   }
 
-  const res = spawnSync('git', args, {
+  const res = spawn('git', args, {
     cwd: dirPath, encoding: 'utf8', timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
     windowsHide: true,
   });
   if (res.error || res.status !== 0) {
     const msg = res.error ? res.error.message : `${(res.stderr || '').trim().split('\n')[0]}`;
-    return { ok: false, files: new Map(), error: msg || 'git diff failed', scope, base: baseRef };
+    return { ok: false, error: msg || 'git diff failed', scope, base };
   }
+  return { ok: true, patch: String(res.stdout || ''), scope, base };
+}
+
+function changedLinesFromGit(dirPath, scope = 'unstaged', baseRef = null, timeoutMs = 20000) {
+  const diff = gitDiffPatch(dirPath, { scope, base: baseRef, timeoutMs });
+  if (!diff.ok) return { ok: false, files: new Map(), error: diff.error, scope, base: baseRef };
 
   const files = new Map();
   let current = null;
-  for (const line of String(res.stdout || '').split(/\r?\n/)) {
+  for (const line of String(diff.patch || '').split(/\r?\n/)) {
     if (line.startsWith('+++ ')) {
       const p = line.slice(4).trim();
       current = p === '/dev/null' ? null : p.replace(/^[ab]\//, '');

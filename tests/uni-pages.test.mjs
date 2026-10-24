@@ -14,6 +14,7 @@
  * Run: node --test tests/uni-pages.test.mjs
  */
 import { test } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -34,7 +35,7 @@ const byKind = (edges, kind) => edges.filter((e) => e.source_kind === kind);
 
 // ── (a) pages.json → page nodes + page → file edges ────────────────────────
 
-test('pages.json: every pages[] entry becomes a page: node pointing at its .vue', () => {
+testWithFixtures('pages.json: every pages[] entry becomes a page: node pointing at its .vue', () => {
   const { nodes, edges } = CORPUS;
   const ids = byId(nodes);
 
@@ -61,7 +62,7 @@ test('pages.json: every pages[] entry becomes a page: node pointing at its .vue'
   assert.ok(Number.isInteger(edge.line) && edge.line > 0);
 });
 
-test('subPackages: a page path is joined with its root', () => {
+testWithFixtures('subPackages: a page path is joined with its root', () => {
   const { nodes } = CORPUS;
   const ids = byId(nodes);
 
@@ -74,7 +75,7 @@ test('subPackages: a page path is joined with its root', () => {
   assert.ok(ids.has('page:pages/points_mall/integral_goods_list'));
 });
 
-test('tabBar: list[].pagePath is a declaration source too', () => {
+testWithFixtures('tabBar: list[].pagePath is a declaration source too', () => {
   const { nodes } = CORPUS;
   const ids = byId(nodes);
   const node = ids.get('page:pages/goods_cate/goods_cate');
@@ -84,7 +85,7 @@ test('tabBar: list[].pagePath is a declaration source too', () => {
 
 // ── (b) navigation edges ───────────────────────────────────────────────────
 
-test('navigation: uni.navigateTo/switchTab and <navigator url> become navigation edges', () => {
+testWithFixtures('navigation: uni.navigateTo/switchTab and <navigator url> become navigation edges', () => {
   const { edges } = CORPUS;
   const nav = byKind(edges, 'navigation');
   assert.ok(nav.length > 0, 'expected navigation edges from the uni-app corpus');
@@ -106,7 +107,7 @@ test('navigation: uni.navigateTo/switchTab and <navigator url> become navigation
 
 // ── (c) component edges ────────────────────────────────────────────────────
 
-test('component: `@/components/…` imports become component edges to the real .vue', () => {
+testWithFixtures('component: `@/components/…` imports become component edges to the real .vue', () => {
   const { edges } = CORPUS;
   const comp = byKind(edges, 'component');
   assert.ok(comp.length > 0, 'expected component edges');

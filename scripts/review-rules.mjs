@@ -2554,11 +2554,15 @@ async function main() {
     else { fs.writeFileSync(path.resolve(opts.markdown), md); console.error(`Markdown written to ${path.resolve(opts.markdown)}`); }
   }
   if (opts.github) console.log(toGithubAnnotations(findings));
+  // Machine consumers (CI gates, agents) need to tell payload generations apart: a
+  // field added here used to break parsers with no way to detect the change.
+  const REVIEW_SCHEMA_VERSION = 1;
   if (opts.json) {
     if (opts.compact) {
       // compact = what a tool (or an agent) actually needs per finding; the long
       // why/evidence text made this payload ~12 KB for a three-file diff.
       console.log(JSON.stringify({
+        schemaVersion: REVIEW_SCHEMA_VERSION,
         mode: opts.mode,
         tier: opts.tier,
         harness: { preset: harness.preset, tier: harness.tier, ruleset: harness.rules.ruleset },
@@ -2574,6 +2578,7 @@ async function main() {
       }));
     } else {
       console.log(JSON.stringify({
+        schemaVersion: REVIEW_SCHEMA_VERSION,
         scope: changes.scope, via: changes.via, backend: backendDir,
         harness,
         checklist: { summary: checklist.summary, rows: checklist.rows },

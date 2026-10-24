@@ -736,20 +736,48 @@ function findLayerForFile(filePath, architecture) {
   return null;
 }
 
+/**
+ * Index format generation. Bumped whenever the JSON shape changes. Readers accept the
+ * whole supported window (raising MIN_SUPPORTED retires an old generation), and refuse
+ * anything outside it instead of answering from a shape they don't understand.
+ * v1 = the files written before this field existed (identical shape, no stamp).
+ */
+export const INDEX_SCHEMA_VERSION = 2;
+export const INDEX_MIN_SUPPORTED = 1;
+
 export function getIndex(baseDir) {
   // Load cached index if available
   const indexPath = path.join(baseDir, '.archnav', 'index.json');
+  let parsed;
   try {
-    return JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
+    parsed = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
   } catch {
     return null;
   }
+  // An index from a *newer* build is the dangerous case (unknown fields, missing ones
+  // this build relies on) — answering from it silently is how wrong answers happen.
+  // Retiring an old generation is a one-line change to INDEX_MIN_SUPPORTED.
+  const version = parsed.schemaVersion ?? 1;
+  if (version < INDEX_MIN_SUPPORTED || version > INDEX_SCHEMA_VERSION) {
+    process.stderr.write(
+      `archnav: index schema v${version} is not supported (this build reads v${INDEX_MIN_SUPPORTED}..v${INDEX_SCHEMA_VERSION}) — rebuild it with "archnav analyze ."\n`,
+    );
+    return null;
+  }
+  return parsed;
 }
 
 export function saveIndex(baseDir, data) {
   const indexDir = path.join(baseDir, '.archnav');
   fs.mkdirSync(indexDir, { recursive: true });
-  fs.writeFileSync(path.join(indexDir, 'index.json'), JSON.stringify(data, null, 2));
+  const target = path.join(indexDir, 'index.json');
+  const tmp = `${target}.${process.pid}.tmp`;
+  data.schemaVersion = INDEX_SCHEMA_VERSION;
+  // Atomic replace: this used to be a direct 1.8 MB writeFileSync, so a Ctrl-C, a full
+  // disk or a crash left truncated JSON behind and *every* query failed until the next
+  // analyze. rename(2) on the same filesystem publishes either the old file or the new.
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, target);
   // Save commit hash for staleness tracking
   try {
     const headContent = fs.readFileSync(path.join(baseDir, '.git', 'HEAD'), 'utf-8').trim();

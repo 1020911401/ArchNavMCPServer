@@ -4,6 +4,7 @@
  * Run: node --test tests/resolver/
  */
 import { test, before, after } from 'node:test';
+import { testWithFixtures } from '../helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,7 +21,7 @@ let dir;
 before(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vue-')); });
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-test('order_details/index.vue → orderTake@1316 nested in a `success` callback', () => {
+testWithFixtures('order_details/index.vue → orderTake@1316 nested in a `success` callback', () => {
   const calls = extractVueCalls(vue('pages/goods/order_details/index.vue'));
   const hit = calls.find(c => c.callee === 'orderTake' && c.line === 1316);
   assert.ok(hit, 'orderTake call at line 1316 was extracted');
@@ -28,7 +29,7 @@ test('order_details/index.vue → orderTake@1316 nested in a `success` callback'
   assert.equal(hit.kind, 'callback');
 });
 
-test('integral_order_details.vue → orderTake inside a callback near line 423', () => {
+testWithFixtures('integral_order_details.vue → orderTake inside a callback near line 423', () => {
   const calls = extractVueCalls(vue('pages/points_mall/integral_order_details.vue'));
   const hit = calls.find(c => c.callee === 'orderTake');
   assert.ok(hit, 'orderTake call extracted');
@@ -37,7 +38,7 @@ test('integral_order_details.vue → orderTake inside a callback near line 423',
   assert.equal(hit.kind, 'callback');
 });
 
-test('<script setup>: top-level calls are setup, nested arrows are callbacks', () => {
+testWithFixtures('<script setup>: top-level calls are setup, nested arrows are callbacks', () => {
   const f = path.join(dir, 'Setup.vue');
   fs.writeFileSync(f, [
     '<template><view/></template>',
@@ -69,7 +70,7 @@ test('<script setup>: top-level calls are setup, nested arrows are callbacks', (
   assert.equal(byName.doHelper.enclosing, 'helper');
 });
 
-test('options-API methods: direct call is a method, nested success callback is a callback', () => {
+testWithFixtures('options-API methods: direct call is a method, nested success callback is a callback', () => {
   const f = path.join(dir, 'Options.vue');
   fs.writeFileSync(f, [
     '<template><view/></template>',
@@ -116,7 +117,7 @@ const IFDEF_SFCS = [
   'pages/users/user_info/index.vue',
 ];
 
-test('#ifdef SFC: payment/index.vue recovers orderPay() with its real line number', () => {
+testWithFixtures('#ifdef SFC: payment/index.vue recovers orderPay() with its real line number', () => {
   const calls = extractVueCalls(vue('components/payment/index.vue'));
   const hit = calls.find(c => c.callee === 'orderPay');
   assert.ok(hit, 'orderPay survived the strict-parse failure');
@@ -128,7 +129,7 @@ test('#ifdef SFC: payment/index.vue recovers orderPay() with its real line numbe
   assert.match(raw[hit.line - 1], /\borderPay\s*\(/, `line ${hit.line} really calls orderPay(`);
 });
 
-test('#ifdef SFC: cashier/index.vue recovers orderPay() at the grepped line', () => {
+testWithFixtures('#ifdef SFC: cashier/index.vue recovers orderPay() at the grepped line', () => {
   const raw = fs.readFileSync(vue('pages/goods/cashier/index.vue'), 'utf-8').split('\n');
   const trueLines = raw
     .map((text, i) => (/\borderPay\s*\(/.test(text) ? i + 1 : 0))
@@ -142,7 +143,7 @@ test('#ifdef SFC: cashier/index.vue recovers orderPay() at the grepped line', ()
   assert.deepEqual(lines, trueLines, 'every orderPay( call site is found at the right line');
 });
 
-test('#ifdef SFCs: all four produce real calls, and zero comment/dummy garbage', () => {
+testWithFixtures('#ifdef SFCs: all four produce real calls, and zero comment/dummy garbage', () => {
   const GARBAGE = /^(?:✖|#|ifdef|ifndef|endif|<\/?[a-z])/i;
   let total = 0;
 
@@ -168,7 +169,7 @@ test('#ifdef SFCs: all four produce real calls, and zero comment/dummy garbage',
   assert.ok(total > 400, `the four malformed SFCs contribute real calls (got ${total})`);
 });
 
-test('#ifdef SFC: the recovered call becomes a call-graph:callback edge to api/order.js', () => {
+testWithFixtures('#ifdef SFC: the recovered call becomes a call-graph:callback edge to api/order.js', () => {
   const { edges } = buildResolvedEdges(vue('.'), [{ name: 'orderPay', file: 'api/order.js' }]);
   const hits = edges.filter(e =>
     e.from === 'file:components/payment/index.vue' && e.to === 'sym:api/order.js::orderPay');

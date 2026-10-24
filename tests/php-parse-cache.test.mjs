@@ -11,6 +11,7 @@
  * Run: node --test tests/php-parse-cache.test.mjs
  */
 import { test } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -46,9 +47,12 @@ function walkPhp(dir, acc = []) {
   return acc;
 }
 
-const phpFiles = walkPhp(PHP_APP).sort();
+// Module-level scan, but never at import time when the fixture corpus is absent: a
+// throw here fails the whole file before any `skip` can apply (it did — one ENOENT in
+// the first import hid the four tests behind "test failed").
+const phpFiles = fs.existsSync(PHP_APP) ? walkPhp(PHP_APP).sort() : [];
 
-test('(a) runtime init + language load + query compile happen once per language', () => {
+testWithFixtures('(a) runtime init + language load + query compile happen once per language', () => {
   const wasmUrl = new URL('../src/parsers/wasmParser.js', import.meta.url).href;
   const sample = phpFiles.slice(0, 3).map((f) => path.relative(PHP_APP, f).replace(/\\/g, '/'));
   const code = `
@@ -80,7 +84,7 @@ test('(a) runtime init + language load + query compile happen once per language'
   );
 });
 
-test('(b) same php file parsed twice → identical (name,line) set', async () => {
+testWithFixtures('(b) same php file parsed twice → identical (name,line) set', async () => {
   const full = phpFiles[0];
   const content = fs.readFileSync(full, 'utf-8');
   const key = (s) => `${s.name}@${s.line_start}`;
@@ -94,7 +98,7 @@ test('(b) same php file parsed twice → identical (name,line) set', async () =>
   assert.deepEqual(a, b, 'symbol (name,line) set must be identical across parses');
 });
 
-test('(c) full php-app index matches pre-change baseline (counts + hash)', async () => {
+testWithFixtures('(c) full php-app index matches pre-change baseline (counts + hash)', async () => {
   const symLines = [];
   const callLines = [];
   let symbols = 0;
@@ -125,7 +129,7 @@ test('(c) full php-app index matches pre-change baseline (counts + hash)', async
   assert.equal(callHash, BASELINE.callHash, 'call set (file|caller|callee|line|col|receiver|kind) changed');
 });
 
-test('(d) php and go do not cross-pollute the per-language caches', async () => {
+testWithFixtures('(d) php and go do not cross-pollute the per-language caches', async () => {
   const phpFile = phpFiles[0];
   const php = await parseWasmFile(phpFile, PHP_APP, fs.readFileSync(phpFile, 'utf-8'));
 

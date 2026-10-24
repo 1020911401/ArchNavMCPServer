@@ -20,6 +20,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { gitDiffPatch } from '../src/navigation.js';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/').replace(/^\.\//, '');
 const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
@@ -48,14 +49,14 @@ export function collectDiff(dir, { scope = 'unstaged', base = null, spawn = spaw
   const head = git(['rev-parse', '--git-dir']);
   if (head.error || head.status !== 0) return { via: 'none', reason: 'not a git repository', files: [], added: [], removed: [], stats: { files: 0, added: 0, removed: 0 } };
 
-  let diffArgs;
-  if (scope === 'staged') diffArgs = ['diff', '--cached', '--unified=0', '--no-color'];
-  else if (scope === 'compare') diffArgs = ['diff', `${base || 'HEAD~1'}...HEAD`, '--unified=0', '--no-color'];
-  else if (scope === 'all') diffArgs = ['diff', 'HEAD', '--unified=0', '--no-color'];
-  else diffArgs = ['diff', '--unified=0', '--no-color'];
+  // Delegated to the engine: `git diff` is invoked in exactly one place
+  // (src/navigation.js:gitDiffPatch), so scope semantics and quotepath handling cannot
+  // drift between the symbol layer and this rule layer. Only the patch *parsing* stays
+  // here — these rules need added/removed line text, not line ranges.
+  const diff = gitDiffPatch(dir, { scope, base, spawn });
+  if (!diff.ok) return { via: 'none', reason: diff.error || 'git diff unavailable', files: [], added: [], removed: [], stats: { files: 0, added: 0, removed: 0 } };
 
-  const res = git(diffArgs);
-  const files = parsePatch(String(res.stdout || '')).filter((f) => !SKIP_TRACKED.test(f.file));
+  const files = parsePatch(diff.patch).filter((f) => !SKIP_TRACKED.test(f.file));
   const byFile = new Map(files.map((f) => [f.file, f]));
 
   // untracked files: the agent's brand-new file is invisible to `git diff`

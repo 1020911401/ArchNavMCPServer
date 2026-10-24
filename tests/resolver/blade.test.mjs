@@ -4,6 +4,7 @@
  * Run: node --test tests/resolver/
  */
 import { test, before, after } from 'node:test';
+import { testWithFixtures } from '../helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,7 +20,7 @@ let dir;
 before(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blade-')); });
 after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-test('member.blade.php → the 3 showSelectOptions calls have the right receivers', () => {
+testWithFixtures('member.blade.php → the 3 showSelectOptions calls have the right receivers', () => {
   const calls = extractBladeCalls(memberBlade);
 
   // Requirement: the showSelectOptions subset is exactly 3, with these vars/lines.

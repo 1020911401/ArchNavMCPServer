@@ -19,6 +19,7 @@
  *      (needs a fresh index: `node src/index.js analyze bench/vue-app`)
  */
 import { test } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -35,7 +36,7 @@ const readIndex = () => JSON.parse(fs.readFileSync(path.join(VUE, '.archnav', 'i
 
 // ── depth 1 must not regress ───────────────────────────────────────────────
 
-test('impact(orderTake): depth-1 is still exactly the 2 real .vue call-site files', async () => {
+testWithFixtures('impact(orderTake): depth-1 is still exactly the 2 real .vue call-site files', async () => {
   const r = await archNav.impact('orderTake', VUE, { file: 'api/order.js' });
   assert.notEqual(r.ambiguous, true);
 
@@ -55,7 +56,7 @@ test('impact(orderTake): depth-1 is still exactly the 2 real .vue call-site file
 
 // ── depth 2 now reaches pages ──────────────────────────────────────────────
 
-test('impact(orderTake): depth-2 now reaches the PAGES that own those call sites', async () => {
+testWithFixtures('impact(orderTake): depth-2 now reaches the PAGES that own those call sites', async () => {
   const r = await archNav.impact('orderTake', VUE, { file: 'api/order.js' });
   const ind = r.indirect_relations ?? r.indirect_impact;
   assert.ok(Array.isArray(ind), 'indirect_relations must be an array');
@@ -86,7 +87,7 @@ test('impact(orderTake): depth-2 now reaches the PAGES that own those call sites
 
 // ── the original component-internal-symbol case, now reachable ─────────────
 
-test('impact(goPay): a component method climbs to the pages that render the component', async () => {
+testWithFixtures('impact(goPay): a component method climbs to the pages that render the component', async () => {
   const r = await archNav.impact('goPay', VUE, { file: 'components/payment/index.vue' });
   assert.notEqual(r.ambiguous, true, 'goPay is defined in several pages, so --file must disambiguate');
   assert.equal(posix(r.file), 'components/payment/index.vue');
@@ -118,7 +119,7 @@ test('impact(goPay): a component method climbs to the pages that render the comp
 
 // ── the graph structure those depth-2 hops rely on ─────────────────────────
 
-test('component graph: file:components/payment/index.vue is referenced by pages', () => {
+testWithFixtures('component graph: file:components/payment/index.vue is referenced by pages', () => {
   const idx = readIndex();
   const deps = idx.knowledgeGraph.edges.filter((e) => e.type === 'DEPENDS_ON');
   const incoming = deps.filter((e) => e.to === 'file:components/payment/index.vue');
@@ -134,7 +135,7 @@ test('component graph: file:components/payment/index.vue is referenced by pages'
   );
 });
 
-test('page graph: page:pages/goods/order_details/index points at its .vue file', () => {
+testWithFixtures('page graph: page:pages/goods/order_details/index points at its .vue file', () => {
   const idx = readIndex();
   const edge = idx.knowledgeGraph.edges.find(
     (e) => e.from === 'page:pages/goods/order_details/index'

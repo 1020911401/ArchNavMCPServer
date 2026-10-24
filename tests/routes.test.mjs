@@ -16,6 +16,7 @@
  * Run: node --test tests/routes.test.mjs
  */
 import { test, before, after } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -128,7 +129,7 @@ after(() => {
 
 // ── (a) route edges exist and point at real symbol nodes ────────────────────
 
-test('(a) route:* DEPENDS_ON edges exist (>=5) and every target is a real sym id', () => {
+testWithFixtures('(a) route:* DEPENDS_ON edges exist (>=5) and every target is a real sym id', () => {
   const byType = {};
   for (const e of kg.edges || []) byType[e.type] = (byType[e.type] || 0) + 1;
   assert.ok(
@@ -154,14 +155,14 @@ test('(a) route:* DEPENDS_ON edges exist (>=5) and every target is a real sym id
 
 // ── (c) a known route resolves to a known controller method ────────────────
 
-test('(c) route:GET /patients → sym:<PatientsController.php>::index (string action form)', () => {
+testWithFixtures('(c) route:GET /patients → sym:<PatientsController.php>::index (string action form)', () => {
   const e = (fixtureResult.knowledgeGraph.edges || []).find((x) => x.from === 'route:GET /patients');
   assert.ok(e, 'no route:GET /patients edge in the fixture project');
   assert.equal(e.to, sym(PATIENTS, 'index'));
   assert.equal(e.source_kind, 'route');
 });
 
-test('(c2) the real app resolves its resource route to the controller method', () => {
+testWithFixtures('(c2) the real app resolves its resource route to the controller method', () => {
   const e = routeEdges.find((x) => x.from === 'route:GET patient');
   assert.ok(e, 'no route:GET patient edge in bench/php-app');
   assert.equal(e.to, sym(PATIENTS, 'index'));
@@ -169,7 +170,7 @@ test('(c2) the real app resolves its resource route to the controller method', (
 
 // ── (b) both action forms are supported ────────────────────────────────────
 
-test('(b) string \'C@m\' and array [C::class, \'m\'] actions both produce an edge', () => {
+testWithFixtures('(b) string \'C@m\' and array [C::class, \'m\'] actions both produce an edge', () => {
   const want = sym(PATIENTS, 'index');
   const str = fixtureResult.knowledgeGraph.edges.find((e) => e.from === 'route:GET /patients');
   const arr = fixtureResult.knowledgeGraph.edges.find((e) => e.from === 'route:GET /patients/array');
@@ -198,7 +199,7 @@ test('(b) string \'C@m\' and array [C::class, \'m\'] actions both produce an edg
 
 // ── (d) Route::resource expansion, only/except respected ───────────────────
 
-test('(d) Route::resource expands the 7 default actions with Laravel uris', () => {
+testWithFixtures('(d) Route::resource expands the 7 default actions with Laravel uris', () => {
   // Route::resource('patient', 'PatientsController') — bench/php-app/routes/web.php:75
   const byId = new Map(routeEdges.map((e) => [e.from, e.to]));
   const expected = {
@@ -224,7 +225,7 @@ test('(d) Route::resource expands the 7 default actions with Laravel uris', () =
   assert.equal(resourceEdges.length, 8, 'PUT + PATCH both register `update`');
 });
 
-test('(d2) Route::resource except => [...] is respected', () => {
+testWithFixtures('(d2) Route::resource except => [...] is respected', () => {
   // Route::resource('history', 'HistoriesController', ['except' => ['edit','update']])
   const hist = routeEdges.filter((e) => e.to.startsWith(`sym:${HISTORIES}::`));
   const ids = [...new Set(hist.map((e) => e.from))].sort();
@@ -247,7 +248,7 @@ test('(d2) Route::resource except => [...] is respected', () => {
   assert.equal(create.line, 51);
 });
 
-test('(d3) an `only` resource inside a nested prefix group expands to just those actions', () => {
+testWithFixtures('(d3) an `only` resource inside a nested prefix group expands to just those actions', () => {
   const careEdges = fixtureResult.knowledgeGraph.edges.filter((e) => String(e.from).includes('admin/care'));
   const ids = [...new Set(careEdges.map((e) => e.from))].sort();
   assert.deepEqual(ids, ['route:GET admin/care', 'route:POST admin/care']);
@@ -257,7 +258,7 @@ test('(d3) an `only` resource inside a nested prefix group expands to just those
 
 // ── (e) edges carry source_kind:'route' and the declaration line ───────────
 
-test('(e) every route edge carries source_kind:route + an integer line', () => {
+testWithFixtures('(e) every route edge carries source_kind:route + an integer line', () => {
   assert.ok(routeEdges.length > 0);
   for (const e of routeEdges) {
     assert.equal(e.source_kind, 'route', `edge ${e.from} → ${e.to} lacks source_kind:route`);
@@ -275,7 +276,7 @@ test('(e) every route edge carries source_kind:route + an integer line', () => {
 
 // ── (f) unresolved routes fail loudly ──────────────────────────────────────
 
-test('(f) unresolvable routes land in unresolvedRoutes (analyze return + index.json)', () => {
+testWithFixtures('(f) unresolvable routes land in unresolvedRoutes (analyze return + index.json)', () => {
   const unresolved = fixtureResult.unresolvedRoutes;
   assert.ok(Array.isArray(unresolved), `analyze() must return unresolvedRoutes (got ${typeof unresolved})`);
 

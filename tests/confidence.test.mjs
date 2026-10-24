@@ -10,6 +10,7 @@
  * Run: node --test tests/confidence.test.mjs
  */
 import { test, before, after } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -54,7 +55,7 @@ after(() => {
   fs.rmSync(workDir, { recursive: true, force: true });
 });
 
-test('an untouched tree reports fresh with full confidence', async () => {
+testWithFixtures('an untouched tree reports fresh with full confidence', async () => {
   const r = await checkStaleness(workDir);
   assert.equal(r.stale, false, 'untouched copy must not be stale');
   assert.equal(r.overallConfidence, 1, 'untouched copy must be fully confident');
@@ -62,7 +63,7 @@ test('an untouched tree reports fresh with full confidence', async () => {
   assert.deepEqual(r.changedDetails, []);
 });
 
-test('staleness detection works on a tree with no git metadata at all', async () => {
+testWithFixtures('staleness detection works on a tree with no git metadata at all', async () => {
   assert.equal(fs.existsSync(path.join(workDir, '.git')), false);
   assert.equal(fs.existsSync(path.join(workDir, '.archnav', 'commit')), false);
 
@@ -72,7 +73,7 @@ test('staleness detection works on a tree with no git metadata at all', async ()
   assert.equal(r.currentHead, null);
 });
 
-test('appending a comment to an indexed .php file marks the index stale', async () => {
+testWithFixtures('appending a comment to an indexed .php file marks the index stale', async () => {
   fs.appendFileSync(targetAbs, '\n// stale probe\n');
 
   const r = await checkStaleness(workDir);
@@ -85,7 +86,7 @@ test('appending a comment to an indexed .php file marks the index stale', async 
   );
 });
 
-test('symbolConfidence graduates for a changed file and is 1.0 when untouched', () => {
+testWithFixtures('symbolConfidence graduates for a changed file and is 1.0 when untouched', () => {
   // An untouched file still matches its indexed hash.
   const freshKey = Object.keys(index.fileHashes).find(
     (k) => k.toLowerCase().endsWith('.php') && norm(k) !== targetRel

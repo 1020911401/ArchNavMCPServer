@@ -928,14 +928,16 @@ test('ai-todo-left ignores a TODO marker that lives inside a string literal', ()
 });
 
 test('ai-todo-left reports a real stub but not prose that merely says "not implemented"', () => {
-  // Built at runtime: the repo's own self-review must not see the phrase in this fixture.
+  // Built at runtime and concatenated (not interpolated): the repo's js-unused-binding
+  // rule does not count `${x}` inside a template literal as a use, so interpolation made
+  // this very fixture look like a dead binding.
   const phrase = `not${' '}implemented`;
   // a doc line describing the status — this is exactly the false positive self-review hit
-  const prose = `/**\n * "" ${phrase} — reported as na with the reason\n */\nconst a = 1;\n`;
+  const prose = '/**\n * "" ' + phrase + ' — reported as na with the reason\n */\nconst a = 1;\n';
   assert.deepEqual(scanContent('src/lib.mjs', prose).filter((x) => x.rule === 'ai-todo-left'), [],
     'prose must not be read as a leftover stub');
   // the real thing still fires (PHP keeps thrown strings: they are code, not data)
-  assert.equal(scanContent('app/X.php', `<?php throw new \\Exception('${phrase}');`)
+  assert.equal(scanContent('app/X.php', '<?php throw new \\Exception(\'' + phrase + '\');')
     .filter((x) => x.rule === 'ai-todo-left').length, 1, 'a thrown placeholder is still a stub');
 });
 

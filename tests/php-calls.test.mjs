@@ -8,6 +8,7 @@
  * Run: node --test tests/php-calls.test.mjs
  */
 import { test, before } from 'node:test';
+import { testWithFixtures } from './helpers/fixtures.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -44,7 +45,7 @@ before(() => {
   index = JSON.parse(fs.readFileSync(INDEX, 'utf-8'));
 });
 
-test('knowledgeGraph has DEPENDS_ON edges for PHP', () => {
+testWithFixtures('knowledgeGraph has DEPENDS_ON edges for PHP', () => {
   const edges = index.knowledgeGraph?.edges || [];
   const dependsOn = edges.filter((e) => e.type === 'DEPENDS_ON');
   // Diagnostic breadcrumb for the failure message
@@ -56,7 +57,7 @@ test('knowledgeGraph has DEPENDS_ON edges for PHP', () => {
   );
 });
 
-test('callers(departments) covers all 6 call sites', () => {
+testWithFixtures('callers(departments) covers all 6 call sites', () => {
   const r = spawnSync(
     process.execPath,
     ['src/index.js', 'callers', 'departments', '--dir', 'bench/php-app', '--json'],
