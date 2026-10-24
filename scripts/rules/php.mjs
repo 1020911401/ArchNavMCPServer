@@ -15,8 +15,13 @@
 const finding = ({ rule, severity, file, line, message, why, evidence }) => ({ rule, severity, file, line, message, why, evidence });
 
 // Moved here with the rules that use them: nothing else in the scanner reads these.
-const QUERY_IN_LOOP_RE = /->(where|orWhere|find|findOrFail|first|firstOrFail|get|pluck|count|value|update|save|create|insert)\s*\(/;
-const PAGINATION_RE = /->(paginate|simplePaginate|cursorPaginate)\s*\(/;
+// Both call-shape regexes accept `::` as well as `->`: Laravel's static facade calls
+// (`User::find($id)` inside a loop, `User::paginate(10)`) are the same query as the
+// instance form, and keying only on `->` made the rules miss them — a loop over
+// `User::find()` was silently clean, and `User::paginate(10)` was not recognized as
+// pagination at all.
+const QUERY_IN_LOOP_RE = /(?:::|->)(where|orWhere|find|findOrFail|first|firstOrFail|get|pluck|count|value|update|save|create|insert)\s*\(/;
+const PAGINATION_RE = /(?:::|->)(paginate|simplePaginate|cursorPaginate)\s*\(/;
 const MASS_INPUT_RE = /->all\s*\(\s*\)/;
 const VALIDATION_PRESENT_RE = /(->validate\s*\(|extends\s+FormRequest|validate\s*\(\s*\$request|\w+Request\s+\$)/;
 

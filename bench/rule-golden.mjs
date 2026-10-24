@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Golden snapshot for rule-model refactors: run every rule over a fixed file corpus and
  * dump the findings as sorted JSON. Any refactor must reproduce this byte-for-byte —
@@ -38,12 +39,13 @@ const EXTRA = [
   // (mass input + loop query + unbounded get), one proves the N+1 severity downgrade
   // outside a request path, and one is the negative control (validate + paginate).
   ['app/Http/Controllers/BulkController.php', "<?php\nnamespace App\\Http\\Controllers;\n\nclass BulkController extends Controller\n{\n    public function store()\n    {\n        $data = $request->all();\n        foreach ($data as $row) {\n            $u = User::where('id', $row['id'])->first();\n        }\n        return User::where('active', 1)->get();\n    }\n}\n"],
-  ['app/Console/Batch.php', "<?php\nfunction batch($rows) {\n    foreach ($rows as $row) {\n        $u = User::where('id', $row['id'])->first();\n    }\n}\n"],
-  // The negative control has to use the shapes the rules actually recognize: the
-  // pagination guard matches `->paginate(`, and the loop query needs `->first(`.
-  // (`User::paginate(10)` slips past the guard — a real blind spot, tracked separately
-  // so this commit stays behaviour-preserving.)
+  ['app/Console/Batch.php', "<?php\nfunction batch($rows) {\n    foreach ($rows as $row) {\n        $u = User::find($row['id']);\n    }\n}\n"],
+  // The negative control: validate() suppresses mass-input, and any paginate() form
+  // (instance or static) suppresses unbounded-query.
   ['app/Http/Controllers/CleanController.php', "<?php\nnamespace App\\Http\\Controllers;\n\nclass CleanController extends Controller\n{\n    public function index(Request $request)\n    {\n        $data = $request->validate(['page' => 'integer']);\n        $query = User::where('active', 1);\n        $rows = User::where('active', 1)->get();\n        return $query->paginate(10);\n    }\n}\n"],
+  // Pagination in its *static* form: `User::paginate(10)` is pagination just as much as
+  // `$query->paginate(10)`, so a file that has a `->get()` next to it is not "unbounded".
+  ['app/Http/Controllers/StaticPaginateController.php', "<?php\nnamespace App\\Http\\Controllers;\n\nclass StaticPaginateController extends Controller\n{\n    public function index()\n    {\n        $rows = User::where('active', 1)->get();\n        return User::paginate(10);\n    }\n}\n"],
   ['docs/a.md', "# Title\nTODO: fill in\n"],
   ['conf/a.yaml', "key: value\nnot implemented: true\n"],
 ];

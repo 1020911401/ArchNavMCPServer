@@ -1009,6 +1009,13 @@ test('php controller-shape rules: all three fire, validation/pagination suppress
 
   // `isController` is a filename test, so a non-controller file is never the "unbounded query" case.
   assert.deepEqual(run('app/Service/Report.php', "<?php\nreturn User::where('a', 1)->get();\n"), []);
+
+  // Laravel's static facade is the same query: `User::find()` in a loop is an N+1 and
+  // `User::paginate()` is pagination. Keying only on `->` missed both.
+  assert.equal(run('app/Console/Batch.php', "<?php\nforeach ($rows as $r) {\n  User::find($r['id']);\n}\n").length, 1,
+    'a static find inside a loop is a query');
+  assert.deepEqual(run(ctrl, "<?php\n$rows = User::where('a', 1)->get();\nreturn User::paginate(10);\n"), [],
+    'static paginate suppresses unbounded-query');
 });
 
 test('arity: defaults survive the analyzer signature, and a local helper is not a global callee', () => {

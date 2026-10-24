@@ -1,20 +1,20 @@
 {
-  "corpusFiles": 120,
-  "findings": 38,
+  "corpusFiles": 121,
+  "findings": 37,
   "rows": [
     {
       "rule": "php-n-plus-one",
       "severity": "info",
       "file": "app/Console/Batch.php",
       "line": 3,
-      "message": "循环体内有查询调用 `->first(`，疑似 N+1。"
+      "message": "循环体内有查询调用 `::find(`，疑似 N+1。"
     },
     {
       "rule": "php-n-plus-one",
       "severity": "warn",
       "file": "app/Http/Controllers/BulkController.php",
       "line": 9,
-      "message": "循环体内有查询调用 `->first(`，疑似 N+1。"
+      "message": "循环体内有查询调用 `::where(`，疑似 N+1。"
     },
     {
       "rule": "php-unbounded-query",
@@ -64,13 +64,6 @@
       "file": "app/Service/Stub.php",
       "line": 3,
       "message": "app/Service/Stub.php 里留了 `throw new Error('未实现`。"
-    },
-    {
-      "rule": "js-debug-left-on",
-      "severity": "warn",
-      "file": "bench/rule-golden.mjs",
-      "line": 85,
-      "message": "bench/rule-golden.mjs 残留调试输出 `console.log(`。"
     },
     {
       "rule": "vue-mutating-props",
