@@ -1236,3 +1236,33 @@ test('arity: an unreadable definition file stays silent', () => {
   const symbols = [{ name: 'ghost', file: 'nope.mjs', line_start: 1, signature: 'ghost(a, b)' }];
   assert.deepEqual(arityFindings('x.mjs', 'ghost(1);', { symbols, readFile: () => null }), []);
 });
+
+test('AI hallucinations: monorepo aliases resolve per package, and every indexed file counts', () => {
+  // Measured on a real monorepo corpus: 312 of 315 "unresolved" imports were these two
+  // mistakes — `@/` resolved against the repo root, and indexed-but-symbol-less files
+  // (`router/index.ts` with no exports) treated as nonexistent.
+  const indexedFiles = new Set([
+    'admin/src/utils/request.ts',
+    'admin/src/router/index.ts',       // no symbols: exists, still a file
+    'merchant/src/utils/request.ts',
+    'merchant/src/components/PageHeader.vue',
+    'packages/shared/src/index.ts',
+  ]);
+  const deps = new Set(['vue']);
+  const is = (src, file) => hallucinationFindings(file, src, { indexedFiles, deps, psr4: null });
+
+  assert.deepEqual(is("import r from '@/utils/request';", 'merchant/src/api/modules/common.ts'), [],
+    'per-package alias: merchant/src + rest');
+  assert.deepEqual(is("import r from '@/utils/request';", 'admin/src/api/modules/common.ts'), [],
+    'same specifier, different package root');
+  assert.deepEqual(is("import r from '@/router';", 'admin/src/main.ts'), [],
+    'alias + /index.ts');
+  assert.deepEqual(is("import h from './src/components/PageHeader.vue';", 'merchant/components.d.ts'), [],
+    'relative with an explicit .vue extension');
+  assert.deepEqual(is("import u from '~@/utils/request';", 'admin/src/composables/useCrud.ts'), [],
+    'uni-app tilde form');
+
+  // recall kept: a specifier that really resolves nowhere still fires, in either form
+  assert.equal(is("import x from '@/nothing/here';", 'admin/src/a/b.ts').length, 1);
+  assert.equal(is("import y from './ghost';", 'admin/src/router/index.ts').length, 1);
+});

@@ -621,6 +621,25 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyD
   // unresolved made 101 findings out of 20 real ones (measured on bench/vue-app).
   const ASSET_RE = /\.(png|jpe?g|gif|svg|webp|bmp|ico|mp3|mp4|wav|avi|css|scss|sass|less|styl|ttf|woff2?|eot|otf|md|txt|html?)$/i;
   const tryResolve = (spec) => [...EXT.map((e) => `${spec}${e}`), ...INDEX.map((e) => `${spec}${e}`)].filter(exists);
+  // Alias roots: a monorepo configures `@/` per package (`admin-merchant` maps it to
+  // `admin-merchant/src`), so resolving `@/utils/request` against the repo root is wrong —
+  // it turned 312 real imports into "unresolved" on the Laravel corpus. Walk up from the
+  // importing file and try `<root>/src/<rest>` then `<root>/<rest>` at each level.
+  const aliasRoots = (() => {
+    const parts = dir ? dir.split('/') : [];
+    const roots = [];
+    for (let i = parts.length; i >= 0; i--) roots.push(parts.slice(0, i).join('/'));
+    return roots;
+  })();
+  const tryAlias = (rest) => {
+    for (const root of aliasRoots) {
+      for (const base of [joinPosix(root, 'src', rest), joinPosix(root, rest)]) {
+        const hit = tryResolve(base);
+        if (hit.length) return hit;
+      }
+    }
+    return [];
+  };
 
   for (const m of srcScan.matchAll(/^[ \t]*(?:import|export)[^'"\n]*?from\s*['"]([^'"]+)['"]|(?<![\w.])require\(\s*['"]([^'"]+)['"]\s*\)|(?<![\w.])import\(\s*['"]([^'"]+)['"]\s*\)/gm)) {
     const spec = m[1] || m[2] || m[3];
@@ -638,7 +657,7 @@ export function hallucinationFindings(file, src, { indexedFiles, deps, psr4, pyD
       }
     } else if (spec.startsWith('@/') || spec.startsWith('~@/')) {
       const rest = spec.replace(/^~?@\//, '');
-      if (!tryResolve(rest).length && !tryResolve(`${rest}/index`).length) {
+      if (!tryAlias(rest).length && !tryAlias(`${rest}/index`).length) {
         out.push({
           rule: 'js-unresolved-local-import', severity: 'warn', file: f, line: lineOf(m.index),
           message: `${f} 的别名 import \`${spec}\` 解析不到文件。`,
@@ -1379,7 +1398,11 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   }
 
   // ── AI-code hallucinations: imports that resolve to nothing ────────────────
-  const indexedFiles = new Set(symbols.map((s) => norm(s.file)));
+  // Every file the index knows, not just files that produced symbols: a plain module
+  // (`router/index.ts` with no exports) still exists, and calling its import "unresolved"
+  // was the single largest false-positive class — 312 of 315 findings on a real corpus.
+  const indexedFiles = new Set(Object.keys(index?.fileHashes || {}).map(norm));
+  for (const s of symbols) indexedFiles.add(norm(s.file));
   for (const n of (kg.nodes || [])) {
     const id = norm(n.id);
     if (id.startsWith('file:')) indexedFiles.add(id.slice(5));
