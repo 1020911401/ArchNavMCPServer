@@ -704,10 +704,20 @@ export function scanContent(file, src) {
   // only when the marker *begins* the comment line (a mid-sentence mention is prose),
   // and the phrase list is built from escapes because a literal list here would be
   // found by the rule on every self-review — the checker scanning its own pattern.
-  const STUB_PHRASE_RE = new RegExp('\u672a\u5b9e\u73b0|\u5f85\u8865|\u4e34\u65f6\u65b9\u6848|not\u0020implemented');
+  // Third fallback: only a *real* stub — the phrase attached to throw / Error(...) / TODO.
+  // This used to be a bare `STUB_PHRASE_RE.exec(src)` over the whole file, which walked
+  // straight past the two guards above: a doc line explaining that a leaf is "not
+  // implemented → na" was reported as a leftover stub (measured on this repo: 1 hit,
+  // 100% false positive, 0 real stubs). Prose now stays out while a thrown placeholder
+  // still fires. Phrase list built from escapes so the checker never matches its own
+  // pattern — and this comment avoids quoting the phrase next to `throw`, or the rule
+  // would flag the very line that documents it (it did, twice).
+  const STUB_FORM_RE = new RegExp(
+    '(?:throw|new\\s+Error\\s*\\(|TODO|FIXME)[^\\n]{0,60}(?:\\u672a\\u5b9e\\u73b0|\\u5f85\\u8865|\\u4e34\\u65f6\\u65b9\\u6848|not\\u0020implemented)',
+  );
   const stubComment = isCode ? stubMarkerInComments(src, commentSpans) : null;
   const hashTodo = isPhp ? /(?<![`'"])(?:^|\s)#[ \t]*\b(TODO|FIXME|XXX|HACK)\b/m.exec(src) : null;
-  const todo = isCode ? (stubComment || hashTodo || STUB_PHRASE_RE.exec(src)) : null;
+  const todo = isCode ? (stubComment || hashTodo || STUB_FORM_RE.exec(src)) : null;
   if (todo) {
     findings.push({
       rule: 'ai-todo-left', severity: 'info', file: f, line: lineOf(todo.index),

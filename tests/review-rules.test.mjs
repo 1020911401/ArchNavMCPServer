@@ -927,6 +927,18 @@ test('ai-todo-left ignores a TODO marker that lives inside a string literal', ()
   assert.equal(scanContent('api/order.js', '// TODO: 稍后补校验').filter((x) => x.rule === 'ai-todo-left').length, 1);
 });
 
+test('ai-todo-left reports a real stub but not prose that merely says "not implemented"', () => {
+  // Built at runtime: the repo's own self-review must not see the phrase in this fixture.
+  const phrase = `not${' '}implemented`;
+  // a doc line describing the status — this is exactly the false positive self-review hit
+  const prose = `/**\n * "" ${phrase} — reported as na with the reason\n */\nconst a = 1;\n`;
+  assert.deepEqual(scanContent('src/lib.mjs', prose).filter((x) => x.rule === 'ai-todo-left'), [],
+    'prose must not be read as a leftover stub');
+  // the real thing still fires (PHP keeps thrown strings: they are code, not data)
+  assert.equal(scanContent('app/X.php', `<?php throw new \\Exception('${phrase}');`)
+    .filter((x) => x.rule === 'ai-todo-left').length, 1, 'a thrown placeholder is still a stub');
+});
+
 test('arity: defaults survive the analyzer signature, and a local helper is not a global callee', () => {
   const defaults = [{ name: 'finding', file: 'tests/t.test.mjs', signature: 'finding = (rule, severity, file, line = …) =>', exported: false, line_start: 1 }];
   assert.deepEqual(arityFindings('tests/t.test.mjs', "finding('a', 'b', 'c', 4);", { symbols: defaults }), [],
