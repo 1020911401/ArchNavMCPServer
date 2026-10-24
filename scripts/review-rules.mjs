@@ -24,7 +24,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
-import { runRules, GO_RULES, ANY_RULES, VUE_RULES } from './rules/index.mjs';
+import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES } from './rules/index.mjs';
 import { selectTests } from './test-select.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -693,47 +693,8 @@ export function scanContent(file, src) {
   // ── Vue family now lives in scripts/rules/vue.mjs (declarative) ────────────
   findings.push(...runRules(VUE_RULES, { file, f, src, lineOf }));
 
-  // ── JS/Vue: bindings that are never used (AI code leaves a lot of these) ────
-  if (JS_OR_VUE) {
-    // Reuse the string/comment/regex-blanked source: counting uses on the raw text
-    // made `'foo'` in a string literal look like a use, and the old regex-pair
-    // blanking could swallow real code (regex literal `/['"]/` opened a phantom string).
-    const withoutComments = blanked;
-    for (const m of src.matchAll(/^[ \t]*import\s+([^;\n]+?)\s+from\s+['"][^'"]+['"]/gm)) {
-      const clause = m[1].trim();
-      const bound = [];
-      const defaultName = /^([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
-      if (defaultName && defaultName !== 'from') bound.push(defaultName);
-      const braces = /\{([^}]*)\}/.exec(clause)?.[1];
-      if (braces) for (const part of braces.split(',')) {
-        const name = part.trim().split(/\s+as\s+/).pop()?.trim();
-        if (name && /^[A-Za-z_$][\w$]*$/.test(name)) bound.push(name);
-      }
-      for (const name of bound) {
-        const uses = [...withoutComments.matchAll(new RegExp(`\\b${name}\\b`, 'g'))].length;
-        if (uses <= 1) {
-          findings.push({
-            rule: 'js-unused-binding', severity: 'warn', file: f, line: lineOf(m.index),
-            message: `${f}:${lineOf(m.index)} import 了 \`${name}\` 但整个文件没再用过。`,
-            why: '未使用的 import：AI 生成/改写的常见残留，增大打包体积、让"这个文件依赖谁"变假，也容易掩盖真正少 import 的东西。',
-            evidence: `name=${name}, occurrences=${uses}`,
-          });
-        }
-      }
-    }
-    for (const m of src.matchAll(/^[ \t]*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm)) {
-      const name = m[1];
-      const uses = [...withoutComments.matchAll(new RegExp(`\\b${name}\\b`, 'g'))].length;
-      if (uses <= 1) {
-        findings.push({
-          rule: 'js-unused-binding', severity: 'info', file: f, line: lineOf(m.index),
-          message: `${f}:${lineOf(m.index)} 声明了 \`${name}\` 但从未被读取。`,
-          why: '死绑定：很可能是重构后忘了删，或者本该用这个变量却写了别的名字。',
-          evidence: `binding=${name}, occurrences=${uses}`,
-        });
-      }
-    }
-  }
+  // ── JS/Vue dead bindings now live in scripts/rules/bindings.mjs ───────────
+  findings.push(...runRules(BINDING_RULES, { f, src, blanked, lineOf, isJsOrVue: JS_OR_VUE }));
 
   // ── Go: rules now live in scripts/rules/index.mjs (declarative {id, run}) ───
   if (/\.go$/i.test(file)) findings.push(...runRules(GO_RULES, { file: f, src, lineOf }));
