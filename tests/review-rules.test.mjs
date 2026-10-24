@@ -52,11 +52,17 @@ test('arity: missing required args warn, extra args are info, ambiguity stays si
     { name: 'orderTake', file: 'api/order.js', line_start: 171, signature: 'orderTake(uni)' },
     { name: 'orderTake', file: 'api/activity.js', line_start: 293, signature: 'orderTake(data)' },
   ];
-  const few = arityFindings('pages/index/index.vue', 'getNavigation().then(() => {});', { symbols });
+  const defs = { 'api/public.js': 'function getNavigation(data) { return data.route; }' };
+  const readFile = (p) => defs[p] || null;
+  const few = arityFindings('pages/index/index.vue', 'getNavigation().then(() => {});', { symbols, readFile });
   assert.equal(few.length, 1);
   assert.equal(few[0].severity, 'warn');
   assert.match(few[0].evidence, /required=1/);
+  assert.match(few[0].evidence, /missing=data/);
   assert.equal(few[0].line, 1);
+  // no reader → the body cannot be inspected, so the rule must not guess
+  assert.deepEqual(arityFindings('pages/index/index.vue', 'getNavigation();', { symbols }), [],
+    'no readFile → silent, not a guess');
   // extra args: info, not a gate
   const many = arityFindings('utils/a.js', "import { paginate } from './page';\npaginate(list, 10, 'x');", { symbols });
   assert.equal(many[0].severity, 'info');
@@ -1186,4 +1192,47 @@ test('stubMarkerInComments finds markers in real comment spans only', () => {
   assert.match(hit[0], /real stub/);
   assert.equal(stubMarkerInComments('// (prose about TODO)', [[0, 18]]), null, 'mid-sentence mentions are not stubs');
   assert.equal(stubMarkerInComments('/* TODO: block */', [[0, 17]]).marker, 'TODO');
+});
+
+test('arity: a trailing comma does not create an argument', () => {
+  // Measured on this repo: `withIndex(edges, symbols, fn,\n)` was reported as 4 args.
+  assert.equal(countArgs('f(a, b,\n)', 1), 2);
+  assert.equal(countArgs('f(\n  a,\n  b,\n)', 1), 2);
+  assert.equal(countArgs('f(a,\n)', 1), 1);
+  assert.equal(countArgs('f()', 1), 0);
+  const symbols = [{ name: 'withIndex', file: 'tests/h.mjs', line_start: 1, signature: 'withIndex(edges, symbols, fn)' }];
+  const src = 'withIndex(\n  [1],\n  [],\n  async (dir) => {},\n);';
+  assert.deepEqual(arityFindings('tests/t.test.mjs', src, { symbols }), []);
+});
+
+test('arity: a destructured parameter still counts as a parameter', () => {
+  assert.equal(parseSignature("toSarif(findings, { toolName = 'x' } = {})").total, 2);
+  assert.equal(parseSignature("toSarif(findings, { toolName = 'x' } = {})").required, 1);
+  assert.equal(parseSignature('toSarif(findings, opts)').total, 2);
+});
+
+test('arity: JS optionality conventions are not hazards', () => {
+  const FWD = 'function extractScriptBlocks(filePath, content) { return getCachedBlocks(filePath, content, split); }';
+  const GUARD = 'function testWithFixtures(name, optsOrFn, maybeFn) { const fn = typeof optsOrFn === "function" ? optsOrFn : maybeFn; return fn(); }';
+  const UNDEF = 'function kindRow(id, kind, title, flag, naReason) { if (!flag) return { reason: naReason }; return { id }; }';
+  const REAL = 'function renderImpact(summary, opts) { return opts.pretty ? summary : String(summary); }';
+  const defs = { 'a.mjs': FWD, 'b.mjs': GUARD, 'c.mjs': UNDEF, 'd.mjs': REAL };
+  const readFile = (p) => defs[p] || null;
+  const call = (name, args) => ({ symbols: [{ name, file: `${name}.mjs`, line_start: 1, signature: '' }], readFile });
+  // forward-only parameter: passing fewer is harmless, the callee decides
+  assert.deepEqual(arityFindings('x.mjs', 'extractScriptBlocks("f");', { symbols: [{ name: 'extractScriptBlocks', file: 'a.mjs', line_start: 1, signature: 'extractScriptBlocks(filePath, content)' }], readFile }), []);
+  // typeof-overload helper
+  assert.deepEqual(arityFindings('x.mjs', 'testWithFixtures("n", fn);', { symbols: [{ name: 'testWithFixtures', file: 'b.mjs', line_start: 1, signature: 'testWithFixtures(name, optsOrFn, maybeFn)' }], readFile }), []);
+  // guarded by `!p`
+  assert.deepEqual(arityFindings('x.mjs', 'kindRow(1, "k", "t", true);', { symbols: [{ name: 'kindRow', file: 'c.mjs', line_start: 1, signature: 'kindRow(id, kind, title, flag, naReason)' }], readFile }), []);
+  // genuinely dereferenced → the one case that is a real hazard
+  const real = arityFindings('x.mjs', 'renderImpact(sum);', { symbols: [{ name: 'renderImpact', file: 'd.mjs', line_start: 1, signature: 'renderImpact(summary, opts)' }], readFile });
+  assert.equal(real.length, 1);
+  assert.match(real[0].evidence, /missing=opts/);
+  void call;
+});
+
+test('arity: an unreadable definition file stays silent', () => {
+  const symbols = [{ name: 'ghost', file: 'nope.mjs', line_start: 1, signature: 'ghost(a, b)' }];
+  assert.deepEqual(arityFindings('x.mjs', 'ghost(1);', { symbols, readFile: () => null }), []);
 });

@@ -741,36 +741,40 @@ export function bladeRawOutputFindings(file, src) {
 export function countArgs(src, openIdx) {
   let depth = 0;
   let count = 0;
-  let sawContent = false;
+  // Content seen *since the last depth-1 comma* (or since the opening paren). A trailing
+  // comma must not create an argument: `f(a, b,\n)` is two arguments, and counting it as
+  // three reported every multi-line call that ends with `},` (measured: 3 findings, all
+  // false, on this repo's own tests).
+  let pending = false;
   for (let i = openIdx; i < src.length; i++) {
     const c = src[i];
     if (c === '(' || c === '[' || c === '{') {
       // Content *inside* a nested literal is still content: `f({a: 1})` passes one
       // argument. Missing this made the rule report `orderPay({…})` as 0 args —
       // caught by checking the finding against the source.
-      if (depth >= 1 && !/\s/.test(c)) sawContent = true;
+      if (depth >= 1 && !/\s/.test(c)) pending = true;
       depth++;
       continue;
     }
     if (c === ')' || c === ']' || c === '}') {
       depth--;
-      if (depth === 0) return sawContent ? count + 1 : 0;
-      if (!/\s/.test(c)) sawContent = true;
+      if (depth === 0) return pending ? count + 1 : count;
+      if (!/\s/.test(c)) pending = true;
       continue;
     }
     if (depth >= 1) {
-      if (c === ',' && depth === 1) { count++; sawContent = true; continue; }
-      if (!/\s/.test(c)) sawContent = true;
+      if (c === ',' && depth === 1) { count++; pending = false; continue; }
+      if (!/\s/.test(c)) pending = true;
     }
   }
   return null; // unbalanced → do not guess
 }
 
-/** Required / total parameter counts from a `name(a, b = 1, ...rest)` signature. */
-export function parseSignature(signature) {
+/** Parameter names + optionality from a `name(a, b = 1, ...rest)` signature. */
+export function parseParams(signature) {
   const s = String(signature || '');
   const open = s.indexOf('(');
-  if (open === -1) return { required: null, total: null, variadic: false };
+  if (open === -1) return null;
   const close = s.lastIndexOf(')');
   const inner = s.slice(open + 1, close === -1 ? s.length : close);
   const parts = [];
@@ -783,10 +787,110 @@ export function parseSignature(signature) {
     cur += c;
   }
   if (cur.trim()) parts.push(cur);
-  const cleaned = parts.map((p) => p.trim()).filter(Boolean);
-  const variadic = cleaned.some((p) => p.includes('...'));
-  const required = cleaned.filter((p) => !p.includes('=') && !p.startsWith('?') && !p.includes('...')).length;
-  return { required, total: cleaned.length, variadic };
+  return parts.map((raw) => {
+    const text = raw.trim();
+    if (!text) return null;
+    const name = /^(?:\.\.\.)?\s*([A-Za-z_$][\w$]*)/.exec(text)?.[1] || null;
+    const optional = text.includes('=') || text.startsWith('?') || text.includes('...');
+    // A destructured parameter (`{ scope = 1 } = {}`) has no single name — keep it, or the
+    // parameter count silently loses it (`toSarif(findings, {opts})` read as one param).
+    return { name, optional };
+  }).filter(Boolean);
+}
+
+/** Required / total parameter counts from a `name(a, b = 1, ...rest)` signature. */
+export function parseSignature(signature) {
+  const params = parseParams(signature);
+  if (!params) return { required: null, total: null, variadic: false };
+  return {
+    required: params.filter((p) => !p.optional).length,
+    total: params.length,
+    variadic: /\.\.\./.test(String(signature || '')),
+  };
+}
+
+/**
+ * Index of the bracket matching the one at `openIdx`, or -1. Strings/literals must already
+ * be blanked (same length) by the caller — this is a structural walk, not a parser.
+ */
+function matchClose(text, openIdx) {
+  const pairs = { '(': ')', '[': ']', '{': '}' };
+  const stack = [];
+  for (let i = openIdx; i < text.length; i++) {
+    const c = text[i];
+    if (pairs[c]) stack.push(pairs[c]);
+    else if (c === ')' || c === ']' || c === '}') {
+      if (stack.pop() !== c) return -1;
+      if (!stack.length) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The body of `name`'s definition in its own file, or null when it cannot be located.
+ * Null is the safe answer: a caller that cannot see the body must not claim a hazard.
+ */
+export function functionBody(defSrc, name) {
+  const safe = String(name).replace(/\$/g, '\\$');
+  const defRe = new RegExp(
+    `(?:function\\s+${safe}\\s*\\(|(?:const|let|var)\\s+${safe}\\s*=\\s*(?:async\\s+)?(?:function\\s*)?\\(|^\\s*(?:async\\s+)?${safe}\\s*\\()`,
+    'm',
+  );
+  const m = defRe.exec(defSrc);
+  if (!m) return null;
+  const openParen = defSrc.indexOf('(', m.index);
+  if (openParen < 0) return null;
+  const closeParen = matchClose(defSrc, openParen);
+  if (closeParen < 0) return null;
+  const rest = defSrc.slice(closeParen + 1);
+  const arrow = /^\s*(?::[^=]*)?=>/.exec(rest);
+  if (arrow) {
+    let i = closeParen + 1 + arrow[0].length;
+    while (i < defSrc.length && /\s/.test(defSrc[i])) i++;
+    if (defSrc[i] === '{') {
+      const end = matchClose(defSrc, i);
+      return end < 0 ? null : defSrc.slice(i, end + 1);
+    }
+    // expression body: to the end of the statement
+    let depth = 0;
+    let j = i;
+    for (; j < defSrc.length; j++) {
+      const c = defSrc[j];
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if ((c === '\n' || c === ';') && depth <= 0) break;
+    }
+    return defSrc.slice(i, j);
+  }
+  const braceIdx = defSrc.indexOf('{', closeParen);
+  if (braceIdx < 0) return null;
+  const end = matchClose(defSrc, braceIdx);
+  return end < 0 ? null : defSrc.slice(braceIdx, end + 1);
+}
+
+/**
+ * Does a *missing* argument actually become a hazard? JS makes every parameter optional at
+ * the call site, so "declared without a default" means nothing on its own. A hazard is a
+ * parameter that the body dereferences (`p.x`, `p[0]`, `p()`) without one of the
+ * conventions that makes it optional: `typeof p`, `p ?? …`, `p || …`, `p === undefined`,
+ * `p == null`, `!p`, or a reassignment/default (`p = …`).
+ *
+ * Measured on this repo: 67 findings, all false positives, and every one of them was a
+ * convention this test sees through (typeof-overload helper, forward-only parameter,
+ * optional-by-guard parameter).
+ */
+export function missingParamHazard(body, name) {
+  const n = String(name).replace(/\$/g, '\\$');
+  const deref = new RegExp(`(?<![\\w$.])${n}\\s*(?:[.\\[(]|\\?\\s*\\?)`, '');
+  if (!deref.test(body)) return false;                       // only forwarded → no hazard
+  const guarded = new RegExp(
+    `typeof\\s+${n}\\b` +
+    `|(?<![\\w$.])${n}\\s*(?:\\?\\?|\\|\\||===\\s*undefined|==\\s*null|===?\\s*null)` +
+    `|(?<![\\w$.!])!\\s*${n}\\b` +
+    `|(?<![\\w$.])${n}\\s*=\\s*[^=]`,
+  );
+  return !guarded.test(body);
 }
 
 /**
@@ -798,7 +902,7 @@ export function parseSignature(signature) {
  *     (`fetch($a,$b,$c,$d, 0)`), so "required" is unknowable there — the rule stays
  *     silent for `.php` rather than guessing.
  */
-export function arityFindings(file, src, { symbols = [] } = {}) {
+export function arityFindings(file, src, { symbols = [], readFile = null } = {}) {
   const f = norm(file);
   if (!/\.(js|ts|mjs|cjs|jsx|tsx|vue)$/i.test(file)) return [];
   const out = [];
@@ -837,11 +941,25 @@ export function arityFindings(file, src, { symbols = [] } = {}) {
     if (required === null || !total) continue;
     const line = src.slice(0, m.index).split(/\r?\n/).length;
     if (argCount < required) {
+      // "Parameters without defaults are required" is not true in JS: every argument is
+      // optional at the call site. Declaring a hazard needs the definition body — the
+      // missing parameter must be dereferenced there and not guarded. Without a reader
+      // (or when the body cannot be located) the rule stays silent rather than guessing:
+      // on this repo the guess was wrong 67 times out of 67.
+      if (!readFile) continue;
+      const defSrc = readFile(norm(def.file));
+      if (!defSrc) continue;
+      const body = functionBody(blankLiterals(defSrc), name);
+      if (!body) continue;
+      const params = parseParams(def.signature) || [];
+      const missing = params.slice(argCount).filter((p) => !p.optional && p.name);
+      const hazard = missing.find((p) => missingParamHazard(body, p.name));
+      if (!hazard) continue;
       out.push({
         rule: 'arity-mismatch', severity: 'warn', file: f, line,
-        message: `${f}:${line} 调用 ${name}(${argCount} 个参数)，而 ${norm(def.file)} 的定义至少需要 ${required} 个（共 ${total}）。`,
-        why: '少传必填参数：JS 里会变成 undefined（悄悄算错，或在更深的地方炸）。',
-        evidence: `call=${name}(${argCount}), required=${required}, total=${total}, def=${norm(def.file)}:${def.line_start ?? '?'}`,
+        message: `${f}:${line} 调用 ${name}(${argCount} 个参数)，少了 \`${hazard.name}\`，而 ${norm(def.file)} 的定义里直接用了它。`,
+        why: '少传的参数在函数体里被直接使用（不是透传、也没有 typeof/?? 之类的保护）：运行时会拿到 undefined，静默算错或抛在更深的地方。',
+        evidence: `call=${name}(${argCount}), required=${required}, missing=${hazard.name}, def=${norm(def.file)}:${def.line_start ?? '?'}`,
       });
     } else if (!variadic && argCount > total) {
       out.push({
@@ -1256,7 +1374,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     if (!src) continue;
     findings.push(...scanContent(file, src));
     findings.push(...bladeRawOutputFindings(file, src));
-    findings.push(...arityFindings(file, src, { symbols }));
+    findings.push(...arityFindings(file, src, { symbols, readFile: read }));
     findings.push(...taintFindings(file, src));
   }
 
