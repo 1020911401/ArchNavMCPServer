@@ -81,3 +81,47 @@ test('default @/ points at the repo root when there is no config at all', () => 
   assert.equal(resolveAlias('@/lib/z', { repoDir: d2 }), 'lib/z.mjs');
   fs.rmSync(d2, { recursive: true, force: true });
 });
+
+test('a second file in the same directory still gets its tsconfig paths', () => {
+  // The old cache returned `{paths: {}}` for a repeat lookup of the same ancestor chain, so
+  // only the first file per directory resolved; every later one silently fell back to the
+  // repo root (measured on a real monorepo: 1 of 2 files in `api/modules/`).
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'alias-memo-'));
+  fs.mkdirSync(path.join(d, 'src', 'api', 'modules'), { recursive: true });
+  fs.mkdirSync(path.join(d, 'src', 'utils'), { recursive: true });
+  fs.writeFileSync(path.join(d, 'src', 'utils', 'request.ts'), '// req');
+  fs.writeFileSync(path.join(d, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { baseUrl: '.', paths: { '@/*': ['./src/*'] } },
+  }));
+  fs.writeFileSync(path.join(d, 'package.json'), '{}');
+  const from = (n) => path.join(d, 'src', 'api', 'modules', n);
+  for (const name of ['a.ts', 'b.ts', 'c.ts']) {
+    assert.equal(resolveAlias('@/utils/request', { repoDir: d, fromFile: from(name) }), 'src/utils/request.ts', name);
+  }
+  fs.rmSync(d, { recursive: true, force: true });
+});
+
+test('monorepo: @/ belongs to the importing package, not the repo root', () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'alias-mono-'));
+  for (const pkg of ['admin', 'merchant']) {
+    fs.mkdirSync(path.join(d, pkg, 'src', 'utils'), { recursive: true });
+    fs.mkdirSync(path.join(d, pkg, 'src', 'pages'), { recursive: true });
+    fs.writeFileSync(path.join(d, pkg, 'src', 'utils', 'request.ts'), `// ${pkg}`);
+    fs.writeFileSync(path.join(d, pkg, 'package.json'), '{}');
+    fs.writeFileSync(path.join(d, pkg, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: { baseUrl: '.', paths: { '@/*': ['./src/*'] } },
+    }));
+  }
+  // no config-based hit for `@shared/...`-style peers: the built-in @/ fallback must still
+  // pick the importing package's own src before the repo root
+  fs.rmSync(path.join(d, 'merchant', 'tsconfig.json'));
+  assert.equal(
+    resolveAlias('@/utils/request', { repoDir: d, fromFile: path.join(d, 'admin', 'src', 'pages', 'a.vue') }),
+    'admin/src/utils/request.ts',
+  );
+  assert.equal(
+    resolveAlias('@/utils/request', { repoDir: d, fromFile: path.join(d, 'merchant', 'src', 'pages', 'b.vue') }),
+    'merchant/src/utils/request.ts',
+  );
+  fs.rmSync(d, { recursive: true, force: true });
+});

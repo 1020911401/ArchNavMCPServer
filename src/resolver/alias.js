@@ -11,8 +11,9 @@
  * Resolution order:
  *   1. `compilerOptions.paths` from the nearest jsconfig.json / tsconfig.json
  *      (searched upward from `fromFile`, then `repoDir`), joined with `baseUrl`.
- *   2. `@/x/y` → `<repoDir>/x/y` — the default alias, applied even when a config
- *      exists (a config-defined `@/*` mapping takes precedence).
+ *   2. `@/x/y` → the importing file's package root first (`<pkg>/src/x/y`, `<pkg>/x/y`),
+ *      then `<repoDir>/src/x/y` and `<repoDir>/x/y` — a monorepo configures `@` per
+ *      package, so the repo root is only the last guess.
  *   3. `./x` / `../x` → relative to `dirname(fromFile)` (or `repoDir`).
  *   4. absolute paths as-is.
  *
@@ -34,49 +35,60 @@ function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 }
 
-let _cfgCache = null;
+/**
+ * Per-directory memo of the nearest JS/TS config. The previous cache was keyed on the whole
+ * ancestor chain and returned `{paths: {}}` on a repeat lookup, so only the *first* file in a
+ * directory got its package's `paths` — every later file fell back to the repo root and
+ * "failed" to resolve imports that exist (measured: 1 of 2 files in the same directory).
+ */
+const _cfgCache = new Map();
+
+function configAt(dir) {
+  if (_cfgCache.has(dir)) return _cfgCache.get(dir);
+  let found = null;
+  for (const name of ['jsconfig.json', 'tsconfig.json']) {
+    const p = path.join(dir, name);
+    if (!fs.existsSync(p)) continue;
+    const json = readJson(p);
+    const co = json && json.compilerOptions;
+    if (co && (co.paths || co.baseUrl)) {
+      found = { baseUrl: path.resolve(dir, co.baseUrl || '.'), paths: co.paths || {} };
+      break;
+    }
+  }
+  _cfgCache.set(dir, found);
+  return found;
+}
+
 function loadConfig(repoDir, fromFile) {
-  if (!_cfgCache) {
-    _cfgCache = { dirs: [], map: new Map(), signature: null };
+  const repo = path.resolve(repoDir);
+  const chain = [];
+  let d = fromFile ? path.dirname(path.resolve(fromFile)) : null;
+  while (d) {
+    chain.push(d);
+    if (d === repo) break;
+    const up = path.dirname(d);
+    if (up === d) break;
+    d = up;
   }
-  const dirs = [];
-  if (fromFile) {
-    let d = path.dirname(fromFile);
-    for (;;) {
-      dirs.push(d);
-      const up = path.dirname(d);
-      if (up === d) break;
-      d = up;
-    }
-  }
-  if (repoDir) dirs.push(repoDir);
-
-  const sig = dirs.join('\0') + '|' + repoDir;
-  if (_cfgCache.signature !== sig) {
-    _cfgCache.signature = sig;
-    _cfgCache.dirs = dirs;
-    _cfgCache.map.clear();
-  } else {
-    return { baseUrl: null, paths: {}, cached: true };
-  }
-
-  const seen = new Set();
-  for (const d of dirs) {
-    if (seen.has(d)) continue;
-    seen.add(d);
-    for (const name of ['jsconfig.json', 'tsconfig.json']) {
-      const p = path.join(d, name);
-      if (!fs.existsSync(p)) continue;
-      const json = readJson(p);
-      const co = json && json.compilerOptions;
-      if (co && (co.paths || co.baseUrl)) {
-        const resolved = { baseUrl: path.resolve(d, co.baseUrl || '.'), paths: co.paths || {} };
-        _cfgCache.map.set(d, resolved);
-        return resolved;
-      }
-    }
+  if (!chain.includes(repo)) chain.push(repo);
+  for (const dir of chain) {
+    const cfg = configAt(dir);
+    if (cfg) return cfg;
   }
   return null;
+}
+
+/** Nearest ancestor of `fromFile` holding a package.json — the scope `@/` belongs to. */
+function nearestPkgRoot(fromFile, repoDir) {
+  const repo = path.resolve(repoDir);
+  let d = fromFile ? path.dirname(path.resolve(fromFile)) : repo;
+  for (;;) {
+    if (fs.existsSync(path.join(d, 'package.json'))) return d;
+    const up = path.dirname(d);
+    if (up === d || d === repo) return repo;
+    d = up;
+  }
 }
 
 function isFile(p) {
@@ -124,8 +136,15 @@ export function resolveAlias(spec, options = {}) {
       }
     }
   }
-  const atStar = matchAlias('@/*', spec);
-  if (atStar !== null) attempts.push(path.resolve(repoDir, atStar));
+  const atStar = matchAlias('@/*', spec) ?? matchAlias('~@/*', spec);
+  if (atStar !== null) {
+    const pkgRoot = nearestPkgRoot(fromFile, repoDir);
+    const bases = fromFile
+      ? [path.join(pkgRoot, 'src', atStar), path.join(pkgRoot, atStar)]
+      : [];
+    bases.push(path.join(repoDir, 'src', atStar), path.join(repoDir, atStar));
+    for (const b of bases) attempts.push(b);
+  }
 
   if (attempts.length) {
     for (const base of attempts) {
