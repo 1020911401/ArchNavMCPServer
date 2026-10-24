@@ -15,6 +15,7 @@
 
 /** Execute declarative rules over one file. Errors bubble: a crashing rule must be loud. */
 export { ANY_RULES } from './any.mjs';
+export { VUE_RULES } from './vue.mjs';
 
 export function runRules(rules, ctx) {
   const out = [];

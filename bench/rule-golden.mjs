@@ -23,6 +23,10 @@ const EXTRA = [
   ['resources/js/Comp.vue', "<template><div v-for=\"i in list\">{{ i.nope }}</div></template>\n<script>export default { methods: { go() { this.$refs.a.x(); } } }</script>\n"],
   ['tools/t.py', "def f(x):\n    try:\n        pass\n    except:\n        pass\n    return eval(x)\n"],
   ['tools/t.go', "package main\nfunc f() { os.Exit(0) }\n"],
+  // Vue family: these three fixtures exist because the original corpus triggered none of
+  // the vue rules, so a migration could have broken them silently.
+  ['pages/detail/detail.vue', "<template>\n  <view v-for=\"(it, i) in list\" v-if=\"it.show\">{{ it.name }}</view>\n</template>\n<script>\nexport default {\n  props: { orderId: { type: String, required: true }, total: Number },\n  methods: {\n    bump() { this.total = 0; this.orderId = 'x'; },\n    tick() { setInterval(() => this.bump(), 1000); },\n  },\n};\n</script>\n"],
+  ['pages/ok.vue', "<template><view v-for=\"i in list\" :key=\"i.id\">{{ i.name }}</view></template>\n<script>export default { data() { return { t: null }; }, mounted() { this.t = setInterval(()=>{}, 1000); }, beforeDestroy() { clearInterval(this.t); } };</script>\n"],
   ['docs/a.md', "# Title\nTODO: fill in\n"],
   ['conf/a.yaml', "key: value\nnot implemented: true\n"],
 ];

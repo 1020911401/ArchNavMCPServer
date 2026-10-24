@@ -24,7 +24,7 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
-import { runRules, GO_RULES, ANY_RULES } from './rules/index.mjs';
+import { runRules, GO_RULES, ANY_RULES, VUE_RULES } from './rules/index.mjs';
 import { selectTests } from './test-select.mjs';
 
 const norm = (p) => String(p ?? '').replace(/\\/g, '/');
@@ -690,45 +690,8 @@ export function scanContent(file, src) {
     }
   }
 
-  // ── Vue: prop mutation, v-if+v-for on one element, interval leak ────────────
-  if (/\.vue$/i.test(file)) {
-    const propsBlock = /props\s*:\s*(\{[\s\S]{0,600}?\}|\[[^\]]*\])/.exec(src);
-    if (propsBlock) {
-      const names = [...propsBlock[1].matchAll(/(?:^|[,{\s])([A-Za-z_$][\w$]*)\s*(?=:|,|\]|\})/g)].map((m) => m[1])
-        .filter((n) => !['props', 'type', 'default', 'required', 'validator', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Function'].includes(n));
-      for (const name of [...new Set(names)]) {
-        const mut = new RegExp(`this\\.${name}\\s*(?:\\+\\+|--|[+\\-*/]?=(?!=))`).exec(src);
-        if (mut) {
-          findings.push({
-            rule: 'vue-mutating-props', severity: 'warn', file: f, line: lineOf(mut.index),
-            message: `${f}:${lineOf(mut.index)} 直接修改 prop \`${name}\`（\`${mut[0].slice(0, 30)}\`）。`,
-            why: '子组件改 prop 是单向数据流的破坏（父组件重渲染会覆盖，或者改了没有任何反应）；应 emit 事件让父组件改，或先复制到本地 data。',
-            evidence: `prop=${name}, matched=${mut[0].slice(0, 40)}`,
-          });
-        }
-      }
-    }
-    for (const m of src.matchAll(/<([A-Za-z][\w-]*)((?:"[^"]*"|'[^']*'|[^>"'])*)>/g)) {
-      const attrs = m[2];
-      if (attrs.includes('v-if') && attrs.includes('v-for')) {
-        findings.push({
-          rule: 'vue-v-if-with-v-for', severity: 'warn', file: f, line: lineOf(m.index),
-          message: `${f}:${lineOf(m.index)} 同一个 <${m[1]}> 上同时有 v-if 与 v-for。`,
-          why: 'Vue 2 里 v-for 优先于 v-if：条件晚于循环求值，既可能报错（访问不存在的变量）又把整个列表渲染一遍才筛掉。用 computed 先过滤，或把 v-if 移到外层 <template>。',
-          evidence: `tag=${m[1]}`,
-        });
-      }
-    }
-    if (/setInterval\s*\(/.test(src) && !/clearInterval\s*\(/.test(src)) {
-      const m = /setInterval\s*\(/.exec(src);
-      findings.push({
-        rule: 'vue-timer-leak', severity: 'warn', file: f, line: lineOf(m.index),
-        message: `${f}:${lineOf(m.index)} 用了 setInterval 但整个文件没有 clearInterval。`,
-        why: '页面/组件销毁后定时器还在跑：拿着已卸载组件的状态发请求、刷数据，内存与请求都泄漏。在 onUnload/beforeDestroy/unmounted 里 clearInterval。',
-        evidence: 'setInterval present, clearInterval absent',
-      });
-    }
-  }
+  // ── Vue family now lives in scripts/rules/vue.mjs (declarative) ────────────
+  findings.push(...runRules(VUE_RULES, { file, f, src, lineOf }));
 
   // ── JS/Vue: bindings that are never used (AI code leaves a lot of these) ────
   if (JS_OR_VUE) {

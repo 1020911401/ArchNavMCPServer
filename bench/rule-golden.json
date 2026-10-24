@@ -1,6 +1,6 @@
 {
-  "corpusFiles": 105,
-  "findings": 27,
+  "corpusFiles": 111,
+  "findings": 31,
   "rows": [
     {
       "rule": "php-debug-left-on",
@@ -20,8 +20,36 @@
       "rule": "js-debug-left-on",
       "severity": "warn",
       "file": "bench/rule-golden.mjs",
-      "line": 64,
+      "line": 68,
       "message": "bench/rule-golden.mjs 残留调试输出 `console.log(`。"
+    },
+    {
+      "rule": "vue-mutating-props",
+      "severity": "warn",
+      "file": "pages/detail/detail.vue",
+      "line": 8,
+      "message": "pages/detail/detail.vue:8 直接修改 prop `orderId`（`this.orderId =`）。"
+    },
+    {
+      "rule": "vue-timer-leak",
+      "severity": "warn",
+      "file": "pages/detail/detail.vue",
+      "line": 9,
+      "message": "pages/detail/detail.vue:9 用了 setInterval 但整个文件没有 clearInterval。"
+    },
+    {
+      "rule": "vue-v-if-with-v-for",
+      "severity": "warn",
+      "file": "pages/detail/detail.vue",
+      "line": 2,
+      "message": "pages/detail/detail.vue:2 同一个 <view> 上同时有 v-if 与 v-for。"
+    },
+    {
+      "rule": "vue-vfor-missing-key",
+      "severity": "warn",
+      "file": "pages/detail/detail.vue",
+      "line": 2,
+      "message": "1 处 v-for 没有 :key（首个 <view> 在第 2 行）。"
     },
     {
       "rule": "ai-todo-left",
