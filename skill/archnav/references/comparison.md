@@ -1,4 +1,10 @@
-# ArchNav vs GitNexus vs Graphify — 实测对比
+﻿# ArchNav vs GitNexus vs Graphify — 实测对比
+
+> **最新一次标准跑分：2026-10-25（commit 13369a9，Node 26.7.0 / CodeGraph 1.6.2 / GitNexus 1.6.6）**
+> 完整记录见仓库 `docs/three-way-bench-2026-10-25.md`；下面各节是历史上的分轮实测，数字保留原样，读的时候注意对应的 commit。
+> 该轮要点：`callers` showSelectOptions 19/20 vs 0/20 vs 0/20、getUserInfo 29/32 vs 1/32 vs 9/32；
+> `multi_dim` 精确项 ArchNav 7/7、CodeGraph 4/7、GitNexus 2/7；`deep_recall` vue 侧 5/5 vs 0/5 vs 0 行；
+> 索引体积 2.8/4.5/42 MB（php）与 9/17/103 MB（vue），全量耗时 3.4/3.3/23.3s 与 16.1/5.0/41.8s。
 
 ## 索引数据（同一 20 文件 JS 项目）
 
