@@ -246,6 +246,14 @@ Engines are not penalized for a missing flag: e.g. GitNexus has no `read`, so
 * **Run it as `node bench/multi_dim.mjs < /dev/null`** when stdout is not a TTY —
   one of the CLIs probes for a terminal and the shell aborts with
   `stdin is not a tty`.
+* **Never pipe `run_bench.mjs` (or `multi_dim.mjs`) into `tail`/`head`.** The
+  scripts `exit(0)` on stdout `EPIPE`, so under a pipe the whole table can
+  vanish and the only surviving line is a child's `stdin is not a tty` — it
+  looks like a clean run with no results. Redirect to a file and read that
+  (`… > /tmp/bench.log < /dev/null`); `report.json` is still written either way.
+* **GitNexus' own staleness flag is unreliable on fixtures**: after a fresh
+  `analyze --skip-git --index-only`, `run_bench` reports `索引提交: 当前` while
+  `multi_dim` gets `⚠️ 已过期`. Treat `run_bench`'s reading as authoritative.
 
 ### Recall caveat
 
