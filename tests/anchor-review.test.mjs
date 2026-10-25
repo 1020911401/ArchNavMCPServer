@@ -338,7 +338,8 @@ test('llmJudge is na without a runner and parses a verdict with one', () => {
   assert.equal(none[0].status, 'na');
   assert.match(none[0].note, /未配置 LLM 判官/);
   const fake = llmJudge({
-    items, trajectory: { report: 'r' }, runner: 'cat >/dev/null; echo FAIL:缺证据',
+    items, trajectory: { report: 'r' },
+    runner: 'node -e "console.log(\'FAIL:no-evidence\')"',
   });
   assert.equal(fake[0].status, 'fail');
   assert.match(fake[0].evidence, /FAIL/);
