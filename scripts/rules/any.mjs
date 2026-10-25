@@ -61,13 +61,22 @@ export const ANY_RULES = [
       const code = codeOnly || '';
       // Sources whose runtime type is not declared in code: config reads, request
       // input, env, superglobals, and array access on a request-ish variable.
-      const SOURCE_RE = /(\$\w+)\s*=\s*[^;]*?(?:->get\(|->query\(|->input\(|->header\(|\bconfig\(|\binput\(|\benv\(|\bgetenv\(|->request\b|\$_(?:GET|POST|REQUEST)\b)/;
+      const SOURCE_RE = /(\$\w+)\s*=\s*([^;]*?)(?:->get\(|->query\(|->input\(|->header\(|\bconfig\(|\binput\(|\benv\(|\bgetenv\(|->request\b|\$_(?:GET|POST|REQUEST)\b)/;
+      // The cast that makes the comparison version-proof usually sits in the
+      // *assignment* (`$limit = (int) request()->input(...)`), not next to the
+      // operator. Looking only at the 24 chars before `<`/`>` reported every
+      // cast-at-assignment site as uncast — 9/9 false positives on the Laravel
+      // migration repo, which is what made this rule look like the real risk area.
+      const CAST_AT_RHS_RE = /(?:^|[^\w$])(?:\(int\)|\(integer\)|\(float\)|\(double\)|\(string\)|\(bool\)|\(boolean\)|\bintval\(|\bfloatval\(|\bstrval\(|\bboolval\(|\bcount\(|\bstrlen\()/;
       const fromSource = new Map();
+      const castAtSource = new Set();
       let line = 0;
       for (const sourceLine of code.split(LINE_BREAK)) {
         line += 1;
         const m = SOURCE_RE.exec(sourceLine);
-        if (m) fromSource.set(m[1], line);
+        if (!m) continue;
+        fromSource.set(m[1], line);
+        if (CAST_AT_RHS_RE.test(m[2] || '')) castAtSource.add(m[1]);
       }
       if (!fromSource.size) return [];
       const CAST_RE = /(?:\(int\)|\(float\)|\(string\)|\(bool\)|\bintval\(|\bfloatval\(|\bcount\(|\bstrlen\()\s*$/;
@@ -77,6 +86,7 @@ export const ANY_RULES = [
           const varName = pick(m);
           const at = fromSource.get(varName);
           if (!at) continue;
+          if (castAtSource.has(varName)) continue; // (int) in the assignment already fixes the type
           const idx = m.index;
           if (at > lineOf(idx)) continue; // assignment must come first
           const before = code.slice(Math.max(0, idx - 24), idx);

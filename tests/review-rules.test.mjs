@@ -686,6 +686,16 @@ test('php-uncast-value-compare: config/input value compared to a number without 
 
   // a plain local counter is not a config read → no finding
   assert.deepEqual(scanContent('app/C.php', '<?php\n$i = 0;\nif ($i < 3) { $i++; }\n').filter((x) => x.rule === 'php-uncast-value-compare'), []);
+
+  // the cast usually sits in the assignment, not next to the operator: 9/9 hits on the
+  // Laravel migration repo were `$x = (int) request()->input(...)` + `if ($x > 100)`
+  const castAtAssignment = '<?php\n$limit = (int) request()->input(\'limit\', 0);\nif ($limit > 100) { $limit = 100; }\n';
+  assert.deepEqual(scanContent('app/C.php', castAtAssignment).filter((x) => x.rule === 'php-uncast-value-compare'), []);
+  const intvalAtAssignment = '<?php\n$num = intval(cache()->get(\'k\', 1));\nif ($num > 1) { $x = 2; }\n';
+  assert.deepEqual(scanContent('app/C.php', intvalAtAssignment).filter((x) => x.rule === 'php-uncast-value-compare'), []);
+  // ...but an uncast assignment is still reported (the rule must not go silent)
+  const uncast = '<?php\n$limit = request()->input(\'limit\', 0);\nif ($limit > 100) { $limit = 100; }\n';
+  assert.equal(scanContent('app/C.php', uncast).filter((x) => x.rule === 'php-uncast-value-compare').length, 1);
 });
 
 test('security: debug output left in a changed file', () => {
@@ -1412,4 +1422,19 @@ test('AI hallucinations: monorepo aliases resolve per package, and every indexed
   // recall kept: a specifier that really resolves nowhere still fires, in either form
   assert.equal(is("import x from '@/nothing/here';", 'admin/src/a/b.ts').length, 1);
   assert.equal(is("import y from './ghost';", 'admin/src/router/index.ts').length, 1);
+});
+
+test('git diff never pages and never prompts (large compare diffs), via the injected spawn', async () => {
+  const { gitDiffPatch } = await import('../src/navigation.js');
+  let seen = null;
+  const fakeSpawn = (cmd, args, opts) => {
+    seen = { cmd, args, opts };
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  const res = gitDiffPatch('.', { scope: 'compare', base: 'a86680c', spawn: fakeSpawn });
+  assert.equal(res.ok, true);
+  assert.equal(seen.opts.env.GIT_PAGER, 'cat', 'paging on a 72-commit diff exits with "stdin is not a tty"');
+  assert.equal(seen.opts.env.PAGER, 'cat');
+  assert.equal(seen.opts.env.GIT_TERMINAL_PROMPT, '0', 'no credential prompt on a non-tty');
+  assert.deepEqual(seen.opts.stdio, ['ignore', 'pipe', 'pipe']);
 });

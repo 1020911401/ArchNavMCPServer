@@ -4,7 +4,7 @@
 import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
-import { analyze, getIndex } from './analyzer.js';
+import { getIndex } from './analyzer.js';
 import { checkStaleness, computeConfidence } from './confidence.js';
 
 /**
@@ -396,6 +396,10 @@ export function gitDiffPatch(dirPath, { scope = 'unstaged', base = null, timeout
     cwd: dirPath, encoding: 'utf8', timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
     windowsHide: true,
+    // A big `--scope compare` diff (72 commits) made git try to page: with no tty
+    // it exits with `stdin is not a tty` and the whole review looks like a failure.
+    // Paging and credential prompts are never wanted here — both are pinned off.
+    env: { ...process.env, GIT_PAGER: 'cat', PAGER: 'cat', GIT_TERMINAL_PROMPT: '0' },
   });
   if (res.error || res.status !== 0) {
     const msg = res.error ? res.error.message : `${(res.stderr || '').trim().split('\n')[0]}`;
