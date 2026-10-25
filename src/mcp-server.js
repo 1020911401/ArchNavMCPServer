@@ -447,15 +447,27 @@ async function handleToolCall(name, args) {
         for (const i of archResult.direct_impact) text += `   ${i.symbol} → ${i.file}:${i.line}\n`;
       }
       try {
-        const gnResult = await callGN('impact', { target: args.name, direction: 'upstream', maxDepth: args.maxDepth || 3, repo: args.repo });
-        const gnText = gnResult?.content?.[0]?.text || '';
-        if (gnText) {
-          const jsonPart = gnText.split('\n---')[0].trim();
-          try {
-            const gnData = JSON.parse(jsonPart);
-            text += `\n🔍 Risk (GitNexus): ${gnData.risk || 'N/A'}\n`;
-            if (gnData.summary) text += `   Direct: ${gnData.summary.direct || 0}\n   Processes affected: ${gnData.summary.processes_affected || 0}\n`;
-          } catch { text += `\n[GitNexus raw]\n${gnText.substring(0, 300)}`; }
+        // GitNexus aborts with "Multiple repositories indexed" unless -r names one.
+        // Resolve it the same way the caller adapter does (explicit → path match →
+        // single), so this fused answer never inherits another tool's raw error.
+        const gnRepo = args.repo || (await gitnexusEngine.resolveRepo({ projectDir: dir })).repo || null;
+        if (!gnRepo) {
+          text += '\n🔍 GitNexus: skipped — no indexed repository matches this projectDir\n';
+        } else {
+          const gnResult = await callGN('impact', { target: args.name, direction: 'upstream', maxDepth: args.maxDepth || 3, repo: gnRepo });
+          const gnText = gnResult?.content?.[0]?.text || '';
+          if (gnText) {
+            const jsonPart = gnText.split('\n---')[0].trim();
+            try {
+              const gnData = JSON.parse(jsonPart);
+              text += `\n🔍 Risk (GitNexus · ${gnRepo}): ${gnData.risk || 'N/A'}\n`;
+              if (gnData.summary) text += `   Direct: ${gnData.summary.direct || 0}\n   Processes affected: ${gnData.summary.processes_affected || 0}\n`;
+            } catch {
+              // One line, not a 300-char paste of another tool's failure text.
+              const first = String(gnText).split('\n').map((s) => s.trim()).find(Boolean) || 'no output';
+              text += `\n🔍 GitNexus (${gnRepo}): ${first.slice(0, 160)}\n`;
+            }
+          }
         }
       } catch { /* gitnexus optional */ }
       if (!archResult.direct_impact?.length) text += '\n⚠️ No direct callers found in ArchNav graph.';
