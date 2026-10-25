@@ -451,6 +451,84 @@ function rangesOverlap(a1, a2, b1, b2) {
   return lo1 <= hi2 && lo2 <= hi1;
 }
 
+// ═══════════════════════════════════════════════
+//  Risk grading
+// ═══════════════════════════════════════════════
+
+const RISK_LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+const appRootOf = (f) => String(f || '').replace(/\\/g, '/').split('/')[0] || '';
+const isTestPath = (f) => /(^|\/)(tests?|__tests__|specs?|fixtures?)\//i.test(String(f || ''));
+
+/**
+ * Four-tier risk for an impact set: LOW / MEDIUM / HIGH / CRITICAL (+ UNKNOWN).
+ *
+ * The *scale* is the one GitNexus popularised — depth-1 callers drive the tier,
+ * spread escalates it, and "the walk could not answer" must never read as "safe".
+ * The *values* are ArchNav's own, because copying GitNexus' numbers was measured
+ * and rejected: on crmeb-laravel GitNexus reports `LOW` for `bind` (254 direct
+ * callers, 3 apps) and `UNKNOWN` for `search` (17 callers, 12 files) — it resolves
+ * a fraction of the edges ArchNav does, so its verdicts there encode blindness.
+ *
+ * The tier is decided by affected FILES, not symbols: 14 Vue pages importing one
+ * composable is 14 call sites but one review decision.
+ *
+ * @param {{direct?: object[], indirect?: object[], ambiguous?: boolean}} impact
+ * @returns {{level: string, files: number, apps: number, appList: string[],
+ *            symbols: number, indirect: number, reasons: string[], note?: string}}
+ */
+export function gradeRisk({ direct = [], indirect = [], ambiguous = false } = {}) {
+  const rows = (direct || []).filter(Boolean);
+  const files = [...new Set(rows.map((r) => r.file).filter(Boolean))];
+  const apps = [...new Set(files.map(appRootOf).filter(Boolean))];
+  const nIndirect = (indirect || []).length;
+  const base = { files: files.length, apps: apps.length, appList: apps, symbols: rows.length, indirect: nIndirect };
+
+  if (!files.length) {
+    const note = ambiguous
+      ? '多个同名定义、且聚合后没有任何可解析的调用方 —— 无法判定，不等于安全。'
+      : '没有解析到调用方。动态派发 / 跨语言字段 / 反射在这个图里不可见，结论须 grep 复核。';
+    return { ...base, level: ambiguous ? 'UNKNOWN' : 'LOW', reasons: [note], note };
+  }
+
+  const reasons = [];
+  let idx = files.length <= 3 ? 0 : files.length <= 9 ? 1 : files.length <= 24 ? 2 : 3;
+  reasons.push(`${files.length} 个受影响文件 → ${RISK_LEVELS[idx]}`);
+
+  if (apps.length >= 2) {
+    const bump = apps.length >= 4 ? 2 : 1;
+    const before = idx;
+    idx = Math.min(3, idx + bump);
+    reasons.push(idx === before
+      ? `跨 ${apps.length} 个应用（${apps.slice(0, 4).join('/')}），已在最高档`
+      : `跨 ${apps.length} 个应用（${apps.slice(0, 4).join('/')}）→ 升 ${idx - before} 级`);
+  }
+  if (nIndirect >= 10) {
+    const before = idx;
+    idx = Math.min(3, idx + 1);
+    if (idx !== before) reasons.push(`${nIndirect} 个间接影响 → 升 1 级`);
+    else reasons.push(`${nIndirect} 个间接影响，已在最高档`);
+  }
+  if (files.every(isTestPath) && idx > 0) {
+    idx -= 1;
+    reasons.push('全部调用方都在测试代码里 → 降 1 级');
+  }
+
+  const confs = rows.map((r) => r.confidence).filter((c) => typeof c === 'number');
+  const avgConf = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null;
+  const out = { ...base, level: RISK_LEVELS[idx], reasons };
+  if (ambiguityNote(ambiguous)) out.note = ambiguityNote(ambiguous);
+  if (avgConf !== null && avgConf < 0.6) {
+    out.note = `${out.note ? `${out.note} ` : ''}边缘置信度偏低（均值 ${avgConf.toFixed(2)}），受影响面可能更大。`;
+  }
+  return out;
+}
+
+function ambiguityNote(ambiguous) {
+  return ambiguous
+    ? '同名符号有多个定义，本结论已跨全部定义聚合；单看某一个定义的影响面更小。'
+    : null;
+}
+
 export const archNav = {
   /**
    * Show architecture map
@@ -802,6 +880,13 @@ export const archNav = {
         ...(filter.kind ? { filtered_by_kind: filter.kind } : {}),
       } : {}),
       layer: index.layerMap?.[sym.id] || null,
+      // Four-tier verdict (LOW/MEDIUM/HIGH/CRITICAL/UNKNOWN) with the reasons that
+      // produced it, so "why is this HIGH" never needs a second tool call.
+      risk: gradeRisk({
+        direct: directImpact,
+        indirect: indirectRelations,
+        ambiguous: !!resolved.ambiguous,
+      }),
       direct_impact: directImpact,
       indirect_relations: indirectRelations,
       // Legacy alias: older consumers (and the CLI renderer) read this name.

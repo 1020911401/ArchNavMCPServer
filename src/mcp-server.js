@@ -442,6 +442,14 @@ async function handleToolCall(name, args) {
       }
       if (archResult.layer) text += `🏗️  Layer (ArchNav): ${archResult.layer}\n`;
       if (archResult.confidence !== undefined) text += `📊 Confidence: ${(archResult.confidence * 100).toFixed(0)}%\n`;
+      // Our own verdict, with the reasons that produced it — no second tool needed.
+      const RISK_BADGE = { LOW: '🟢', MEDIUM: '🟡', HIGH: '🟠', CRITICAL: '🔴', UNKNOWN: '❔' };
+      const risk = archResult.risk;
+      if (risk) {
+        text += `\n${RISK_BADGE[risk.level] || '•'} Risk (ArchNav): ${risk.level} — ${risk.files} files · ${risk.apps} apps · ${risk.indirect} indirect\n`;
+        for (const why of risk.reasons || []) text += `   · ${why}\n`;
+        if (risk.note) text += `   ⚠️ ${risk.note}\n`;
+      }
       if (archResult.direct_impact?.length) {
         text += '\n🔴 Direct (ArchNav):\n';
         for (const i of archResult.direct_impact) text += `   ${i.symbol} → ${i.file}:${i.line}\n`;
@@ -460,7 +468,19 @@ async function handleToolCall(name, args) {
             const jsonPart = gnText.split('\n---')[0].trim();
             try {
               const gnData = JSON.parse(jsonPart);
-              text += `\n🔍 Risk (GitNexus · ${gnRepo}): ${gnData.risk || 'N/A'}\n`;
+              const gnRisk = gnData.risk || 'N/A';
+              // GitNexus is a second opinion now, not the verdict: on a multi-app
+              // PHP+Vue repo it under-resolves (measured: `bind` — 254 callers,
+              // reported LOW). Print the divergence instead of silently averaging.
+              const rank = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
+              let delta = '';
+              if (gnRisk === 'UNKNOWN') {
+                delta = '（它没能走完调用链 = 无法判定，不是安全）';
+              } else if (risk && gnRisk in rank && risk.level in rank) {
+                const d = rank[risk.level] - rank[gnRisk];
+                delta = d === 0 ? '（与 ArchNav 一致）' : `（与 ArchNav 差 ${Math.abs(d)} 档，以 ArchNav 为准）`;
+              }
+              text += `\n🔍 Cross-check (GitNexus · ${gnRepo}): ${gnRisk}${delta}\n`;
               if (gnData.summary) text += `   Direct: ${gnData.summary.direct || 0}\n   Processes affected: ${gnData.summary.processes_affected || 0}\n`;
             } catch {
               // One line, not a 300-char paste of another tool's failure text.

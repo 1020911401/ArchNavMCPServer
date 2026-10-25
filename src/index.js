@@ -374,6 +374,7 @@ function printAmbiguous(r, relations = r.relations) {
   for (const c of r.candidates) {
     console.log(`   ${c.name} (${c.kind || '?'}) → ${c.file}:${c.line}`);
   }
+  if (r.risk) printRisk(r);
   // The graph already aggregated across every definition — showing the
   // candidates and stopping hid 22 real callers behind a "narrow this down"
   // hint. Print what was found, then say how to narrow it.
@@ -471,11 +472,24 @@ function printCallGraph(r) {
   }
 }
 
+const RISK_BADGE = { LOW: '🟢', MEDIUM: '🟡', HIGH: '🟠', CRITICAL: '🔴', UNKNOWN: '❔' };
+
+/** Print the four-tier verdict and, crucially, the reasons that produced it. */
+function printRisk(r) {
+  const risk = r && r.risk;
+  if (!risk) return;
+  const badge = RISK_BADGE[risk.level] || '•';
+  console.log(`   ${badge} Risk: ${risk.level}  (${risk.files} files · ${risk.apps} apps · ${risk.indirect} indirect)`);
+  for (const why of risk.reasons || []) console.log(`      · ${why}`);
+  if (risk.note) console.log(`      ⚠️ ${risk.note}`);
+}
+
 function printImpact(r) {
   if (r.ambiguous) return printAmbiguous(r, r.direct_impact);
   console.log(`\n💥 Impact Analysis: ${r.symbol}`);
   console.log(`   Layer: ${r.layer}`);
   console.log(`   File: ${r.file}:${r.line_start}`);
+  printRisk(r);
   
   if (r.direct_impact?.length) {
     console.log(`\n   🔴 Direct impact (will break):`);
