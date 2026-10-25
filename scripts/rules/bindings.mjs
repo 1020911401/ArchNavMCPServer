@@ -21,7 +21,10 @@ export const BINDING_RULES = [
       const withoutComments = blanked;
       const out = [];
       for (const m of src.matchAll(/^[ \t]*import\s+([^;\n]+?)\s+from\s+['"][^'"]+['"]/gm)) {
-        const clause = m[1].trim();
+        // `import type {A} from 'b'` / `import typeof A from 'b'`: the leading
+        // keyword is a modifier, not a binding. Counting it as one reported every
+        // type-only import as a dead binding (the keyword occurs exactly once).
+        const clause = m[1].trim().replace(/^(?:type|typeof)\s+/, '');
         const bound = [];
         const defaultName = /^([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
         if (defaultName && defaultName !== 'from') bound.push(defaultName);

@@ -177,3 +177,46 @@ test('unresolved: ghost pages, missing .vue and dynamic urls are all reported', 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── pages.json discovery: per app, not only at the repo root ───────────────
+//
+// A monorepo keeps the uni-app at `<app>/src/pages.json` (crmeb-laravel:
+// uniapp/src/pages.json). Reading only `<root>/pages.json` found nothing there,
+// so `knownPages` stayed empty — every page looked unregistered and every
+// navigateTo looked like a dead link (measured: 89 + 12 bogus findings).
+test('pages.json is found under <app>/src and page paths resolve against that app', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'archnav-uni-app-'));
+  try {
+    const mk = (rel, body = '') => {
+      const abs = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, body);
+    };
+    mk('uniapp/src/pages.json', JSON.stringify({
+      pages: [{ path: 'pages/index/index' }, { path: 'pages/ghost/none' }],
+      tabBar: { list: [{ pagePath: 'pages/index/index' }] },
+    }));
+    mk('uniapp/src/pages/index/index.vue', "<template><view/></template>\n<script>uni.navigateTo({ url: '/pages/ghost/none' });</script>");
+    // a sibling SPA: no pages.json, so nothing here is a uni-app page
+    mk('admin/src/pages/dash/Home.vue', '<template><view/></template>');
+
+    const { nodes, edges, stats, unresolved } = extractUniPages(dir, []);
+
+    assert.deepEqual(stats.apps, [{ pagesJson: 'uniapp/src/pages.json', baseDir: 'uniapp/src', pages: 2 }]);
+    assert.equal(stats.pages, 2, 'both declared pages become nodes');
+    // the .vue is found relative to the app that declared it, not the repo root
+    assert.ok(
+      edges.some((e) => e.from === 'page:pages/index/index' && e.to === 'file:uniapp/src/pages/index/index.vue'),
+      `page→file edge must point into uniapp/src (got ${JSON.stringify(edges.map((e) => [e.from, e.to]))})`,
+    );
+    // the declared-but-missing page is reported against the right pages.json
+    assert.ok(unresolved.some((u) => u.reason === 'missing-vue'
+      && u.file === 'uniapp/src/pages.json' && u.target === 'pages/ghost/none'));
+    // a page node is never invented for the SPA
+    assert.ok(!nodes.some((n) => String(n.file || '').startsWith('admin/')));
+    // …and the navigation target that IS declared is linked, not reported
+    assert.ok(edges.some((e) => e.from === 'file:uniapp/src/pages/index/index.vue' && e.to === 'page:pages/ghost/none'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

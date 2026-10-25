@@ -113,6 +113,18 @@ export default {
   assert.match(deadRules.find((x) => x.severity === 'warn').message, /unusedThing/);
   assert.deepEqual(scanContent('utils/a.js', "import { usedThing } from './x';\nconst used = 1;\nusedThing(used);").filter((x) => x.rule === 'js-unused-binding'), []);
 
+  // Type-only imports: the leading `type` is a modifier, not a binding. Counting
+  // it as one reported every `import type {…}` line as a dead binding, because
+  // the keyword itself occurs exactly once in the file.
+  const typed = scanContent('src/router.ts', "import type { RouteRecordRaw } from 'vue-router';\nconst routes: RouteRecordRaw[] = [];\nexport default routes;");
+  assert.deepEqual(typed.filter((x) => x.rule === 'js-unused-binding' && /name=type\b/.test(x.evidence)), []);
+  // …while a genuinely unused type import is still reported
+  assert.equal(
+    scanContent('src/a.ts', "import type { Used } from './a';\nimport type { Never } from './b';\nconst x: Used = 1;\nexport default x;")
+      .filter((x) => /name=Never\b/.test(x.evidence)).length,
+    1,
+  );
+
   // Go: ignored return value, panic in a library, SQL built by concatenation
   const go = scanContent('internal/store/store.go', `package store
 
@@ -234,6 +246,8 @@ function makeIndex(over = {}) {
     unresolvedRoutes: over.unresolvedRoutes ?? [],
     unresolvedPages: over.unresolvedPages ?? [],
     knowledgeGraph: { edges: over.edges ?? [], nodes: over.nodes ?? [] },
+    uniPageStats: over.uniPageStats ?? undefined,
+    fileHashes: over.fileHashes ?? {},
   };
 }
 
@@ -339,6 +353,8 @@ test('uni-app: an unregistered page under pages/ is an error, a component under 
       { id: 'c1', name: 'index', kind: 'function', file: 'pages/admin/components/customForm/index.vue', line_start: 1, line_end: 9 },
     ],
     edges: [{ from: 'page:pages/goods/list/index', to: 'file:pages/goods/list/index.vue', type: 'CONTAINS' }],
+    // '' = this repo's pages.json sits at the root, so every pages/** file is in the app
+    uniPageStats: { apps: [{ pagesJson: 'pages.json', baseDir: '', pages: 1 }] },
   });
   const f = reviewFindings({
     changes: makeChanges({
@@ -356,6 +372,31 @@ test('uni-app: an unregistered page under pages/ is an error, a component under 
     index, readFile: () => null,
   });
   assert.equal(f2.filter((x) => x.rule === 'vue-page-not-registered').length, 0);
+
+  // A SPA has no pages.json: "not registered" cannot be judged, so say nothing.
+  // Applying it anyway flagged every pages/**/*.vue in a Vite app (81 of 89
+  // findings on crmeb-laravel came from apps that have no pages.json).
+  const spa = makeIndex({ uniPageStats: { apps: [] } });
+  const f3 = reviewFindings({
+    changes: makeChanges({ changed_files: [{ file: 'admin/src/pages/order/List.vue' }] }),
+    index: spa, readFile: () => null,
+  });
+  assert.equal(f3.filter((x) => x.rule === 'vue-page-not-registered').length, 0);
+
+  // …and a monorepo's uni-app lives under <app>/src, not at the root: files
+  // inside that subtree are judged, files in a sibling SPA are not.
+  const mono = makeIndex({
+    uniPageStats: { apps: [{ pagesJson: 'uniapp/src/pages.json', baseDir: 'uniapp/src', pages: 1 }] },
+  });
+  const f4 = reviewFindings({
+    changes: makeChanges({
+      changed_files: [{ file: 'uniapp/src/pages/dead/index.vue' }, { file: 'admin/src/pages/dead/index.vue' }],
+    }),
+    index: mono, readFile: () => null,
+  });
+  const monoHits = f4.filter((x) => x.rule === 'vue-page-not-registered');
+  assert.equal(monoHits.length, 1, 'only the uni-app page should be judged');
+  assert.equal(monoHits[0].file, 'uniapp/src/pages/dead/index.vue');
 });
 
 test('uni-app: navigation problems are split by reason (unknown page vs dynamic url)', () => {
@@ -386,6 +427,27 @@ test('uni-app: a component nothing imports is flagged as an orphan', () => {
   });
   const orph = f.filter((x) => x.rule === 'vue-component-orphan');
   assert.deepEqual(orph.map((x) => x.file), ['components/indexGoods/index.vue']);
+});
+
+test('uni-app: a component declared in components.d.ts is auto-imported, not an orphan', () => {
+  // unplugin-vue-components registers every component it can see in
+  // `components.d.ts`; those files are never imported by hand, so an
+  // import-only inbound check called all of them orphans (8 on crmeb-laravel).
+  const index = makeIndex({ fileHashes: { 'admin/components.d.ts': 'h' } });
+  const dts = "declare module 'vue' {\n  export interface GlobalComponents {\n"
+    + "    SearchBar: typeof import('./src/components/SearchBar.vue')['default']\n"
+    + "  }\n}\nexport {}\n";
+  const f = reviewFindings({
+    changes: makeChanges({
+      changed_files: [{ file: 'admin/src/components/SearchBar.vue' }, { file: 'admin/src/components/ReallyDead.vue' }],
+    }),
+    index,
+    readFile: (rel) => (rel === 'admin/components.d.ts' ? dts : null),
+  });
+  assert.deepEqual(
+    f.filter((x) => x.rule === 'vue-component-orphan').map((x) => x.file),
+    ['admin/src/components/ReallyDead.vue'],
+  );
 });
 
 test('a repo with no test files reports that once instead of per-file coverage warnings', () => {
@@ -580,8 +642,31 @@ test('security: hardcoded secret fires on assignment, NOT on a validation rule',
   // the real false-positive source in bench/php-app: Laravel validation strings
   const validation = scanContent('app/Http/Controllers/Auth/RegisterController.php', "<?php\n$rules = ['password' => 'required|min:6|confirmed'];\n");
   assert.deepEqual(validation.filter((x) => x.rule === 'php-hardcoded-secret'), []);
-  const validator = scanContent('app/Validators/UserValidator.php', "<?php\n['password' => 'required|max:60'];\n");
+  const validator = scanContent('app/Validators/UserValidator.php', "<?php\n['password' => 'required|max:60'];");
   assert.deepEqual(validator.filter((x) => x.rule === 'php-hardcoded-secret'), []);
+});
+
+test('security: hardcoded secret skips fixtures (tests/ seeders factories)', () => {
+  const src = "<?php\n$credentials = ['password' => 'admin123456'];\n";
+  // the fixture paths: 45 of the 47 hits on crmeb-laravel were exactly this
+  for (const file of [
+    'backend/tests/Feature/LoginTest.php',
+    'backend/database/seeders/UserSeeder.php',
+    'backend/database/factories/UserFactory.php',
+  ]) {
+    assert.deepEqual(
+      scanContent(file, src).filter((x) => x.rule === 'php-hardcoded-secret'),
+      [], `${file} is a fixture`,
+    );
+  }
+  // …a real config file still fires
+  assert.ok(
+    scanContent('backend/config/services.php', src).some((x) => x.rule === 'php-hardcoded-secret'),
+  );
+  // …and so does a scratch debug script: a pasted password there is still real
+  assert.ok(
+    scanContent('backend/debug_endpoints.php', src).some((x) => x.rule === 'php-hardcoded-secret'),
+  );
 });
 
 test('security: $request->all() without validation in a controller, but not when validated', () => {

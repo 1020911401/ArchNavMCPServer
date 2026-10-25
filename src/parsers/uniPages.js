@@ -128,14 +128,57 @@ function matchesWithLines(text, re, starts) {
 // ═══════════════════════════════════════════════
 
 /**
- * Read `pages.json` (JSONC) and return the declared page paths.
+ * Read every `pages.json` that governs this repo and return its declarations.
+ *
+ * A uni-app does not have to keep `pages.json` at the repo root: a monorepo has
+ * `<app>/src/pages.json` (`crmeb-laravel/uniapp/src/pages.json`) and a plain app
+ * has `<app>/pages.json`. Looking only at `<root>/pages.json` found nothing on
+ * such a repo, which left `knownPages` empty — every page looked unregistered
+ * and every `navigateTo` looked like a 404.
+ *
+ * @returns {{file: string, fileRel: string, baseDir: string, baseDirRel: string,
+ *            decls: {path: string, line: number, source: string}[]}[] | null}
+ */
+function readPageDeclarations(repoDir) {
+  const candidates = [];
+  const consider = (dir) => {
+    const abs = path.join(dir, 'pages.json');
+    if (fs.existsSync(abs)) candidates.push({ file: abs, baseDir: dir });
+  };
+  consider(repoDir);
+  let entries = [];
+  try { entries = fs.readdirSync(repoDir, { withFileTypes: true }); } catch { entries = []; }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.') || IGNORE_DIRS.has(e.name)) continue;
+    const appDir = path.join(repoDir, e.name);
+    consider(appDir);
+    consider(path.join(appDir, 'src'));
+  }
+  if (!candidates.length) return null;
+
+  const out = [];
+  for (const c of candidates) {
+    const decls = readOnePageConfig(c.file);
+    if (decls === null) continue;
+    out.push({
+      file: c.file,
+      fileRel: toPosix(path.relative(repoDir, c.file)),
+      baseDir: c.baseDir,
+      baseDirRel: toPosix(path.relative(repoDir, c.baseDir)),
+      decls,
+    });
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Read one `pages.json` (JSONC) and return the declared page paths.
  * Structure comes from JSON (after comments are stripped); the line of each
  * declaration comes from a positional scan of the same text, aligned by order.
  *
- * @returns {{ path: string, line: number, source: 'pages.json'|'subPackages'|'tabBar' }[]}
+ * @returns {{ path: string, line: number, source: 'pages.json'|'subPackages'|'tabBar' }[] | null}
  */
-function readPageDeclarations(repoDir) {
-  const file = path.join(repoDir, 'pages.json');
+function readOnePageConfig(file) {
   if (!fs.existsSync(file)) return null;
 
   let raw;
@@ -352,12 +395,12 @@ export function extractUniPages(repoDir, symbols = []) { // eslint-disable-line 
     ms: 0,
   };
 
-  const decls = readPageDeclarations(root);
+  const pageConfigs = readPageDeclarations(root);
   const sources = discoverSources(root);
 
   // A repo with neither pages.json nor any .vue is not a uni-app front-end
   // (e.g. bench/php-app) — leave the graph untouched rather than pay for a scan.
-  if (decls === null && !sources.some((s) => /\.vue$/i.test(s))) {
+  if (pageConfigs === null && !sources.some((s) => /\.vue$/i.test(s))) {
     stats.skipped = true;
     stats.ms = Date.now() - t0;
     return { edges, nodes, stats, unresolved };
@@ -365,15 +408,23 @@ export function extractUniPages(repoDir, symbols = []) { // eslint-disable-line 
 
   // ── (a) page nodes + page → file edges ────────────────────────────────────
   const pageDecl = new Map(); // page path → merged declaration
-  for (const d of decls || []) {
-    const p = trimSlashes(d.path);
-    if (!p) continue;
-    const existing = pageDecl.get(p);
-    if (existing) {
-      existing.sources.add(d.source);
-      continue;
+  stats.apps = (pageConfigs || []).map((cfg) => ({
+    pagesJson: cfg.fileRel,
+    baseDir: cfg.baseDirRel,
+    // unique page paths, so a page that is also in tabBar/subPackages counts once
+    pages: new Set(cfg.decls.map((d) => trimSlashes(d.path)).filter(Boolean)).size,
+  }));
+  for (const cfg of pageConfigs || []) {
+    for (const d of cfg.decls) {
+      const p = trimSlashes(d.path);
+      if (!p) continue;
+      const existing = pageDecl.get(p);
+      if (existing) {
+        existing.sources.add(d.source);
+        continue;
+      }
+      pageDecl.set(p, { path: p, line: d.line, sources: new Set([d.source]), cfg });
     }
-    pageDecl.set(p, { path: p, line: d.line, sources: new Set([d.source]) });
   }
 
   const knownPages = new Set(pageDecl.keys());
@@ -383,7 +434,7 @@ export function extractUniPages(repoDir, symbols = []) { // eslint-disable-line 
       id: `page:${decl.path}`,
       type: 'page',
       name: decl.path,
-      file: 'pages.json',
+      file: decl.cfg.fileRel,
       line: decl.line,
       source: sourcesList[0],
       sources: sourcesList,
@@ -394,8 +445,12 @@ export function extractUniPages(repoDir, symbols = []) { // eslint-disable-line 
     if (sourcesList.includes('subPackages')) stats.pagesFromSubPackages++;
     if (sourcesList.includes('tabBar')) stats.pagesFromTabBar++;
 
-    const vueRel = `${decl.path}.vue`;
-    if (fs.existsSync(path.join(root, vueRel))) {
+    // Page paths are relative to the app that declares them (`<app>/src` for a
+    // `<app>/src/pages.json`), not to the repo root — a monorepo root holds no
+    // `pages/**` at all, so joining against the root never found the .vue.
+    const vueAbs = path.join(decl.cfg.baseDir, `${decl.path}.vue`);
+    const vueRel = toPosix(path.relative(root, vueAbs));
+    if (fs.existsSync(vueAbs)) {
       edges.push({
         from: `page:${decl.path}`,
         to: `file:${vueRel}`,
@@ -406,7 +461,7 @@ export function extractUniPages(repoDir, symbols = []) { // eslint-disable-line 
       stats.pageEdges++;
     } else {
       stats.missingVue++;
-      unresolved.push({ kind: 'page', file: 'pages.json', line: decl.line, target: decl.path, reason: 'missing-vue' });
+      unresolved.push({ kind: 'page', file: decl.cfg.fileRel, line: decl.line, target: decl.path, reason: 'missing-vue' });
     }
   }
 

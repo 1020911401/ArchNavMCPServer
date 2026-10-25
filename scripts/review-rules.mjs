@@ -474,6 +474,12 @@ export function scanContent(file, src) {
   const isJs = /\.(js|ts|vue)$/i.test(file);
   const isPy = /\.py$/i.test(file);
   const isRequestPath = /(^|\/)(Http\/Controllers|Controllers|Services|Repositories|Presenters|Validators)\//i.test(file);
+  // Fixtures and seeders hold literal credentials by design — the whole point of
+  // a test is to log in with a known password. Scratch `debug*.php` scripts are
+  // deliberately NOT excluded: a real password pasted into one is worth seeing.
+  const isFixturePath =
+    /(^|\/)(tests?|__tests__|specs?|fixtures?|stubs?)\//i.test(f) ||
+    /(^|\/)database\/(seeders?|factories)\//i.test(f);
 
   if (isPhp) {
     for (const p of SEC_PATTERNS) {
@@ -488,6 +494,10 @@ export function scanContent(file, src) {
     }
 
     for (const re of [SECRET_ARRAY_RE, SECRET_VAR_RE]) {
+      // Test fixtures, seeders and throwaway debug scripts are full of literal
+      // credentials on purpose (`'password' => 'admin123'`): 45 of 47 hits on
+      // crmeb-laravel were fixtures, which buried the 2 real ones.
+      if (isFixturePath) continue;
       re.lastIndex = 0;
       for (const m of src.matchAll(re)) {
         const value = m[2];
@@ -1096,6 +1106,29 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     edges.filter((e) => norm(e.from).startsWith('file:') && norm(e.to).startsWith('file:'))
       .map((e) => norm(e.to).slice(5))
   );
+  // "Page not registered in pages.json" only means something inside a uni-app. A
+  // Vite SPA (admin/, admin-merchant/, admin-store/) has no pages.json at all, so
+  // applying the rule there marked every page as dead — measured on crmeb-laravel:
+  // 89 findings, 81 of them in apps that cannot have a pages.json.
+  const uniAppBases = (index?.uniPageStats?.apps || [])
+    .map((a) => norm(a.baseDir).replace(/^\.\//, '').replace(/\/$/, ''));
+  // '' = pages.json at the repo root, i.e. every file is inside the uni-app.
+  const inUniApp = (file) => uniAppBases.some((b) => b === '' || file === b || file.startsWith(`${b}/`));
+  // unplugin-vue-components auto-imports every component it can see and records
+  // them in `components.d.ts`; those files are never imported by hand, so an
+  // import-only inbound check called all 8 of them orphans.
+  const autoImportedComponents = new Set();
+  for (const rel of Object.keys(index?.fileHashes || {})) {
+    if (!/(^|\/)components\.d\.ts$/i.test(rel)) continue;
+    const src = read(rel);
+    if (!src) continue;
+    const baseDir = path.posix.dirname(norm(rel));
+    for (const m of src.matchAll(/import\(\s*['"]([^'"]+\.vue)['"]\s*\)/g)) {
+      const spec = m[1];
+      if (!/^\.{1,2}\//.test(spec)) continue;
+      autoImportedComponents.add(norm(path.posix.normalize(path.posix.join(baseDir, spec))));
+    }
+  }
   const defsByName = new Map();
   const exportedByName = new Map();
   const exportedAt = new Set();
@@ -1329,15 +1362,15 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     if (!file.endsWith('.vue')) continue;
     const isPageDir = /(^|\/)pages\//.test(file);
     const isUnderComponents = /(^|\/)components\//.test(file);
-    if (isPageDir && !isUnderComponents && !registeredPages.has(file)) {
+    if (isPageDir && !isUnderComponents && uniAppBases.length && inUniApp(file) && !registeredPages.has(file)) {
       add({
         rule: 'vue-page-not-registered', severity: 'error', file, line: null,
         message: '这个页面目录下的 .vue 没有出现在 pages.json 的任何页面条目里。',
         why: 'uni-app 只打包 pages.json 注册过的页面：改了它不会有任何效果，别人 navigateTo 过去也是 404（本 fixture 实测 178 个 pages/**/*.vue 里有 52 个未注册）。',
-        evidence: `registered pages=${registeredPages.size}`,
+        evidence: `registered pages=${registeredPages.size}, uni-app roots=${uniAppBases.join(',')}`,
       });
     }
-    if (isUnderComponents && !inboundComponents.has(file)) {
+    if (isUnderComponents && !inboundComponents.has(file) && !autoImportedComponents.has(file)) {
       add({
         rule: 'vue-component-orphan', severity: 'warn', file, line: null,
         message: '组件在索引里没有任何文件 import 它。',
