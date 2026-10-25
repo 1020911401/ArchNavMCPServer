@@ -152,6 +152,7 @@ const TOOLS = [
         name: { type: 'string', description: 'Symbol name' },
         engine: ENGINE_ENUM,
         file: { type: 'string', description: 'Disambiguate a symbol by file' },
+        kind: { type: 'string', description: 'Disambiguate a symbol by kind (function, component, class…)' },
         repo: { type: 'string', description: 'gitnexus repository name' },
         projectDir: { type: 'string' },
         timeoutMs: { type: 'number', description: 'Per-engine timeout (default 120000)' },
@@ -169,6 +170,8 @@ const TOOLS = [
         projectDir: { type: 'string' },
         repo: { type: 'string', description: 'gitnexus repository name' },
         maxDepth: { type: 'number' },
+        file: { type: 'string', description: 'Disambiguate a symbol by file (monorepos hold same-named symbols per app)' },
+        kind: { type: 'string', description: 'Disambiguate a symbol by kind (function, component, class…)' },
       },
       required: ['name'],
     },
@@ -317,7 +320,7 @@ async function gatherCallersFromEngines(name, args) {
   }
   if (engine === 'auto' || engine === 'archnav') {
     try {
-      const r = await archNav.callers(name, dir);
+      const r = await archNav.callers(name, dir, { file: args.file, kind: args.kind });
       const callers = (r.relations || []).map((rel) => ({
         file: rel.file,
         line: rel.line === '?' || rel.line === undefined ? null : rel.line,
@@ -325,7 +328,10 @@ async function gatherCallersFromEngines(name, args) {
         engine: 'archnav',
         source_kind: rel.source === 'call-graph' ? 'ast' : 'heuristic',
       }));
-      results.push({ symbol: name, callers, raw: r, engine: 'archnav', error: r.error });
+      results.push({
+        symbol: name, callers, raw: r, engine: 'archnav', error: r.error,
+        ...(r.ambiguous ? { ambiguous: true, candidates: r.candidates } : {}),
+      });
     } catch (e) {
       results.push({ symbol: name, callers: [], engine: 'archnav', error: `adapter_exception: ${e.message}` });
     }
@@ -426,9 +432,14 @@ async function handleToolCall(name, args) {
     }
 
     case 'archnav_impact': {
-      const archResult = await archNav.impact(args.name, dir);
+      const archResult = await archNav.impact(args.name, dir, { file: args.file, kind: args.kind });
       if (archResult.error) return mkErr(archResult.error);
       let text = `💥 Impact: ${args.name}\n\n`;
+      if (archResult.ambiguous && archResult.candidates?.length) {
+        text += `⚠️  ${archResult.candidates.length} definitions share this name — aggregated (narrow with file/kind):\n`;
+        for (const c of archResult.candidates) text += `   ${c.file}:${c.line ?? '?'}\n`;
+        text += '\n';
+      }
       if (archResult.layer) text += `🏗️  Layer (ArchNav): ${archResult.layer}\n`;
       if (archResult.confidence !== undefined) text += `📊 Confidence: ${(archResult.confidence * 100).toFixed(0)}%\n`;
       if (archResult.direct_impact?.length) {

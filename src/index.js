@@ -369,10 +369,20 @@ function printChanges(r) {
   console.log('');
 }
 
-function printAmbiguous(r) {
+function printAmbiguous(r, relations = r.relations) {
   console.log(`\n⚠️  Ambiguous symbol "${r.symbol}" — ${r.candidates.length} definitions found:`);
   for (const c of r.candidates) {
     console.log(`   ${c.name} (${c.kind || '?'}) → ${c.file}:${c.line}`);
+  }
+  // The graph already aggregated across every definition — showing the
+  // candidates and stopping hid 22 real callers behind a "narrow this down"
+  // hint. Print what was found, then say how to narrow it.
+  if (relations?.length) {
+    console.log(`\n   Aggregated across all ${r.candidates.length} definitions (${relations.length}):`);
+    for (const rel of relations) {
+      const conf = rel.confidence < 1 ? ` ⚠️${(rel.confidence * 100).toFixed(0)}%` : '';
+      console.log(`      ${rel.symbol} → ${rel.file}:${rel.line} [${rel.layer || '?'}]${conf}`);
+    }
   }
   console.log(`\n   Narrow it down with --file <path> and/or --kind <kind>`);
   console.log('');
@@ -462,7 +472,7 @@ function printCallGraph(r) {
 }
 
 function printImpact(r) {
-  if (r.ambiguous) return printAmbiguous(r);
+  if (r.ambiguous) return printAmbiguous(r, r.direct_impact);
   console.log(`\n💥 Impact Analysis: ${r.symbol}`);
   console.log(`   Layer: ${r.layer}`);
   console.log(`   File: ${r.file}:${r.line_start}`);

@@ -127,7 +127,7 @@ function resolveSymbols(index, name, options = {}, { allowResultFilter = false }
     set = all;
   }
 
-  if (set.length >= 2) return { ambiguous: true, candidates: set.map(toCandidate) };
+  if (set.length >= 2) return { ambiguous: true, candidates: set.map(toCandidate), symbols: set };
   return { symbols: set };
 }
 
@@ -669,13 +669,14 @@ export const archNav = {
     if (!index) return { type: 'callers', error: 'No index', symbol: name };
     
     const resolved = resolveSymbols(index, name, options, { allowResultFilter: true });
-    if (resolved.ambiguous) {
-      return { type: 'callers', symbol: name, ambiguous: true, candidates: resolved.candidates };
-    }
     if (resolved.missing) {
       return { type: 'callers', error: `Symbol "${name}" not found`, symbol: name };
     }
-    const defs = resolved.symbols;
+    // Ambiguity is NOT an empty result. A monorepo holds one `useCrud` per app,
+    // and returning early on 2+ definitions made this report "no callers" while
+    // the graph held 14 real edges into admin/src/composables/useCrud.ts.
+    // Aggregate over every definition; the caller narrows with file/kind.
+    const defs = resolved.symbols || [];
     const filter = resolved.resultFilter || null;
     
     const freshness = await checkStaleness(dirPath);
@@ -744,6 +745,7 @@ export const archNav = {
       symbol: name,
       file: defs[0].file,
       line: defs[0].line_start,
+      ...(resolved.ambiguous ? { ambiguous: true, candidates: resolved.candidates } : {}),
       ...(defs.length > 1 ? { definitions: defs.map(toCandidate) } : {}),
       ...(filter ? {
         filtered_by_file: filter.file || null,
@@ -761,12 +763,11 @@ export const archNav = {
     if (!index) return { type: 'impact', error: 'No index', symbol: name };
     
     const resolved = resolveSymbols(index, name, options, { allowResultFilter: true });
-    if (resolved.ambiguous) {
-      return { type: 'impact', symbol: name, ambiguous: true, candidates: resolved.candidates };
-    }
     if (resolved.missing) {
       return { type: 'impact', error: `Symbol "${name}" not found`, symbol: name };
     }
+    // Same rule as callers(): several same-named definitions across a monorepo
+    // are aggregated (graphImpact already takes the list), never silently empty.
     const sym = resolved.symbols[0];
     const filter = resolved.resultFilter || null;
     
@@ -795,6 +796,7 @@ export const archNav = {
       symbol: name,
       file: sym.file,
       line_start: sym.line_start,
+      ...(resolved.ambiguous ? { ambiguous: true, candidates: resolved.candidates } : {}),
       ...(filter ? {
         filtered_by_file: filter.file || null,
         ...(filter.kind ? { filtered_by_kind: filter.kind } : {}),
