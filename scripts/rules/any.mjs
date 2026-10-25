@@ -13,18 +13,88 @@
 
 const finding = ({ rule, severity, file, line, message, why, evidence }) => ({ rule, severity, file, line, message, why, evidence });
 
+const LINE_BREAK = String.fromCharCode(10);
+
 export const ANY_RULES = [
   {
     id: 'php-loose-comparison', family: 'php', severity: 'warn', title: '松散比较 == / !=（类型杂耍）',
-    run: ({ file, scannable, lineOf }) => {
+    run: ({ file, scannable, codeOnly, lineOf }) => {
       if (!/\.php$/i.test(file)) return [];
       const loose = /(?<![=!<>+\-*/])==(?!=)/.exec(scannable) || /(?<![=!<>])!=(?!=)/.exec(scannable);
-      if (!loose) return [];
+      if (loose) {
+        return [finding({
+          rule: 'php-loose-comparison', severity: 'warn', file, line: lineOf(loose.index),
+          message: `PHP 用了松散比较 \`${loose[0]}\`（${file}）。`,
+          why: 'PHP 的类型杂耍是长期漏洞来源（0 == "abc"、"1e2" == "100"）：校验/鉴权分支必须用 === / !==，或先做类型转换。',
+          evidence: `matched: ${loose[0]} @${lineOf(loose.index)}`,
+        })];
+      }
+      // Relational operators against an empty-string literal never show up in the
+      // `==`/`!=` scan above — and PHP 8 changed their answer: measured on both
+      // interpreters, `"" < 0` is **false** on 7.4 and **true** on 8.3 (while
+      // `"" == 0` flipped the other way). A branch written for one version silently
+      // takes the other after an upgrade. Scan `codeOnly` (strings kept, comments
+      // blanked) because the empty-string operand is a string literal.
+      // The lookbehind matters: `['k' => '']` contains `> ''` and is an array
+      // literal, not a comparison — without it every fixture's default values fired.
+      const rel = /(?:''|"")\s*(?<![<>=!])(<=|>=|<|>)|(?<![<>=!])(<=|>=|<|>)\s*(?:''|"")/.exec(codeOnly || '');
+      if (!rel) return [];
+      const op = rel[1] || rel[2];
       return [finding({
-        rule: 'php-loose-comparison', severity: 'warn', file, line: lineOf(loose.index),
-        message: `PHP 用了松散比较 \`${loose[0]}\`（${file}）。`,
-        why: 'PHP 的类型杂耍是长期漏洞来源（0 == "abc"、"1e2" == "100"）：校验/鉴权分支必须用 === / !==，或先做类型转换。',
-        evidence: `matched: ${loose[0]} @${lineOf(loose.index)}`,
+        rule: 'php-loose-comparison', severity: 'warn', file, line: lineOf(rel.index),
+        message: `PHP 用 \`${op}\` 直接和空字符串比较（${file}）。`,
+        why: 'PHP 8 改了字符串与非数值比较的规则：`"" < 0` 在 7.4 是 false、在 8.3 是 true（`"" == 0` 正好相反）。跨版本时这里会静默走另一条分支——比较前先显式类型转换。',
+        evidence: `matched: ${op} with empty-string operand @${lineOf(rel.index)}`,
+      })];
+    },
+  },
+  {
+    // The shape that actually bit a Laravel/PHP migration: a value read from
+    // config/DB/request (unknown type at runtime) compared with `<`/`>` to a number.
+    // `get('store_stock') < 0` is false for `''` on PHP 7.4 and true on 8.3, so the
+    // branch that "cannot happen" happens after the upgrade. This needs the
+    // assignment to be visible in the same file — an uncast parameter would be noise.
+    id: 'php-uncast-value-compare', family: 'php', severity: 'warn',
+    title: '配置/入参未经类型转换就与数字做大小比较',
+    run: ({ file, codeOnly, lineOf }) => {
+      if (!/\.php$/i.test(file)) return [];
+      const code = codeOnly || '';
+      // Sources whose runtime type is not declared in code: config reads, request
+      // input, env, superglobals, and array access on a request-ish variable.
+      const SOURCE_RE = /(\$\w+)\s*=\s*[^;]*?(?:->get\(|->query\(|->input\(|->header\(|\bconfig\(|\binput\(|\benv\(|\bgetenv\(|->request\b|\$_(?:GET|POST|REQUEST)\b)/;
+      const fromSource = new Map();
+      let line = 0;
+      for (const sourceLine of code.split(LINE_BREAK)) {
+        line += 1;
+        const m = SOURCE_RE.exec(sourceLine);
+        if (m) fromSource.set(m[1], line);
+      }
+      if (!fromSource.size) return [];
+      const CAST_RE = /(?:\(int\)|\(float\)|\(string\)|\(bool\)|\bintval\(|\bfloatval\(|\bcount\(|\bstrlen\()\s*$/;
+      const hits = [];
+      const scan = (re, pick) => {
+        for (const m of code.matchAll(re)) {
+          const varName = pick(m);
+          const at = fromSource.get(varName);
+          if (!at) continue;
+          const idx = m.index;
+          if (at > lineOf(idx)) continue; // assignment must come first
+          const before = code.slice(Math.max(0, idx - 24), idx);
+          if (CAST_RE.test(before)) continue;
+          hits.push({ varName, idx });
+        }
+      };
+      scan(/(\$\w+(?:\[[^\]]*\])?)\s*(?:<=|>=|<|>)\s*-?\d+(?:\.\d+)?\b/g, (m) => m[1]);
+      scan(/-?\d+(?:\.\d+)?\s*(?:<=|>=|<|>)\s*(\$\w+(?:\[[^\]]*\])?)/g, (m) => m[1]);
+      if (!hits.length) return [];
+      hits.sort((a, b) => a.idx - b.idx);
+      const first = hits[0];
+      const assignedAt = fromSource.get(first.varName);
+      return [finding({
+        rule: 'php-uncast-value-compare', severity: 'warn', file, line: lineOf(first.idx),
+        message: `${first.varName}（第 ${assignedAt} 行取自配置/入参）未做类型转换就参与大小比较（${file}）。`,
+        why: '配置/入参在运行时可能是空串或非数值。PHP 7.4 里 `"" < 0` 是 false、PHP 8.3 是 true，`"" == 0` 则相反——同一段代码在两个版本走不同分支。比较前显式 `(int)`/`(float)` 转换，跨版本才等价。',
+        evidence: `var=${first.varName}, assignedAt=${assignedAt}, compareAt=${lineOf(first.idx)}`,
       })];
     },
   },

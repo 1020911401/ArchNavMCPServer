@@ -332,6 +332,15 @@ export async function parseWasmFile(filePath, baseDir, fileContent) {
           if (captures.super && captures.super.length > 0) {
             sym.superClass = fileContent.substring(captures.super[0].startIndex, captures.super[0].endIndex);
           }
+          // PHP's class query does not capture the base clause, but `parent::m()`
+          // resolution needs it (resolving by bare method name attached calls to
+          // unrelated classes). Read it off the declaration text instead of adding a
+          // grammar-dependent capture.
+          if (langName === 'php' && kind === 'class') {
+            const decl = fileContent.slice(mainNode.startIndex, mainNode.endIndex);
+            const ext = /\bextends\s+([^\s{,]+)/.exec(decl);
+            if (ext) sym.superClass = ext[1].split(String.fromCharCode(92)).pop();
+          }
           if (captures.return_type && captures.return_type.length > 0) {
             sym.returnType = fileContent.substring(captures.return_type[0].startIndex, captures.return_type[0].endIndex);
           }

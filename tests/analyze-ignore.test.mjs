@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { analyze, globToRegExp, makeIgnoreFilter, normalizeIgnore, pruneIgnored, getIndex, saveIndex } from '../src/analyzer.js';
+import { analyze, globToRegExp, gitignorePatterns, makeIgnoreFilter, normalizeIgnore, pruneIgnored, getIndex, saveIndex } from '../src/analyzer.js';
 import { checkStaleness } from '../src/confidence.js';
 
 test('globToRegExp: bare names, **, * and ? behave like people expect', () => {
@@ -86,4 +86,44 @@ test('pruneIgnored drops nodes and their edges but keeps non-file nodes', () => 
   assert.equal(pruned.edges.length, 1);
   assert.equal(pruned.edges[0].from, 'file:src/a.js');
   assert.equal(pruned.prunedIgnored, 2);
+});
+
+// ── .gitignore is honoured without being asked ────────────────────────────────
+// Measured on a Laravel repo before this existed: `analyze` indexed vendor/ and the
+// compiled Blade cache — 129 MB index, 5m22s, and third-party symbols in every graph
+// answer. A repo that says `/vendor` in .gitignore has already answered the question.
+
+test('gitignorePatterns keeps the useful lines and skips what it cannot honour', () => {
+  const T = fs.mkdtempSync(path.join(os.tmpdir(), 'archnav-gi-'));
+  fs.writeFileSync(path.join(T, '.gitignore'), [
+    '# comment',
+    '',
+    '/vendor',
+    'node_modules/',
+    '  /public/build  ',
+    '*.log',
+    '!keep-me.txt',
+    '/',
+  ].join('\n'));
+  assert.deepEqual(gitignorePatterns(T), ['vendor', 'node_modules', 'public/build', '*.log']);
+  // no .gitignore at all → no patterns, no throw
+  assert.deepEqual(gitignorePatterns(path.join(T, 'nope')), []);
+  fs.rmSync(T, { recursive: true, force: true });
+});
+
+test('analyze honours the repo .gitignore automatically, and {gitignore:false} opts out', async () => {
+  const T = fs.mkdtempSync(path.join(os.tmpdir(), 'archnav-gi2-'));
+  fs.mkdirSync(path.join(T, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(T, 'vendor', 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(T, '.gitignore'), '/vendor\n');
+  fs.writeFileSync(path.join(T, 'src', 'a.php'), '<?php function keepMe() { return 1; }\n');
+  fs.writeFileSync(path.join(T, 'vendor', 'lib', 'b.php'), '<?php function dropMe() { return 2; }\n');
+
+  const auto = await analyze(T, {});
+  assert.deepEqual(auto.symbols.map((s) => s.name), ['keepMe'], 'vendor/ is gitignored → not indexed');
+  assert.ok(auto.ignore.includes('vendor'));
+
+  const optedOut = await analyze(T, { gitignore: false });
+  assert.deepEqual(optedOut.symbols.map((s) => s.name).sort(), ['dropMe', 'keepMe']);
+  fs.rmSync(T, { recursive: true, force: true });
 });

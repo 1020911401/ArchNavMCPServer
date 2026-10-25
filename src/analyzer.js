@@ -23,7 +23,16 @@ export async function analyze(dirPath, options = {}) {
   // self-review gave 5 836 symbols instead of 448 and 5 069 findings from
   // customer code. Patterns are gitignore-ish globs, matched against the
   // repo-relative POSIX path.
-  const ignorePatterns = normalizeIgnore(options.ignore);
+  //
+  // The repo's own `.gitignore` is read too (unless `gitignore: false`): a Laravel
+  // repo that lists `/vendor` there must not be indexed as if vendor were code —
+  // measured on one such repo, ignoring it took the index from 129 MB / 5m22s to
+  // 2.7 MB / 15s, and the audit lost nothing but third-party noise. Explicit
+  // `--ignore` patterns win, but both lists are honoured.
+  const ignorePatterns = normalizeIgnore([
+    ...(options.gitignore === false ? [] : gitignorePatterns(dirPath)),
+    ...(Array.isArray(options.ignore) ? options.ignore : String(options.ignore ?? '').split(',')),
+  ]);
   const ignored = makeIgnoreFilter(ignorePatterns);
 
   // Walk directory
@@ -155,6 +164,39 @@ export function normalizeIgnore(ignore) {
   if (!ignore) return [];
   const list = Array.isArray(ignore) ? ignore : String(ignore).split(',');
   return list.map((s) => String(s).trim()).filter(Boolean);
+}
+
+/**
+ * Read a repo's `.gitignore` into ignore patterns.
+ *
+ * Without this, `archnav analyze` indexes whatever happens to be on disk — on a
+ * Laravel repo that means `vendor/` (measured: 129 MB index, 5m22s, and thousands
+ * of third-party symbols that swamp every graph answer).
+ *
+ * Deliberately a subset of gitignore semantics, and it says so instead of guessing:
+ * - leading `/` is dropped (patterns are matched repo-relative anyway)
+ * - `!negation` lines are skipped (the ignore filter has no re-include)
+ * - trailing `/` is dropped (a bare segment already matches the whole subtree)
+ * - comments (`#`) and blanks are skipped
+ */
+export function gitignorePatterns(dirPath) {
+  if (!dirPath) return [];
+  const file = path.join(dirPath, '.gitignore');
+  let text = '';
+  try {
+    text = fs.readFileSync(file, 'utf-8');
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const raw of text.split(String.fromCharCode(10))) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    let p = line.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!p) continue;
+    out.push(p);
+  }
+  return out;
 }
 
 /** Build the predicate used by the walker *and* the post-filter. */
@@ -419,13 +461,66 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
 
   // 14. Call edges (DEPENDS_ON) — function-level call relationships from AST
   const symbolByName = new Map();
+  const classByName = new Map();
+  const classParentByFile = new Map(); // file → [{ cls, parent }]
   for (const sym of (symbols || [])) {
     if (!symbolByName.has(sym.name)) symbolByName.set(sym.name, sym); // first match wins (previous linear-scan semantics)
+    if (sym.kind === 'class') {
+      if (!classByName.has(sym.name)) classByName.set(sym.name, sym);
+      if (sym.superClass) {
+        if (!classParentByFile.has(sym.file)) classParentByFile.set(sym.file, []);
+        classParentByFile.get(sym.file).push({ cls: sym.name, parent: sym.superClass });
+      }
+    }
   }
+  // `$this->m()` / `self::m()` / `parent::m()` are *scoped* calls: resolving them by
+  // bare method name means "any symbol in the repo called m", which silently attached
+  // a call to an unrelated class. Measured on a Laravel repo: 246 of 572 `$this`
+  // edges and 36 of 36 `parent` edges pointed at another file, and one of them created
+  // a fake `EnsureLegacySiteOpen ↔ LegacyApiException` cycle (parent::__construct
+  // resolved to a *middleware's* __construct). These are now resolved inside the file
+  // (and, for parent, through the declared base class); what cannot be resolved is
+  // reported in `unresolvedScopedCalls` instead of being guessed.
+  const LOOKUP_KINDS = new Set(['function', 'method']);
+  const findInFile = (file, name) => (symbols || []).find((s) => s.file === file && s.name === name && LOOKUP_KINDS.has(s.kind || 'function')) || (symbols || []).find((s) => s.file === file && s.name === name) || null;
+  const primaryClassOf = (file) => {
+    const decls = classParentByFile.get(file);
+    if (!decls || !decls.length) return null;
+    const base = String(file).split('/').pop().replace(/\.php$/i, '');
+    return decls.find((d) => d.cls === base) || decls[0];
+  };
+  const unresolvedScopedCalls = [];
+  const scopedUnresolved = [];
+  const scopedStats = { total: 0, resolved: 0, unresolved: 0, byReceiver: {} };
   for (const call of (allCalls || [])) {
     if (call.caller && call.callee) {
       const callerId = `sym:${call.file}::${call.caller}`;
-      const target = symbolByName.get(call.callee);
+      const recv = String(call.receiver || '');
+      let target = null;
+      if (recv === '$this' || recv === 'self' || recv === 'static' || recv === 'parent') {
+        scopedStats.total += 1;
+        const own = recv === 'parent' ? null : findInFile(call.file, call.callee);
+        if (own) target = own;
+        else {
+          const prim = primaryClassOf(call.file);
+          const parentSym = prim ? classByName.get(prim.parent) : null;
+          if (parentSym) target = findInFile(parentSym.file, call.callee);
+        }
+        if (target) scopedStats.resolved += 1;
+        if (!target) {
+          scopedStats.unresolved += 1;
+          scopedStats.byReceiver[recv] = (scopedStats.byReceiver[recv] || 0) + 1;
+          const prim = primaryClassOf(call.file);
+          scopedUnresolved.push({
+            file: call.file, line: call.line, caller: call.caller, callee: call.callee,
+            receiver: recv, cls: prim?.cls ?? null, parent: prim?.parent ?? null,
+            reason: recv === 'parent' ? 'parent 类不在索引内（框架/外部类）或被子类未定义' : '本文件与其父类都没有同名方法',
+          });
+          continue;
+        }
+      } else {
+        target = symbolByName.get(call.callee) || null;
+      }
       const calleeId = target ? `sym:${target.file}::${target.name}` : `sym:${call.file}::${call.callee}`;
       if (callerId !== calleeId) {
         const meta = { line: call.line };
@@ -524,7 +619,14 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     }
   }
 
-  return { nodes, edges, resolverStats, unresolvedRoutes, routeStats, uniPageStats, unresolvedPages };
+  // A scoped call that cannot be resolved is expected (framework base classes are
+  // never in the index), so the list is capped and accompanied by counts — the point
+  // is that it is *visible*, not that every entry is a defect.
+  const UNRESOLVED_SCOPED_CAP = 200;
+  const scopedCallStats = { ...scopedStats, listed: Math.min(scopedUnresolved.length, UNRESOLVED_SCOPED_CAP), truncated: Math.max(0, scopedUnresolved.length - UNRESOLVED_SCOPED_CAP) };
+  unresolvedScopedCalls.push(...scopedUnresolved.slice(0, UNRESOLVED_SCOPED_CAP));
+
+  return { nodes, edges, resolverStats, unresolvedRoutes, routeStats, uniPageStats, unresolvedPages, unresolvedScopedCalls, scopedCallStats };
 }
 
 function stripFilePrefix(id) {

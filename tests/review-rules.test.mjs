@@ -626,6 +626,68 @@ test('security: raw-SQL interpolation and dangerous functions are errors with li
   assert.deepEqual(danger.filter((x) => x.rule === 'php-dangerous-function').map((x) => x.severity), ['error']);
 });
 
+test('php-dangerous-function: a mention in a comment is not a call, and PDO::exec is not shell exec', () => {
+  // Measured on a real Laravel repo: all 7 hits were false — 4 were docblocks
+  // describing the old system (`eval(json_decode(...))`), 2 were `$pdo->exec($ddl)`.
+  const commented = [
+    '<?php',
+    '/**',
+    ' * 旧监听器对每行 eval(json_decode($item["customCode"])) —— 迁移期不复刻。',
+    ' */',
+    '// 本机 PHP 禁用了 shell_exec()/exec()',
+    'class X { public function a(): int { return 1; } }',
+  ].join('\n');
+  assert.deepEqual(scanContent('app/X.php', commented).filter((x) => x.rule === 'php-dangerous-function'), []);
+
+  const pdo = scanContent('tools/a.php', '<?php\n$pdo->exec($ddl);\n$pdo->exec("SET SESSION TRANSACTION READ ONLY");\nPDO::exec($q);\n');
+  assert.deepEqual(pdo.filter((x) => x.rule === 'php-dangerous-function'), [], 'PDO/Redis exec is not shell execution');
+
+  // the real thing still fires, and keeps its line number
+  const real = scanContent('tools/b.php', '<?php\n$a = 1;\nescapeshellarg($x);\nexec($cmd);\n');
+  const hits = real.filter((x) => x.rule === 'php-dangerous-function');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].line, 4);
+});
+
+test('php-loose-comparison: relational operators against an empty string are a PHP 7/8 divergence', () => {
+  // measured: `"" < 0` is false on 7.4.33 and true on 8.3.8 — a branch that "cannot
+  // happen" flips after the upgrade, and `==`/`!=` scanning never sees it.
+  const f = scanContent('app/A.php', '<?php\nif ($expr < 0) { return 1; }\nif ($x < "") { return 2; }\n');
+  const hit = f.find((x) => x.rule === 'php-loose-comparison');
+  assert.ok(hit, 'empty-string operand must be reported');
+  assert.equal(hit.line, 3);
+  assert.match(hit.why, /7\.4|8\.3/);
+  // no empty-string operand → nothing (this rule must not become a `<` scanner)
+  assert.deepEqual(scanContent('app/B.php', '<?php\nif ($i < 0) { return 1; }\n').filter((x) => x.rule === 'php-loose-comparison'), []);
+  // `['k' => '']` is an array literal, not a comparison — it cost 22 false hits
+  // across one repo's fixtures before the lookbehind was added.
+  assert.deepEqual(scanContent('app/C.php', "<?php\n$cfg = ['site_name' => '', 'x' => ''];\n").filter((x) => x.rule === 'php-loose-comparison'), []);
+});
+
+test('php-uncast-value-compare: config/input value compared to a number without a cast', () => {
+  const src = [
+    '<?php',
+    'class Notice {',
+    '  public function notices(): array {',
+    "    $storeStock = $this->configuration->get('store_stock');",
+    '    if ($storeStock < 0) { $storeStock = 2; }',
+    '    return [$storeStock];',
+    '  }',
+    '}',
+  ].join('\n');
+  const hit = scanContent('app/Modules/Admin/Application/Notice.php', src).find((x) => x.rule === 'php-uncast-value-compare');
+  assert.ok(hit, 'config value compared with < must be reported');
+  assert.equal(hit.line, 5);
+  assert.match(hit.evidence, /assignedAt=4/);
+
+  // an explicit cast is the documented fix → no finding
+  const casted = src.replace('if ($storeStock < 0)', 'if ((int) $storeStock < 0)');
+  assert.deepEqual(scanContent('app/Modules/Admin/Application/Notice.php', casted).filter((x) => x.rule === 'php-uncast-value-compare'), []);
+
+  // a plain local counter is not a config read → no finding
+  assert.deepEqual(scanContent('app/C.php', '<?php\n$i = 0;\nif ($i < 3) { $i++; }\n').filter((x) => x.rule === 'php-uncast-value-compare'), []);
+});
+
 test('security: debug output left in a changed file', () => {
   const f = scanContent('app/Http/Controllers/XController.php', '<?php\n$a = 1;\ndd($a);\n');
   const dbg = f.find((x) => x.rule === 'php-debug-left-on');

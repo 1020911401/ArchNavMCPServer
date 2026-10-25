@@ -30,6 +30,15 @@ ArchNav 是给 agent 用的代码导航 + 评审层：图谱只负责带路（�
 1. **未跟踪文件不进 diff**：审未提交的改动前先 `git add -N .`，否则新建文件根本不在 `git diff` 里。
 2. **先 `analyze` 再审**：索引过期会把新文件全报成「import 解析不到」（candidates tried=7）——拿旧索引的结论当证据等于审了个旧仓。
 3. **`--json` 默认是压缩摘要**（没有 message/evidence）：逐条 triage 必须 `--json --no-compact`。
+4. **索引口径决定一切**：`analyze` 现在会读仓根 `.gitignore`（`{gitignore:false}` / `--no-gitignore` 可关），
+   但**只认子集**（去掉首尾 `/`、跳过 `!` 否定行）。没写进 `.gitignore` 的构建产物（如 Laravel 的
+   `storage/framework/views/`、编译后的 Blade 缓存）仍会被索引——那些文件里的 `> ''`、`foreach+->where(`
+   会整片变成假阳。索引前先确认 `ignore` 字段是否覆盖了 vendor/构建目录；实测一个 Laravel 仓：不忽略
+   vendor 是 129 MB / 5m22s，忽略后 2.7 MB / 15s。
+5. **作用域调用（`$this->` / `self::` / `parent::`）不再按裸方法名跨文件解析**：解析不到会进
+   `knowledgeGraph.unresolvedScopedCalls`（上限 200 条）+ `scopedCallStats`。看到 `parent::` 大量
+   unresolved 是正常的（框架父类不在索引里），不要当成缺陷；反过来，如果某个 `$this->m()` 解析到了
+   **别的文件**，那是 bug 而不是证据。
 
 ## MCP 侧（本仓 `src/mcp-server.js`）
 

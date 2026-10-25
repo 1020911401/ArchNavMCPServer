@@ -192,8 +192,11 @@ const SEC_PATTERNS = [
     why: '原始 SQL 里直接插值/拼接变量就是 SQL 注入。改用绑定参数（whereRaw($sql, [$x])）或查询构造器。',
   },
   {
-    rule: 'php-dangerous-function', severity: 'error',
-    re: /\b(eval|exec|shell_exec|system|passthru|proc_open|popen|unserialize|extract)\s*\(/,
+    rule: 'php-dangerous-function', severity: 'error', skipComments: true,
+    // `->exec(` / `::exec(` is PDO/Redis/query-builder execution, not shell
+    // execution (measured: both `php-dangerous-function` hits in one Laravel repo's
+    // tools/ were `$pdo->exec($ddl)`). They are excluded by the operator lookbehind.
+    re: /(?<![>:\w$])\b(eval|exec|shell_exec|system|passthru|proc_open|popen|unserialize|extract)\s*\(/,
     why: '这些函数把输入变成代码/命令/对象（RCE、反序列化）。除非紧跟着白名单校验，否则不允许出现在请求路径上。',
   },
   {
@@ -467,7 +470,8 @@ export function joinPosix(dir, spec, ...more) {
 export function scanContent(file, src) {
   const findings = [];
   if (!src) return findings;
-  const lineOf = (idx) => src.slice(0, idx).split(/\r?\n/).length;
+  const LINE_BREAK = String.fromCharCode(10);
+  const lineOf = (idx) => src.slice(0, idx).split(LINE_BREAK).length;
   const f = norm(file);
 
   const isPhp = /\.php$/i.test(file);
@@ -481,9 +485,32 @@ export function scanContent(file, src) {
     /(^|\/)(tests?|__tests__|specs?|fixtures?|stubs?)\//i.test(f) ||
     /(^|\/)database\/(seeders?|factories)\//i.test(f);
 
+  // Comment spans are needed *before* the PHP security patterns run: a rule that
+  // greps raw source reports `eval(` written inside a docblock (measured: 4 of 7
+  // `php-dangerous-function` hits on a Laravel repo were comments describing the
+  // old system). `codeOnly` keeps strings intact — raw-SQL and secret rules need
+  // them — while `blanked`/`scannable` (used by the code-shape rules) blank both.
+  const commentSpans = [];
+  const blanked = blankNonCode(src, { onComment: (start, end) => commentSpans.push([start, end]) });
+  const CR = String.fromCharCode(13);
+  const codeOnly = (() => {
+    if (!commentSpans.length) return src;
+    const chars = src.split('');
+    for (const [from, to] of commentSpans) {
+      for (let i = from; i < to; i++) {
+        if (chars[i] !== LINE_BREAK && chars[i] !== CR) chars[i] = ' ';
+      }
+    }
+    return chars.join('');
+  })();
+
   if (isPhp) {
     for (const p of SEC_PATTERNS) {
-      const m = p.re.exec(src);
+      // `skipComments` rules answer "does the code call this?", not "does the file
+      // mention it?" — scan the comment-blanked view (same length, so line numbers
+      // still line up).
+      const haystack = p.skipComments ? codeOnly : src;
+      const m = p.re.exec(haystack);
       if (!m) continue;
       findings.push({
         rule: p.rule, severity: p.severity, file: f, line: lineOf(m.index),
@@ -575,8 +602,8 @@ export function scanContent(file, src) {
   // (API misuse / hallucinated libraries, leftover debug & TODO stubs, loose
   // typing, swallowed errors) plus the canonical language-level traps.
   const JS_OR_VUE = /\.(js|ts|mjs|cjs|vue)$/i.test(file);
-  const commentSpans = [];
-  const blanked = blankNonCode(src, { onComment: (start, end) => commentSpans.push([start, end]) });
+  // `blanked` / `commentSpans` are computed once at the top of this function (the
+  // PHP security patterns need the comment view before this point).
   // Detection rules read `scannable`: template-literal contents are *other* code
   // (scripts and tests hold fixtures/rule tables there), so a Go `if rows == nil`
   // inside a template string must not be reported as a JS loose comparison. Binding
@@ -588,7 +615,7 @@ export function scanContent(file, src) {
   const isCli = /^#!/.test(src);
   const isCode = /\.(php|js|ts|mjs|cjs|jsx|tsx|vue|py)$/i.test(file);
   findings.push(...runRules(ANY_RULES, {
-    file: f, src, scannable, lineOf, isCode, isJsOrVue: JS_OR_VUE, isCli,
+    file: f, src, scannable, codeOnly, lineOf, isCode, isJsOrVue: JS_OR_VUE, isCli,
   }));
 
   // ── stub markers now live in scripts/rules/stub.mjs (declarative) ──────────
@@ -1744,6 +1771,7 @@ export const RULE_REGISTRY = [
   { id: 'php-unvalidated-mass-input', group: 'PHP·安全', family: 'php', title: '$request->all() 无校验' },
   { id: 'php-unknown-class-import', group: 'PHP·安全', family: 'php', needs: ['composer'], title: 'use 的类在 PSR-4 下不存在（幻觉类名）' },
   { id: 'php-loose-comparison', group: 'PHP', family: 'php', title: '松散比较 == / !=（类型杂耍）' },
+  { id: 'php-uncast-value-compare', group: 'PHP', family: 'php', title: '配置/入参未经类型转换就与数字做大小比较' },
   { id: 'php-debug-left-on', group: 'PHP', family: 'php', title: 'dd()/dump() 调试残留' },
   { id: 'php-blade-unverified-calls', group: 'PHP', family: 'php', title: 'Blade 模板调用无法绑定（证据边界）' },
   { id: 'php-blade-unescaped-output', group: 'PHP·安全', family: 'php', title: 'Blade `{!! !!}` 原样输出（XSS）' },
