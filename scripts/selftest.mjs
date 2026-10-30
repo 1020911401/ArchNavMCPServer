@@ -271,14 +271,10 @@ check('deep：流程从入口推导', () => ({
   ok: (deepJson.flows || []).length >= 1,
   evidence: `flows=${(deepJson.flows || []).length} 最长=${deepJson.flows?.[0]?.steps?.length} 步`,
 }));
-check('deep：聚类 + 符号级聚类', () => {
-  const sym = run(node, [script('deep.mjs'), '.', '--clusters', '--cluster-level', 'symbols', '--json'], TMP);
-  const symJson = JSON.parse(sym.stdout || '{}');
-  return {
-    ok: (deepJson.clusters || []).length >= 1 && (symJson.clusters || []).length >= 1,
-    evidence: `文件级=${deepJson.clusters?.length} 符号级=${symJson.clusters?.length}`,
-  };
-});
+check('deep：聚类（文件级）', () => ({
+  ok: (deepJson.clusters || []).length >= 1,
+  evidence: `文件级=${deepJson.clusters?.length} 个模块`,
+}));
 check('deep：模块风险排名带因子', () => ({
   ok: (deepJson.risk || []).length >= 1 && (deepJson.risk?.[0]?.reasons || []).length >= 1,
   evidence: `top=${deepJson.risk?.[0]?.name} ${deepJson.risk?.[0]?.level}(${deepJson.risk?.[0]?.score})`,

@@ -16,6 +16,9 @@
  *   node scripts/deep.mjs <dir> [--flows] [--clusters] [--risk] [--top N]
  *                             [--json] [--markdown FILE|-]
  *   node scripts/deep.mjs --repo front=<dir> --repo back=<dir> [--cross]   # multi-repo
+ *
+ * `--cluster-level symbols` was removed: clustering is file-level only (see
+ * clusterFiles).
  */
 import path from 'node:path';
 import fs from 'node:fs';
@@ -142,23 +145,15 @@ export function extractFlows(index, { maxDepth = 6, maxSteps = 40, maxFlows = 50
  * GitNexus reports clusters too, but unnamed; we name them by dominant directory
  * + layer, which is what a human actually needs from a cluster.
  */
-export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6, level = 'files' } = {}) {
+export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6 } = {}) {
   const kg = index?.knowledgeGraph || {};
-  const nodes = kg.nodes || [];
   const fileOf = makeFileResolver(index);
-  // `files` is the coarse level (a module = a directory-ish group of files);
-  // `symbols` is the fine level GitNexus reports (their 816 clusters vs our 28 on
-  // the same uni-app repo) — same Louvain, different node set.
-  const symIdOf = (id) => {
-    const s = norm(id);
-    if (s.startsWith('sym:')) return s;
-    const n = nodes.find((x) => norm(x.id) === s);
-    if (!n || !n.name) return null;
-    const f = norm(n.file || '');
-    return f ? `sym:${f}::${n.name}` : null;
-  };
-  const nodeOf = (id) => (level === 'symbols' ? symIdOf(id) : fileOf(id));
-  const fileForNode = (nodeId) => (level === 'symbols' ? norm(nodeId).slice(4).split('::')[0] : norm(nodeId));
+  // File-level Louvain: a module = a directory-ish group of files. A symbol level
+  // existed once (`--cluster-level symbols`) and was removed: it was documented as
+  // "更细也更吵" and needed `--top` to be readable — 300/3669 clusters on the two
+  // fixtures vs 97/28 at file level. Same Louvain, different node set.
+  const nodeOf = (id) => fileOf(id);
+  const fileForNode = (nodeId) => norm(nodeId);
   const weights = new Map(); // "a\u0000b" sorted pair → weight
   const incident = new Map();
   const bump = (a, b, w = 1) => {
@@ -173,9 +168,7 @@ export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6, level = 'fi
     if (!a || !b || a === b) continue;
     bump(a, b);
   }
-  const files = level === 'symbols'
-    ? [...new Set((index.symbols || []).map((s) => `sym:${norm(s.file)}::${s.id}`))]
-    : [...new Set((index.symbols || []).map((s) => norm(s.file)))];
+  const files = [...new Set((index.symbols || []).map((s) => norm(s.file)))];
   for (const f of files) if (!incident.has(f)) incident.set(f, []);
   for (const k of weights.keys()) {
     const [a, b] = k.split('\u0000');
@@ -234,14 +227,11 @@ export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6, level = 'fi
   for (const [, fs_] of groups) {
     const dirs = new Map();
     const layers = new Map();
-    const symById = new Map((index.symbols || []).map((s) => [s.id, s]));
     for (const nodeId of fs_) {
       const file = fileForNode(nodeId);
       const d = topDir(file);
       dirs.set(d, (dirs.get(d) || 0) + 1);
-      const sym = level === 'symbols'
-        ? symById.get(norm(nodeId).split('::').pop())
-        : (index.symbols || []).find((s) => norm(s.file) === file);
+      const sym = (index.symbols || []).find((s) => norm(s.file) === file);
       const l = sym ? (index.layerMap || {})[sym.id] : null;
       if (l) layers.set(l, (layers.get(l) || 0) + 1);
     }
@@ -259,11 +249,8 @@ export function clusterFiles(index, { maxPasses = 8, minGain = 1e-6, level = 'fi
       name: topLayer ? `${topDirName} · ${topLayer}` : topDirName,
       dir: topDirName,
       layer: topLayer,
-      level,
       files: fs_.length,
-      symbols: level === 'symbols'
-        ? fs_.length
-        : (index.symbols || []).filter((s) => fs_.includes(norm(s.file))).length,
+      symbols: (index.symbols || []).filter((s) => fs_.includes(norm(s.file))).length,
       internalEdges: internal,
       externalEdges: external,
       cohesion: internal + external ? internal / (internal + external) : 0,
@@ -376,10 +363,10 @@ export function crossRepoEdges({ frontIndex, backIndex, frontPaths = [], routes 
  * so `review-rules.mjs --deep` can print one checklist (GitNexus-style flow /
  * cluster / risk numbers are otherwise a second report nobody reads).
  */
-export function buildDeepChecklist({ flows = [], clusters = [], risk = [], cycles = [], clusterLevel = 'files', top = 5 } = {}) {
+export function buildDeepChecklist({ flows = [], clusters = [], risk = [], cycles = [], top = 5 } = {}) {
   const rows = [];
   rows.push({
-    id: 'deep.flows', group: '代码库深查', family: 'deep', title: `执行流程（${clusterLevel === 'symbols' ? '符号级' : '文件级'}聚类并存）`,
+    id: 'deep.flows', group: '代码库深查', family: 'deep', title: '执行流程',
     status: flows.length ? 'hit' : 'na',
     hits: flows.length,
     reason: flows.length ? `最长 ${flows[0].steps.length} 步：${flows[0].entry}` : '没有入口节点（路由/页面/命令），无法推导流程',
@@ -389,7 +376,7 @@ export function buildDeepChecklist({ flows = [], clusters = [], risk = [], cycle
     id: 'deep.clusters', group: '代码库深查', family: 'deep', title: '模块聚类（Louvain 模块度）',
     status: clusters.length ? 'hit' : 'na',
     hits: clusters.length,
-    reason: biggest ? `最大模块 ${biggest.name}（${biggest.files} ${clusterLevel === 'symbols' ? '符号' : '文件'}，内聚 ${(biggest.cohesion * 100).toFixed(0)}%）` : '索引里没有依赖边，无法聚类',
+    reason: biggest ? `最大模块 ${biggest.name}（${biggest.files} 文件，内聚 ${(biggest.cohesion * 100).toFixed(0)}%）` : '索引里没有依赖边，无法聚类',
   });
   const worst = risk[0];
   rows.push({
@@ -416,23 +403,23 @@ export function buildDeepChecklist({ flows = [], clusters = [], risk = [], cycle
 }
 
 /** One call for the whole repo-level analysis (flows + clusters + cycles + risk). */
-export function runDeep({ index, clusterLevel = 'files', maxFlows = 500 } = {}) {
+export function runDeep({ index, maxFlows = 500 } = {}) {
   const flows = extractFlows(index, { maxFlows });
-  const clusters = clusterFiles(index, { level: clusterLevel });
+  const clusters = clusterFiles(index);
   const cycles = findCycles(index);
   const testFiles = new Set((index.symbols || [])
     .filter((s) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(norm(s.file)))
     .map((s) => norm(s.file)));
   const risk = scoreModules({ clusters, cycles, testFiles });
-  return { flows, clusters, risk, cycles, clusterLevel };
+  return { flows, clusters, risk, cycles };
 }
 
 function parseArgs(argv) {
-  const out = { dir: null, repos: [], doFlows: false, doClusters: false, doRisk: false, cross: false, top: 10, json: false, markdown: null, clusterLevel: 'files' };
+  const out = { dir: null, repos: [], doFlows: false, doClusters: false, doRisk: false, cross: false, top: 10, json: false, markdown: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--repo') { const v = argv[++i] || ''; const [name, p] = v.includes('=') ? v.split('=') : [`repo${out.repos.length + 1}`, v]; out.repos.push({ name, dir: path.resolve(p) }); }
-    else if (a === '--cluster-level') out.clusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files';
+    else if (a === '--cluster-level') { console.error('--cluster-level was removed: clustering is file-level only (symbol level produced 300/3669 noisy clusters)'); process.exit(2); }
     else if (a === '--flows') out.doFlows = true;
     else if (a === '--clusters') out.doClusters = true;
     else if (a === '--risk') out.doRisk = true;
@@ -486,9 +473,8 @@ async function main() {
     if (!index) { console.error(`No index in ${dir} — run \`archnav analyze ${dir}\` first`); process.exit(2); }
     if (opts.doFlows) report.flows = extractFlows(index);
     let clusters = null;
-    if (opts.doClusters || opts.doRisk) clusters = clusterFiles(index, { level: opts.clusterLevel });
+    if (opts.doClusters || opts.doRisk) clusters = clusterFiles(index);
     if (opts.doClusters) report.clusters = clusters;
-    report.clusterLevel = opts.clusterLevel;
     if (opts.doRisk) {
       const cycles = findCycles(index);
       const testFiles = new Set((index.symbols || []).filter((s) => /\.(test|spec)\.[cm]?[jt]sx?$/.test(norm(s.file))).map((s) => norm(s.file)));
@@ -515,7 +501,7 @@ async function main() {
     if (report.clusters) {
       console.log(`\n   🧩 聚类（模块，共 ${report.clusters.length} 个）`);
       for (const c of report.clusters.slice(0, opts.top)) {
-        const unit = report.clusterLevel === 'symbols' ? `${c.symbols} 符号` : `${c.files} 文件 / ${c.symbols} 符号`;
+        const unit = `${c.files} 文件 / ${c.symbols} 符号`;
         console.log(`      ${c.name}　${unit}　内聚 ${(c.cohesion * 100).toFixed(0)}%　跨模块边 ${c.externalEdges}`);
       }
     }

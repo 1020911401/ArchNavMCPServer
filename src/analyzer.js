@@ -592,7 +592,14 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
           }
         }
       }
-      const calleeId = target ? `sym:${target.file}::${target.name}` : `sym:${call.file}::${call.callee}`;
+      // No target symbol means the callee exists nowhere in the index: `catch`/`then`
+      // from a promise chain, `log` from console, a typo. Emitting
+      // `sym:<caller file>::<callee>` would invent a node nobody indexed — measured on
+      // the Express fixture it produced `createOrder → orderService.js::catch`, an edge
+      // to a symbol that does not exist. Drop it (README constraint #2, evidence or
+      // nothing) instead of shipping a dangling edge.
+      if (!target) continue;
+      const calleeId = `sym:${target.file}::${target.name}`;
       if (callerId !== calleeId) {
         const meta = { line: call.line };
         if (call.source_kind) meta.source_kind = call.source_kind; // 'ast' | 'heuristic' (how the target was resolved)

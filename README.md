@@ -88,7 +88,7 @@ node scripts/review-rules.mjs . --scope compare --base main \
   --mode standard --markdown review.md --sarif review.sarif --gate
 
 # repo-level depth (monthly / architecture review)
-node scripts/review-rules.mjs . --mode deep --deep-cluster-level symbols
+node scripts/review-rules.mjs . --mode deep
 
 # front-end ↔ back-end API boundary
 node scripts/review-rules.mjs <front-repo> --backend <backend-repo> --scope staged

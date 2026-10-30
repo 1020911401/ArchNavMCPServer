@@ -1657,7 +1657,6 @@ export function buildHarnessManifest({ opts, changes = null, dir = '.', version 
       checklist: Boolean(opts.checklist), compact: Boolean(opts.compact),
       pairingFloor: opts.pairingFloor ?? null, impactDepth: opts.impactDepth ?? null,
       impactMaxRisk: opts.impactMaxRisk ?? null, moduleMaxRisk: opts.moduleMaxRisk ?? null,
-      clusterLevel: opts.deepClusterLevel || 'files',
       waivers: opts.waivers ? String(opts.waivers) : null,
     },
     explicitFlags: [...flags],
@@ -2136,7 +2135,7 @@ function parseArgs(argv) {
     else if (a === '--no-audit') out.auditFlag = false;
     else if (a === '--semgrep') out.semgrep = true;
     else if (a === '--fail-on-cve') { out.failOnCve = String(argv[++i]).toUpperCase(); out.failOnCveSet = true; }
-    else if (a === '--deep-cluster-level') { out.deepClusterLevel = argv[++i] === 'symbols' ? 'symbols' : 'files'; out.deepFlag = true; }
+    else if (a === '--deep-cluster-level') { console.error('--deep-cluster-level was removed: clustering is file-level only (symbol level produced 300/3669 noisy clusters)'); process.exit(2); }
     else if (a === '--module-max-risk') { out.moduleMaxRisk = String(argv[++i]).toUpperCase(); out.deepFlag = true; }
     else if (a === '--impact-depth') { out.impactDepth = Number(argv[++i]); out.impactFlag = true; }
     else if (a === '--impact-max-risk') { out.impactMaxRisk = String(argv[++i]).toUpperCase(); out.impactFlag = true; }
@@ -2270,8 +2269,8 @@ async function main() {
   let deepResult = null;
   if (opts.deep) {
     const d = await import('./deep.mjs');
-    const run = d.runDeep({ index, clusterLevel: opts.deepClusterLevel || 'files' });
-    const deepChecklist = d.buildDeepChecklist({ flows: run.flows, clusters: run.clusters, risk: run.risk, cycles: run.cycles, clusterLevel: run.clusterLevel });
+    const run = d.runDeep({ index });
+    const deepChecklist = d.buildDeepChecklist({ flows: run.flows, clusters: run.clusters, risk: run.risk, cycles: run.cycles });
     deepResult = { ...run, checklist: deepChecklist };
     const worst = run.risk[0];
     if (worst && worst.level !== 'LOW') {

@@ -8,7 +8,7 @@
 node scripts/review-rules.mjs . --scope staged                        # brief（默认，≈0.5K tokens）
 node scripts/review-rules.mjs . --scope compare --base main \
   --mode standard --markdown review.md --sarif review.sarif --gate    # PR 前（≈3.4K）
-node scripts/review-rules.mjs . --mode deep --deep-cluster-level symbols  # 仓库级（≈3.9K）
+node scripts/review-rules.mjs . --mode deep  # 仓库级（≈3.9K）
 node scripts/review-rules.mjs <前端仓> --backend <后端仓> --scope staged   # 接口边界
 node scripts/test-select.mjs . --scope staged                         # 该跑哪些测试
 node src/index.js analyze . --ignore "bench/**,**/vendor/**"          # 建索引时排除（索引会记住，status 也遵守）

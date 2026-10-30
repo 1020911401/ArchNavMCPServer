@@ -321,7 +321,7 @@ mcpServers:
 
 ```bash
 node scripts/deep.mjs . --flows                       # 路由/页面/命令/队列/监听器 → 调用链
-node scripts/deep.mjs . --clusters --cluster-level symbols --top 20
+node scripts/deep.mjs . --clusters --top 20
 node scripts/deep.mjs . --risk --top 10
 node scripts/deep.mjs --repo front=<前> --repo back=<后> --cross
 node scripts/deep.mjs . --json --markdown deep.md      # 机器读 / 贴 PR
@@ -329,7 +329,7 @@ node scripts/review-rules.mjs . --mode deep            # 四块并进任务书�
 ```
 
 - **流程**：入口是 `route:` / `page:` / `Commands/` / `Jobs/` / `Listeners/`；默认只走有证据的边（heuristic ≤ 0.6 过滤掉，否则 Eloquent 的 `find/all/update` 会把每条路径炸成 40 步噪声）。`--include-heuristic` 可回退。实测 php-app（286 个 PHP 文件）→ **155 条流程**；纯脚本仓没有入口节点 → 显示 `➖ 不适用`，这是正常状态。
-- **聚类**：文件级 Louvain；`--cluster-level symbols` 更细也更吵，配 `--top` 用。断开的两个团不会被强行合并。
+- **聚类**：文件级 Louvain（模块级聚类曾有 `--cluster-level symbols`，因「更细也更吵」已删）。断开的两个团不会被强行合并。
 - **风险**：规模 / 外部耦合 / Tarjan SCC 循环 / 规则 error / 克隆 / 无测试覆盖。它是**仓库级既有状态**，不是本次改动引入的缺陷：`deep-module-risk`、`impact-risk` 常驻 warn，要拦必须显式 `--module-max-risk` / `--impact-max-risk`。
 - **多仓**：前端抽 `request.get/post/…('path')`，后端抽 `route:` 节点；匹配率 < 20% 时只打一行警告（「这两个索引很可能不是同一对前后端」）而不是硬编出边 —— 看到这行先怀疑配对，不要当成接口缺失。
 

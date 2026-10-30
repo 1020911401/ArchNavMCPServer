@@ -107,3 +107,28 @@ test('an unbindable same-name call is kept but flagged as ambiguous', (t) => {
   assert.equal(edge.ambiguous, 'helper', 'the edge must say which name was ambiguous');
   assert.equal(edge.confidence, 0.5, 'ambiguous edges are worth less than a bound one');
 });
+
+test('no edge is invented for a callee that exists nowhere', (t) => {
+  const { dir, index } = fixture({
+    'src/svc.js': 'const svc = {\n  send(x) { return x; },\n};\n\nmodule.exports = { svc };\n',
+    // promise chain: `.catch` is not a symbol in any file, so the edge would be
+    // `createOrder → svc.js::catch` — a node nobody indexed
+    'src/job.js': [
+      "const { svc } = require('./svc');",
+      '',
+      'function createOrder() {',
+      '  return svc.send(1).catch(e => console.error(e));',
+      '}',
+      '',
+      'module.exports = { createOrder };',
+      '',
+    ].join('\n'),
+  });
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+
+  const deps = (index.knowledgeGraph?.edges || []).filter((e) => e.type === 'DEPENDS_ON');
+  const dangling = deps.filter((e) => /::(catch|then|error|console|log)$/.test(to(e)));
+  assert.deepEqual(dangling.map(to), [], 'no edge to a symbol the index never had');
+  // the real call (`svc.send`) is still there
+  assert.ok(deps.some((e) => /svc\.js::send$/.test(to(e))), 'the resolvable call survives');
+});
