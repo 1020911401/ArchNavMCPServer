@@ -22,6 +22,10 @@ export const matched = {
 // 1 path exists on the backend but under a different verb
 export const wrongVerb = () => request.post('/api/wrong-method', {});
 
+// 2 paths that pair with service-delegating handlers (shape M1)
+export const coupons = () => request.get('/api/coupons');
+export const deepShape = () => request.get('/api/deep');
+
 // 2 paths the backend never declared
 export const ghost = () => request.get('/api/ghost-a');
 export const ghost2 = () => request.get('/api/ghost-b');

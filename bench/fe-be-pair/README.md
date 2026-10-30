@@ -16,4 +16,18 @@ against known numbers on every run (including CI, where the other fixtures are a
 | `fe-be-pairing-suspect` | 0 | 6 of 9 unique paths match = 67% (floor is 20%) |
 | `fe-dynamic-request-path` | 1 | `'/api/orders?status=' + status` |
 
+### shape (M1 — `scripts/response-shape.mjs`, asserted by `tests/response-shape.test.mjs`)
+
+| target | expected | why |
+| --- | --- | --- |
+| `CouponController@lst` | `level: service`, keys `list, image, show` | delegates to `CouponService::issueList` (the 69% case) |
+| `CouponController@deep` | `level: unresolved`, `reason: depth-cap` | service delegates again — beyond controller → service |
+| `OrderController@index` | `level: local`, keys `ok, method` | literal array in the controller (the 6% case) |
+| `ReportController@nope` | `level: unresolved`, `reason: method-not-found` | the method does not exist |
+
+Fe-be counts above are unchanged by this: unique static paths 9 → 11, matched 6 → 8
+(73% pairing), still 2 ghosts / 1 wrong verb / 3 unused routes / 1 dynamic call.
+
+Run: `node --test tests/response-shape.test.mjs` `'/api/orders?status=' + status` |
+
 Run: `node --test tests/fe-be-pair.test.mjs`

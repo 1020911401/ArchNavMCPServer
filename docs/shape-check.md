@@ -26,6 +26,31 @@
 结论：**两跳（service 返回解析、端点→调用页），是一个项目。** 6% 的 L0 单独上没有价值，
 69% 的 L1 才是主菜。
 
+### 2.1 实现后的复测（M1，`scripts/response-shape.mjs` + `scripts/shape-coverage.mjs`）
+
+> 数字必须带时间戳：**这对是活的生产仓**。测量当天 145 → 155 条路由（同一会话内 10 分钟，
+> `routes/api/out.php` 等文件在被并行编辑），配对数也随之变化——下面每个数字都写死了时刻与路由数。
+
+| 指标 | 实测（2026-10-30T09:48Z，后端 155 路由） | 立项前 |
+| --- | --- | --- |
+| 匹配接口对 | 62 | 49 |
+| `local`（controller 里有字面键） | 7（11%） | 3（6%） |
+| `service`（L1 解析到 service 层） | 20（32%） | — |
+| **resolved 合计** | **27/62 = 44%** | 6% |
+| `unresolved` | 35（56%） | — |
+
+`unresolved` 的构成（35 条）：
+
+- **21 条 `service-has-no-literal-shape`** — 抽样核对过 constructor hint（如 `articles:ArticleReadService`）
+  指向的确实是 picked 文件，且**同名方法在全仓任何文件里都没有字面键**：真实代码用 collection/`toArray()` 组装，
+  属立项书 §3.2 明令「不猜」的那类；
+- **13 条 `depth-cap`** — service 再委托给 `repository/reader`（`read.pcIssueCouponRows()` 等），
+  按 §3.2 策略上限 2 跳不追；
+- **1 条 `no-literal-shape-no-delegate`**。
+
+**复现**：`node scripts/shape-coverage.mjs <frontendDir> <backendDir>`（只读，自动打时间戳）。
+真值 fixture 上同一条命令给 **91%（10/11）**——resolver 本身没问题，差的是真实代码的形状风格。
+
 ## 3. 设计
 
 ### 3.1 复用既有的诚实性基建（硬约束）
@@ -72,6 +97,8 @@ L1  委托：return app('json')->success($this->service->foo(…))
    `unresolved: M`，写进 fixture README 并由测试断言（与现有 2/1/3/0/1 同一套机制）。
 2. 两边任一解析不到时，形状行必须是 `未核对`（单测覆盖，不许 `通过`）。
 3. 真实配对上复测覆盖率并把数字写进本文件 §2：**L0+L1 目标 ≥ 60%**（起点 6%）。
+   **实测判定：44%（见 §2.1），未达目标** —— 差距不是实现 bug，是 21 条无字面形状 + 13 条按策略不追的
+   深度。见 §5 的 M1.1：要过 60% 必须先回答「collection 形状能不能可信地解析」，否则目标本身要下修。
 4. `npm test` / `selftest` / `audit` 全绿；`--mode standard` 输出体积不明显膨胀
    （形状只在 `--backend` 存在时出现）。
 
@@ -79,9 +106,15 @@ L1  委托：return app('json')->success($this->service->foo(…))
 
 | 里程碑 | 内容 | 估时 | 可独立交付 |
 | --- | --- | --- | --- |
-| M1 | `resolveHandlerShape` L0+L1 + fixture 扩展 + 测试 | 0.5–1 天 | ✅（覆盖率报告即可交付） |
+| ~~M1~~ | `resolveHandlerShape` L0+L1 + fixture 扩展 + 测试 | **已完成 2026-10-30** | ✅ 交付物：`scripts/response-shape.mjs`、`scripts/shape-coverage.mjs`、9 项测试、§2.1 覆盖率 44% |
+| M1.1 | 把 44% 推过 60%：① collection/`toArray()` 的形状（21 条）② `depth-cap` 是否放行第 3 跳（13 条） | 0.5 天判断 + 视结论 | ✅ 每条独立可测（fixture 已有 depth-cap 真值） |
 | M2 | 前端两跳字段收集 + 测试 | 1 天 | ✅ |
 | M3 | 规则 `fe-be-shape-field-missing` + checklist 行 + 文档回填 | 0.5 天 | ✅ |
+
+M1 过程中修掉的实现 bug：controller **同名类歧义**——真实仓有两个 `ThemeController`
+（`Admin/…/Diy/` 与 `System/…/`），按短名取第一个导致 5 个 handler 报 `method-not-found`；
+现在按「谁真的声明了该动作」择优，并把被否候选记进 `via`（有回归测试）。
+这与 §4.1 的「解析不到就报 unresolved」是同一条纪律：**歧义必须暴露，不许静默选边**。
 
 M1 单独就能给出「真实仓里多少 handler 可解析」的答案——**先做 M1 再决定 M2/M3 的优先级**。
 

@@ -6,6 +6,7 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\HealthController;
 use App\Http\Controllers\LegacyController;
+use App\Http\Controllers\CouponController;
 
 Route::get('/api/orders', [OrderController::class, 'index']);
 Route::post('/api/orders', [OrderController::class, 'store']);
@@ -18,3 +19,5 @@ Route::put('/api/users/{id}', [UserController::class, 'update']);
 Route::get('/api/wrong-method', [ReportController::class, 'export']);
 Route::get('/api/health', [HealthController::class, 'index']);
 Route::get('/api/legacy', [LegacyController::class, 'index']);
+Route::get('/api/coupons', [CouponController::class, 'lst']);
+Route::get('/api/deep', [CouponController::class, 'deep']);
