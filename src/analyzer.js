@@ -538,17 +538,20 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
     // enclosing named function. It still names a real dependency, so record it at
     // file level instead of dropping it: `callers`/`impact` then answer
     // "src/routes/x.js:19" (file scope) rather than "nothing".
+    // Only when the receiver is a BOUND import/require (svc in `svc.doWork()`), never
+    // by bare name: `router.get('/health', h)` otherwise matched an unrelated local
+    // function called `get`, which is the exact bug this whole change exists to fix.
     if (!call.caller && call.callee) {
-      const bound = resolveBoundTarget(call) || symbolByName.get(call.callee) || null;
+      if (!call.receiverSource) continue;      // unbound receiver, no evidence of a module
+      const bound = resolveBoundTarget(call);
       if (!bound) continue;
       const fromId = normPath(call.file);
       const toId = `sym:${bound.file}::${bound.name}`;
       if (fromId !== toId) {
         addEdge(fromId, toId, 'DEPENDS_ON', {
           line: call.line,
-          source_kind: call.receiverSource ? 'ast-file' : 'ast-file-guess',
+          source_kind: 'ast-file',
           ...(call.receiver ? { receiver: call.receiver } : {}),
-          ...(call.receiverSource ? {} : { confidence: 0.5 }),
         });
       }
       continue;
