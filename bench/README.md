@@ -17,6 +17,7 @@ Everything here is plain Node (built-in `node --test`, built-in `child_process`)
 | `run_bench.mjs` | runs all three engines, prints a Markdown table, writes `report.json` |
 | `report.json` | last benchmark run, JSON details (generated, gitignored) |
 | `php-app/`, `vue-app/` | the fixtures (see provenance below) |
+| `fe-be-pair/` | **tracked, invented** front/back pair: ground truth for the `fe-be-*` rules (the other two pair at 3.6%, i.e. they are not a pair) |
 | `tools/` | the original Python scripts, kept read-only for reference |
 
 ## How to run

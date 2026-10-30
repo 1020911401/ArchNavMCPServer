@@ -1856,6 +1856,13 @@ export function buildChecklist({ findings = [], meta = {} }) {
     else if (r.family === 'python' && !meta.changedPy) { status = 'na'; reason = NOT_APPLICABLE.familyPython; }
     else if (r.family === 'go' && !meta.changedGo) { status = 'na'; reason = NOT_APPLICABLE.familyGo; }
     else if (r.family === 'boundary' && !meta.hasBackend) { status = 'na'; reason = NOT_APPLICABLE.familyBoundary; }
+    else if (r.family === 'boundary' && meta.backendRouteCount === 0) {
+      // `--backend` was given, but its index has no route nodes at all: the guard
+      // above (`calls.length && routes.length`) skipped the comparison entirely, so
+      // these rows got 0 findings and reported ✅ 通过 — a pass for nothing checked.
+      status = 'na';
+      reason = '后端索引里 0 条路由（路由解析没跑，或后端不是路由驱动的框架），未核对';
+    }
     else if ((r.needs || []).includes('index') && !meta.hasIndex) { status = 'na'; reason = NOT_APPLICABLE.index; }
     else if ((r.needs || []).includes('composer') && !meta.hasComposer) { status = 'na'; reason = NOT_APPLICABLE.composer; }
     else if ((r.needs || []).includes('packageJson') && !meta.hasPackageJson) { status = 'na'; reason = NOT_APPLICABLE.packageJson; }
@@ -2245,6 +2252,11 @@ async function main() {
     changedGo: changedFiles.filter((f) => /\.go$/i.test(f)).length,
     hasChanges: changedFiles.length > 0,
     hasBackend: Boolean(backendIndex),
+    // 0 routes means the boundary was never comparable (routes not parsed, or the
+    // backend is not route-driven) — the three fe-be rows must say 未核对, not 通过.
+    // `=== 0` deliberately: callers that do not measure it (unit fixtures) are unknown,
+    // not zero, and keep their old behaviour.
+    backendRouteCount: backendIndex ? backendRoutes(backendIndex).length : 0,
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),
     hasPackageJson: fs.existsSync(path.join(dir, 'package.json')),
     hasTests: indexedTests,
