@@ -1,7 +1,7 @@
 # ArchNav MCP Server
 
 > **Architecture-aware code navigation — plus a diff-scoped review layer.**
-> Line-level precision · architecture layers · gradient staleness · evidence on every answer · 10 fused MCP tools · 1 review checklist
+> Line-level precision · architecture layers · gradient staleness · evidence on every answer · 11 fused MCP tools · 1 review checklist
 
 [English](#english) | [中文](#chinese)
 
@@ -235,7 +235,7 @@ in an editor skill:
 | MCP surface | What it is |
 |---|---|
 | `prompts/list` · `prompts/get` | four workflows — `archnav_review_diff`, `archnav_self_review`, `archnav_test_select`, `archnav_deep` (optional `dir` argument) |
-| `resources/list` · `resources/read` | six markdown documents under `skill/archnav/` — `archnav://skill` plus `code-review`, `self-review`, `comparison`, `kanban-review`, `playbook-full` |
+| `resources/list` · `resources/read` | seven markdown documents under `skill/archnav/` — `archnav://skill` plus `code-review`, `self-review`, `comparison`, `kanban-review`, `anchor-review`, `playbook-full` |
 
 Both are served from `skill/archnav/**` (the single source of truth; `resources/read`
 just returns those files). Tool descriptions stay under 40 words and the tool count is
@@ -255,7 +255,7 @@ real bug once: `RegExp.source` does not carry the `/i` flag, so Laravel's
 `app/Http/Controllers`, `app/Models` and `app/Repositories` were never classified and
 every PHP repo reported `Layer: null`.
 
-### 🔌 MCP tools (10, single fused entry)
+### 🔌 MCP tools (11, single fused entry)
 
 | Tool | Description |
 |------|-------------|
@@ -269,13 +269,14 @@ every PHP repo reported `Layer: null`.
 | `archnav_fusion_calls` | Cross-engine call query — `engine: archnav (default) \| codegraph \| gitnexus \| auto` |
 | `archnav_status` | Index freshness: content drift, changed files, per-symbol confidence |
 | `archnav_analyze` | Build/update the knowledge graph |
+| `archnav_review` | ANCHOR review layer, `level` off/A/B/C/full — diff rules → task constraints (ACR/CCR/IPR/FCCR) → trajectory judging → LLM judge |
 
 ### 📁 Project structure
 
 ```
 ├── src/
 │   ├── index.js              # CLI entry
-│   ├── mcp-server.js         # MCP server (10 fused tools)
+│   ├── mcp-server.js         # MCP server (11 fused tools)
 │   ├── analyzer.js           # analysis + knowledge graph
 │   ├── navigation.js         # navigation, changes, impact, callers
 │   ├── reader.js             # disk-read verification

@@ -89,7 +89,8 @@ comment 里建议带 `规则名 · 文件:行号 · 为什么` 三段式，方�
 
 - `scripts/kanban-review.mjs`（Node）：push / status / close 三命令，CLI 为主、API 为辅
 - `scripts/kanban_review_batch.py`（Python）：单次批量推送（`create + link` 同进程）
-- `scripts/checklist_from_rules.mjs`：把 rules.md 表格转成结构化 checklist（可选，用于首次建表）
+- 结构化 checklist 不另起脚本：`scripts/review-rules.mjs . --scope <scope> --json --no-compact` 的 `checklist.rows` + `findings[]`
+  就是建表输入（`kanban-review.mjs push` 直接读它，手写表格会与规则表漂移）。
 
 ## 门禁集成建议
 
@@ -108,7 +109,7 @@ comment 里建议带 `规则名 · 文件:行号 · 为什么` 三段式，方�
 
 ## Pitfalls
 
-1. **`--no-compact` 是假的**（`scripts/review-rules.mjs:1413`）：初始值 `compact: true` 不随 flag 翻转，需显式赋 `false`。否则 JSON 输出缺 checklist/why/evidence，推看板就空了。
+1. **默认 `brief` 会把整类规则滤掉**：`--no-compact` 已经有效（flags 生效后 `compact:false`，findings 带 message/why/evidence），但 `brief` 的 tier 是 `core`，`EXTENDED_RULES` 那 7 条（`php-loose-comparison`、`js-loose-equality`…）一条都不跑——`--json --no-compact` 时 `harness.rules.enabled` 是 **55 / registry 62**（compact 的 JSON 里这个字段根本不出现，只有 preset/tier/ruleset）。推看板当门禁时用 `--mode standard`（tier=all，62/62）或补 `--all-rules`，否则任务书缺一整类。
 2. **Windows 反斜杠路径**：review.json 里 `file` 是 `scripts\\x.mjs`，kanban-review.mjs 在生成 title 时要 `replace(/\\/g, '/')` 统一成正斜杠，否则看板标题乱码。
 3. **`batch-create` 是异步**：脚本里 `for await (... of batchCreate(...))` 是 generator，不是同步阻塞——如果要用结果要 `await` 或 `.toArray()`。
 4. **`--gate` 只看 error/warn**：info 级 findings（如 `ai-todo-left`）不在 gate 范围，不会让 CI 红。这是有意设计，info 只入看板记录，不拦构建。

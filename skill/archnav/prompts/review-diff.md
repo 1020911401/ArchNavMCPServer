@@ -5,7 +5,8 @@
 1. 确认索引新鲜：`node src/index.js status .`（`stale:true` 或 commit 不一致 → 先 `analyze`）
 2. 生成任务书（机器可读、逐条可确认）：
    `node scripts/review-rules.mjs . --scope unstaged --json --no-compact`
-   未提交改动含新文件时，先 `git add -N .`，否则新文件不进 diff。
+   未跟踪的新文件已经算进 `changes`（`--scope staged` 只含「已暂存 + 未跟踪」，工作区改动要用 `unstaged`）；
+   不要为了它们跑 `git add -N`，那是给裸 `git diff` 用的。
 3. 受影响面：`node src/index.js changes . --scope unstaged`（已改符号 + 直接/间接影响 + 路由/页面）
 4. 该跑哪些单测：`node scripts/test-select.mjs . --scope unstaged --json`
 5. 门禁：`node scripts/review-rules.mjs . --scope unstaged --gate`（exit 1 = error 级命中）

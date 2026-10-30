@@ -92,7 +92,7 @@ of a legacy repo (the measured rate is in the last column).
 | `php-blade-unverified-calls` | I | a changed Blade has more `$x->y()` calls than the graph can bind | 18 calls / 0 bound on `hospitals/edit.blade.php` |
 | `php-n-plus-one` | W / I | a query call inside a `foreach` body (warn on request paths, info elsewhere) | 11 files |
 | `php-unbounded-query` | I | a controller has `->get()`/`::all()` and no `paginate()` anywhere | 4 files |
-| `php-loose-comparison` *(extended)* | W | `==` / `!=` outside string literals and comments (PHP type juggling) | 34 files |
+| `php-loose-comparison` *(extended)* | W | `==` / `!=` outside string literals and comments, or a `<`/`>`/`<=`/`>=` comparison against an empty string (PHP type juggling; one finding per file) | 48 files |
 
 ### JS / Vue / uni-app
 

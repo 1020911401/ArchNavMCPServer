@@ -46,11 +46,23 @@ jobs:
             tests/impact-analysis.test.mjs \
             tests/navigation.test.mjs \
             tests/review-rules.test.mjs \
+            tests/skill-claims.test.mjs \
+            tests/skill-flow.test.mjs \
             tests/test-select.test.mjs \
             tests/engines/codegraph.test.mjs \
             tests/engines/fusion.test.mjs \
             tests/engines/mcp-tools.test.mjs \
             tests/resolver/alias.test.mjs
+
+      # The agent skill is a shipped artifact: its claims are checked against the
+      # implementation (scripts/CLI/flags/resources), not trusted.
+      - name: Skill audit (claims vs implementation)
+        run: npm run skill:audit
+
+      # Documented measurements are re-run when the bench fixtures are present; a clean
+      # CI checkout does not have them (customer-code copies), so this skips with a line.
+      - name: Verify documented numbers
+        run: npm run verify:numbers
 
       - name: Build index
         run: node src/index.js analyze .

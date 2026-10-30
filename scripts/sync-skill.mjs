@@ -59,12 +59,24 @@ for (const rel of files) {
   else if (destText !== srcText) diff.push(`differs: ${rel}`);
 }
 
+// Files that live in the installed skill but not in the repo are drift too — a local
+// hand-edit is one thing, an *orphan* is prose the agent will read and the repo will
+// never check (`mcp-playbook.md` sat there for weeks telling agents to run a
+// `prompts:get` command that does not exist). Reported, never deleted.
+const orphans = fs.existsSync(DEST) ? walk(DEST).filter((rel) => !files.includes(rel)) : [];
+
 if (check) {
   if (diff.length) {
     console.error(`❌ ${DEST} is out of sync with skill/archnav (${diff.length} file(s))`);
     for (const d of diff) console.error(`   ${d}`);
     console.error('   run: node scripts/sync-skill.mjs');
     process.exit(1);
+  }
+  if (orphans.length) {
+    console.error(`⚠️  ${orphans.length} file(s) in ${DEST} are not in skill/archnav — the repo cannot audit them:`);
+    for (const o of orphans) console.error(`   orphan: ${o}`);
+    console.error('   review them: delete, or move the durable part into skill/archnav and sync');
+    if (args.includes('--strict')) process.exit(1);
   }
   console.log(`✅ ${DEST} matches skill/archnav (${files.length} files)`);
   process.exit(0);
@@ -77,3 +89,4 @@ for (const rel of files) {
 }
 console.log(`✅ synced ${files.length} file(s) -> ${DEST}`);
 if (diff.length) for (const d of diff) console.log(`   ${d}`);
+if (orphans.length) for (const o of orphans) console.log(`   ⚠️  orphan (not in repo, left untouched): ${o}`);

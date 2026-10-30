@@ -14,7 +14,9 @@
     "review:kanban": "node scripts/kanban-review.mjs",
     "probe": "node scripts/probe.mjs",
     "labels": "node scripts/label-stats.mjs",
-    "skill:sync": "node scripts/sync-skill.mjs"
+    "skill:sync": "node scripts/sync-skill.mjs",
+    "skill:audit": "node scripts/audit-skill.mjs",
+    "verify:numbers": "node scripts/verify-doc-numbers.mjs"
   },
   "dependencies": {
     "@arborium/go": "^2.18.1",

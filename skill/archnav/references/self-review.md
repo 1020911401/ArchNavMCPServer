@@ -5,8 +5,9 @@
 
 ## 1. 审一条未提交的改动（2026-10-23，54 → 25 → brief 模式 1 条）
 
-工作区有未跟踪文件时 `git diff` 看不到它们：先 `git add -N .`（只记意图，不真正 add），
-再 `--scope unstaged` 才能审到全部；审完 `git add -A` 照常提交。
+工作区里未跟踪的新文件**已经算进 `changes`**（`--scope unstaged`/`all` 都会列），不需要 `git add -N`；
+只有你绕过 ArchNav 直接跑裸 `git diff` 时，才要 `git add -N`（只记意图，不真正 add）。
+注意 `--scope staged` 只含「已暂存 + 未跟踪」，审工作区改动时用它会是空 diff。
 
 顺序很重要：**先 `analyze` 再审**。索引 6 天没重建时 `js-unresolved-local-import` 会把新建的文件全部报成
 「解析不到」（candidates tried=7），拿那份结果当证据等于审了个旧仓。
