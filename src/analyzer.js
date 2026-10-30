@@ -492,7 +492,67 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
   const unresolvedScopedCalls = [];
   const scopedUnresolved = [];
   const scopedStats = { total: 0, resolved: 0, unresolved: 0, byReceiver: {} };
+
+  // Receiver-aware resolution. A member call `svc.m()` is resolved inside the module
+  // the file actually imported, not against "the first symbol called m in the repo".
+  // Without this, two repositories that both expose `findById` gave 16 of 37 edges a
+  // wrong file target (and `impact` reported callers in the wrong module).
+  const normPath = (p) => String(p || '').replace(/\\/g, '/');
+  const symbolsByNormFile = new Map();
+  const nameCount = new Map();
+  for (const sym of (symbols || [])) {
+    const key = normPath(sym.file);
+    if (!symbolsByNormFile.has(key)) symbolsByNormFile.set(key, []);
+    symbolsByNormFile.get(key).push(sym);
+    nameCount.set(sym.name, (nameCount.get(sym.name) || 0) + 1);
+  }
+  const joinPosix = (dir, rel) => {
+    const parts = `${dir}/${rel}`.split('/');
+    const out = [];
+    for (const part of parts) {
+      if (!part || part === '.') continue;
+      if (part === '..') out.pop();
+      else out.push(part);
+    }
+    return out.join('/');
+  };
+  const resolveBoundTarget = (call) => {
+    if (!call.receiverSource) return null;
+    const from = normPath(call.file);
+    const dir = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : '';
+    const base = joinPosix(dir, call.receiverSource);
+    const candidates = [base, `${base}.js`, `${base}.mjs`, `${base}.cjs`, `${base}.ts`, `${base}/index.js`, `${base}.vue`];
+    for (const cand of candidates) {
+      const inFile = symbolsByNormFile.get(cand);
+      if (!inFile) continue;
+      const hit = inFile.filter((s) => s.name === call.callee && LOOKUP_KINDS.has(s.kind || 'function'));
+      if (hit.length) return hit[0];
+      const any = inFile.find((s) => s.name === call.callee);
+      if (any) return any;
+    }
+    return null;
+  };
+
   for (const call of (allCalls || [])) {
+    // A call inside an anonymous callback (Express handler, event listener) has no
+    // enclosing named function. It still names a real dependency, so record it at
+    // file level instead of dropping it: `callers`/`impact` then answer
+    // "src/routes/x.js:19" (file scope) rather than "nothing".
+    if (!call.caller && call.callee) {
+      const bound = resolveBoundTarget(call) || symbolByName.get(call.callee) || null;
+      if (!bound) continue;
+      const fromId = normPath(call.file);
+      const toId = `sym:${bound.file}::${bound.name}`;
+      if (fromId !== toId) {
+        addEdge(fromId, toId, 'DEPENDS_ON', {
+          line: call.line,
+          source_kind: call.receiverSource ? 'ast-file' : 'ast-file-guess',
+          ...(call.receiver ? { receiver: call.receiver } : {}),
+          ...(call.receiverSource ? {} : { confidence: 0.5 }),
+        });
+      }
+      continue;
+    }
     if (call.caller && call.callee) {
       const callerId = `sym:${call.file}::${call.caller}`;
       const recv = String(call.receiver || '');
@@ -519,13 +579,27 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
           continue;
         }
       } else {
-        target = symbolByName.get(call.callee) || null;
+        // Bound receiver wins; a bare name is only a fallback and is marked when the
+        // name is defined in more than one file (the caller can down-weight it).
+        target = resolveBoundTarget(call);
+        if (!target) {
+          target = symbolByName.get(call.callee) || null;
+          if (target && nameCount.get(call.callee) > 1) {
+            call.__ambiguous = true;
+          }
+        }
       }
       const calleeId = target ? `sym:${target.file}::${target.name}` : `sym:${call.file}::${call.callee}`;
       if (callerId !== calleeId) {
         const meta = { line: call.line };
         if (call.source_kind) meta.source_kind = call.source_kind; // 'ast' | 'heuristic' (how the target was resolved)
         if (call.receiver) meta.receiver = call.receiver;
+        if (call.__ambiguous) {
+          // Same name in several files and no binding to disambiguate: keep the edge
+          // (recall matters) but say so, and let consumers weigh it as 0.5.
+          meta.ambiguous = call.callee;
+          meta.confidence = 0.5;
+        }
         addEdge(callerId, calleeId, 'DEPENDS_ON', meta);
       }
     }

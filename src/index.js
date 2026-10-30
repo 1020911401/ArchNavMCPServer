@@ -41,8 +41,8 @@ program
     
     if (!options.json) {
       console.log(`\n📊 ArchNav Analysis Complete`);
-      console.log(`   Files: ${result.files}`);
-      console.log(`   Symbols: ${result.symbols}`);
+      console.log(`   Files: ${Array.isArray(result.files) ? result.files.length : result.files}`);
+      console.log(`   Symbols: ${Array.isArray(result.symbols) ? result.symbols.length : result.symbols}`);
       console.log(`   Layers: ${result.architecture?.layers?.length || 0}`);
       console.log(`   Dependencies: ${result.dependencies}`);
       console.log(`\n   Try: archnav arch .        (show architecture map)`);
@@ -513,7 +513,15 @@ function printImpact(r) {
     }
   }
   
-  console.log(`\n   Confidence: ${(r.confidence * 100).toFixed(0)}%`);
+  // An empty blast radius is a statement about the graph, not a certainty about the
+  // code: printing "Confidence: 100%" next to "no callers found" told the reader the
+  // opposite of what the tool knows. Say what the number means.
+  const found = (r.direct_impact?.length || 0) + (r.indirect_impact?.length || 0);
+  if (found === 0) {
+    console.log(`\n   Confidence: graph-only — 0 callers resolved, treat as "unknown" until grepped`);
+  } else {
+    console.log(`\n   Confidence: ${(r.confidence * 100).toFixed(0)}%`);
+  }
 }
 
 function printWhereami(r) {
