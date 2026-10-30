@@ -182,7 +182,7 @@ Laravel 286 PHP + 76 Blade; uni-app 269 Vue + 64 JS — harness and raw numbers 
 | Depth-2 recall on structured hops | ✅ **routes 1/1, component pages 5/5** | ⚠️ pages 0/5 | ⚠️ pages 0/5, no depth labels |
 | Gradient staleness (content drift) | ✅ **per-symbol, fileHashes as truth source** | binary | ✅ file watch |
 | Repo-level depth (flows, clusters, risk, cross-repo) | ✅ local, off by default (see boundary) | ✅ | ⚠️ partial |
-| MCP tools | **10** (single fused entry) | 17 | 1 exposed + hidden |
+| MCP tools | **11** (single fused entry) | 13 (`tools/list`, GitNexus 1.6.6) | 1 exposed + hidden |
 | Languages | **12** + SFC/template/route layers | JS/TS + C++ build | 20+ (Rust kernel) |
 | Windows | ✅ **no toolchain** | ⚠️ query tools crash | ✅ |
 | Index time (Laravel / uni-app) | **3.3s / 13.0s** | 23.0s / 45.4s | 7.7s / 16.6s |
