@@ -93,8 +93,8 @@ node src/index.js analyze . --ignore "bench/**,**/vendor/**"          # 建索�
     `app('json')->success($this->service->…)`——要再解析一层 service 才见得到；
   - 前端 **141 个文件读 `<resp>.data*`，只有 18 个文件发请求**：端点定义在 api 层，字段读取在调用页，
     中间还要一跳「端点 → api 函数 → 调用页」；
-  - 结论：**这条规则需要 service 返回解析 + 端点→调用页解析两跳，是一个项目，不是一条规则。** 先立项再做，
-    不先做后说。在那之前，前后端核对只到路径/方法边界（`fe-be-path-not-found` / `fe-be-method-mismatch`），
+  - 结论：**这条规则需要 service 返回解析 + 端点→调用页解析两跳，是一个项目，不是一条规则。** 立项书（设计、
+    里程碑 M1–M3、验收标准）见 [`docs/shape-check.md`](../../../docs/shape-check.md)；在那之前，前后端核对只到路径/方法边界（`fe-be-path-not-found` / `fe-be-method-mismatch`），
     且**核对没发生**时报 `未核对` 而不是 `通过`——两种没发生：配对率 < 20%（`fe-be-pairing-suspect` 命中），
     以及给了 `--backend` 但那边索引里 **0 条路由**（路由没解析 / 后端不是路由驱动的）。两者都由
     `bench/fe-be-pair/`（进 git 的真值对：2 missing / 1 method / 3 unused / 1 dynamic）端到端钉住。
