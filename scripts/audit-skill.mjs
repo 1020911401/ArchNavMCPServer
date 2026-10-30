@@ -282,6 +282,9 @@ if (thin.length > SKILL_BUDGET) {
 // ---- 8. frontmatter version vs the changelog line --------------------------
 const fmVersion = (thin.match(/^version:\s*([\d.]+)/m) || [])[1];
 const topVersion = (thin.match(/^> \*\*v([\d.]+)\*\*/m) || [])[1];
+if (fmVersion && !topVersion) {
+  report('error', 'SKILL.md', 'frontmatter version has no visible version stamp', `version: ${fmVersion}`);
+}
 if (fmVersion && topVersion && fmVersion !== topVersion) {
   report('error', 'SKILL.md', 'frontmatter version and changelog disagree', `frontmatter ${fmVersion} vs changelog ${topVersion}`);
 }

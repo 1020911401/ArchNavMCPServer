@@ -1,7 +1,7 @@
 ---
 name: archnav
-description: Use when navigating or reviewing code with ArchNav — locate/impact/trace, diff-scoped review, test selection, deep analysis. Thin trigger page; long text lives in references/.
-version: 1.8.0
+description: Use when the question is about a codebase, not a file — locate a symbol, who calls it, what breaks if I change it, review this diff, which tests to run, repo-level flows/risk.
+version: 1.9.0
 author: Hermes Agent
 license: MIT
 metadata:
@@ -10,47 +10,49 @@ metadata:
     linked_files: {references: [anchor-review.md, code-review.md, comparison.md, kanban-review.md, playbook-full.md, self-review.md]}
 ---
 
-# ArchNav (playbook)
+# ArchNav
 
-> **v1.8.0** — 正文只留 5 条坑（两条 PHP 专项坑挪进 `references/code-review.md`），历史版本见 `references/playbook-full.md`；实测数字由 `npm run verify:numbers` 复测。
+图谱负责**带路**（文件:行 + 置信度），不负责真相：**改任何代码前先 `read` 取磁盘原文**。
 
-ArchNav 是给 agent 用的代码导航 + 评审层：图谱只负责带路（文件/行号），改代码前必须 `read` 真源码。
+## 何时用哪条
 
-## When to Use
+| 问题 | 入口 |
+|---|---|
+| 符号在哪、读它的真源码 | `locate` · `read` · `whereami <file> <line>` |
+| 谁调用它 / 它调用谁 / 两点怎么连 | `callers` · `calls` · `trace` |
+| 改它炸哪里 / 这次 diff 破了什么 | `impact` · `changes` |
+| 分层 / 索引新鲜度 / 看的是哪一版 | `arch` · `status` · `version` |
+| 审 diff：规则、证据、门禁 | `scripts/review-rules.mjs` |
+| 该跑哪些单测 | `scripts/test-select.mjs` |
+| 流程 / 聚类 / 模块风险 / 多仓接口 | `scripts/deep.mjs` |
+| 逐条签字（ANCHOR A/B/C/full） | `scripts/anchor-review.mjs` |
 
-- 陌生仓定位符号、看分层 → `locate` / `read` / `arch` / `whereami`
-- 评审 diff、算爆炸半径 → `changes` / `impact`
-- 该跑哪些单测 → `scripts/test-select.mjs`
-- 仓库级深查（流程/聚类/风险/多仓）→ `scripts/deep.mjs`
-- 逐条签字、留审计链 → `scripts/anchor-review.mjs`（ANCHOR 层）
-- 「我看的是哪一版」→ `archnav version <dir>`
+统一入口 `node src/index.js <cmd>`；首次或改动后 `analyze` 建/重建索引。完整 CLI（`graph` / `flow` / `export` / `duplication` / `probe` / `kanban-review`）见 `archnav://skill/playbook-full`。
 
-## 五个必须先知道的坑
+## 五个坑
 
-1. **`.archnav/` 会把自己算成改动**：没忽略时一次单文件改动被列成 3 个改动文件（多出 `.archnav/index.json`、`.archnav/commit`，都映射不到符号）。接手任何仓先把它写进 `.gitignore`。未跟踪的新文件**不用** `git add -N` —— `changes` 已经算了；但 `--scope staged` 只含「已暂存 + 未跟踪」，工作区改动得用 `unstaged`，选错就是审了个空 diff。
-2. **先 `analyze` 再审**：旧索引把新文件的 import 报成 `js-unresolved-local-import`，重建索引后同一条命令归零。
-3. **`--json` 默认是压缩摘要**（无 message/evidence）：逐条 triage 要 `--json --no-compact`；`--mode standard|deep` 本来就带。
-4. **索引口径决定一切**：读仓根 `.gitignore`（`--no-gitignore` 关），但只认子集（去首尾 `/`、跳过 `!`）。没忽略的构建产物（`storage/framework/views/`、Blade 缓存）会把 `> ''`、`foreach+->where(` 变成整片假阳；实测 vendor 129 MB/5m22s vs 忽略后 2.7 MB/15s。
-5. **作用域调用**（`$this->` / `self::` / `parent::`）不按裸方法名跨文件解析：进 `knowledgeGraph.unresolvedScopedCalls` + `scopedCallStats`；`parent::` 大量 unresolved 正常，`$this->m()` 解析到**别的文件**才是 bug。
+1. **索引口径就是结论口径**：`analyze` 只认 `.gitignore` 的子集（去首尾 `/`、跳过 `!`），漏掉 vendor/构建产物会整片假阳；`.archnav/` 必须忽略，否则索引自己进 `changes`（实测 1 个改动变 3 个）。
+2. **未跟踪文件已算改动**，不用 `git add -N`；但 `--scope staged` 只含「已暂存 + 未跟踪」，审工作区改动要用 `unstaged`。
+3. **旧索引会撒谎**：新文件的 import 会被报成 `js-unresolved-local-import`；改前先 `analyze`，重建后同一条命令归零。
+4. **输出粒度**：`--json` 默认压缩（无 message/evidence）→ triage 用 `--json --no-compact`；`brief` 只跑 core（55/62），`--mode standard` 或 `--all-rules` 才含 extended。
+5. **作用域调用**（`$this->` / `self::` / `parent::`）不按裸名跨文件解析（见 `unresolvedScopedCalls`）：`parent::` 大量 unresolved 正常；`$this->m()` 落到**别的文件**才是 bug。
 
-> PHP 仓另有两个最容易被骗的度量假象（`no-test-coverage` 的 HTTP 契约假象、`php-loose-comparison` 的三条语义）→ `archnav://skill/code-review`。
+## 接口（MCP）
 
-## MCP 侧
-
-装了 MCP 的客户端（Hermes / Claude Code / Cursor）可以直接拉：
+装了 MCP 的客户端（Hermes / Claude Code / Cursor）直接拉；没装就用上面的 CLI，能力相同。
 
 | prompts（工作流） | resources（长文） |
 |---|---|
-| `archnav_review_diff` 评审当前 diff | `archnav://skill` 本页 |
-| `archnav_self_review` 审自己未提交的改动 | `archnav://skill/code-review` 规则清单与真值 |
-| `archnav_test_select` 只跑相关单测 | `archnav://skill/self-review` 假阳性/降噪 |
+| `archnav_review_diff` 审当前 diff | `archnav://skill` 本页 |
+| `archnav_self_review` 审自己未提交的改动 | `archnav://skill/code-review` 规则目录 + 真值 |
+| `archnav_test_select` 只跑相关单测 | `archnav://skill/self-review` 假阳性 / 降噪 |
 | `archnav_deep` 仓库级深查 | `archnav://skill/comparison` 三方跑分 |
 | | `archnav://skill/kanban-review` 看板逐项确认 |
 | | `archnav://skill/anchor-review` ANCHOR 层 |
-| | `archnav://skill/playbook-full` 完整旧版手册 |
+| | `archnav://skill/playbook-full` 完整手册 |
 
-没装 MCP 的走 CLI（`node src/index.js …`、`node scripts/review-rules.mjs …`），能力相同；长文直接读 `skill/archnav/references/*.md`。
+## 维护
 
-## 单一真源
+`skill/archnav/**` 是唯一真源：MCP `resources/read` 读它，Hermes 由 `node scripts/sync-skill.mjs` 同步。改完跑 `node scripts/audit-skill.mjs`（校验本文的脚本/命令/flag/URI/链接、坑数与版本，已接进 `npm test`）。
 
-`skill/archnav/**` 是唯一真源：`resources/read` 读这里，Hermes 由 `node scripts/sync-skill.mjs` 同步（`--check` 不写盘）。改完跑 `node scripts/audit-skill.mjs`（URI/脚本/flag/坑数/版本一致性，已接进 `npm test`）。不要在两处手改同一段文字。
+> **v1.9.0** — 重排为「问题 → 入口」表 + 五条硬规则；历史版本见 `references/playbook-full.md`。

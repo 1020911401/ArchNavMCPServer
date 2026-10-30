@@ -74,10 +74,9 @@ test('the audit catches a resource dropped from the playbook table', (t) => {
 test('the audit catches a documented flag the script never reads', (t) => {
   const dir = scratchSkill(t);
   const file = path.join(dir, 'SKILL.md');
-  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(
-    '`node scripts/review-rules.mjs …`',
-    '`node scripts/review-rules.mjs --pretend-flag …`',
-  ));
+  // Append the bad claim instead of rewriting an existing sentence: replacing prose
+  // makes the test stop biting the moment the page is rewritten (happened twice).
+  fs.appendFileSync(file, '\n`node scripts/review-rules.mjs --pretend-flag .`\n');
   const r = audit(dir);
   assert.equal(r.code, 1, 'a flag nobody implements must fail the audit');
   assert.match(r.out, /documents a flag the script never reads/);
@@ -86,7 +85,7 @@ test('the audit catches a documented flag the script never reads', (t) => {
 test('the audit catches a reference to a script that does not exist', (t) => {
   const dir = scratchSkill(t);
   const file = path.join(dir, 'SKILL.md');
-  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('`scripts/test-select.mjs`', '`scripts/checklist_from_rules.mjs`'));
+  fs.appendFileSync(file, '\n见 `scripts/checklist_from_rules.mjs`。\n');
   const r = audit(dir);
   assert.equal(r.code, 1, 'a path that does not exist must fail the audit');
   assert.match(r.out, /references a path that does not exist/);
@@ -95,7 +94,7 @@ test('the audit catches a reference to a script that does not exist', (t) => {
 test('the audit catches a CLI command the binary does not have', (t) => {
   const dir = scratchSkill(t);
   const file = path.join(dir, 'SKILL.md');
-  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('`archnav version <dir>`', '`archnav version-info <dir>`'));
+  fs.appendFileSync(file, '\n`archnav version-info <dir>`\n');
   const r = audit(dir);
   assert.equal(r.code, 1, 'an invented subcommand must fail the audit');
   assert.match(r.out, /names a CLI command the CLI does not have/);
