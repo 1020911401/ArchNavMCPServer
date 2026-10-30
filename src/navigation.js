@@ -7,6 +7,17 @@ import { spawnSync } from 'child_process';
 import { getIndex } from './analyzer.js';
 import { checkStaleness, computeConfidence } from './confidence.js';
 
+/** Walk up from a directory until `.archnav/index.json` is found (null = none). */
+function findIndexRoot(startDir) {
+  let dir = path.resolve(startDir);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.archnav', 'index.json'))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
 /**
  * Normalize a single element of a symbol's `imports` array to a string.
  *
@@ -1101,37 +1112,79 @@ export const archNav = {
     
     const targetLine = line || 1;
     const lineContent = lines[targetLine - 1];
-    
-    // Find enclosing function/class
-    let enclosingFunction = null;
-    let enclosingClass = null;
-    
-    for (let i = targetLine - 1; i >= 0; i--) {
-      const funcMatch = lines[i].match(/(?:async\s+)?function\s+(\w+)/);
-      const classMatch = lines[i].match(/class\s+(\w+)/);
-      if (funcMatch && !enclosingFunction) enclosingFunction = funcMatch[1];
-      if (classMatch && !enclosingClass) enclosingClass = classMatch[1];
+    const norm = (p) => String(p || '').replace(/\\/g, '/');
+
+    // The index has exact line_start/line_end for every symbol. The regex scan below
+    // only matches `function name` / `class Name`, so an object-literal method
+    // (`async getOrderById(id) {`), a class method or a PHP method came back as
+    // "No symbol found" on the very line `locate` reports for it. Ask the index first
+    // and keep the regex as the fallback for unindexed files.
+    // The index root comes from the FILE, not from cwd: `path.relative(process.cwd(),
+    // filePath)` produced a wrong `file`/layer whenever the process ran outside the
+    // repo root (e.g. `whereami` from a sibling directory).
+    const root = findIndexRoot(path.dirname(filePath));
+    const idx = root ? getIndex(root) : null;
+    const relPath = root ? path.relative(root, filePath) : path.relative(process.cwd(), filePath);
+    let symbol = null;
+    let kind = null;
+    let enclosing = null;
+    let layer = null;
+    let source = 'regex-scan';
+
+    if (idx) {
+      const rel = norm(relPath);
+      const containing = (idx.symbols || [])
+        .filter((s) => norm(s.file) === rel && s.line_start <= targetLine && s.line_end >= targetLine)
+        .sort((a, b) => b.line_start - a.line_start);   // innermost span first
+      if (containing.length) {
+        const s = containing[0];
+        symbol = s.name;
+        kind = s.kind || 'symbol';
+        enclosing = s.enclosing || null;
+        layer = (idx.layerMap || {})[s.id] ?? null;
+        source = 'index';
+      }
     }
-    
-    // Determine layer from path
-    const relPath = path.relative(process.cwd(), filePath);
-    let layer = 'unknown';
-    if (/controllers?[/\\]/.test(relPath)) layer = 'API (Controller)';
-    else if (/services?[/\\]/.test(relPath)) layer = 'Business (Service)';
-    else if (/repositor(?:y|ies)[/\\]/.test(relPath)) layer = 'Data (Repository)';
-    else if (/middleware[/\\]/.test(relPath)) layer = 'Middleware';
-    else if (/config[/\\]/.test(relPath)) layer = 'Configuration';
-    else if (/models?[/\\]/.test(relPath)) layer = 'Model / Validation';
-    
+
+    if (!symbol) {
+      let enclosingFunction = null;
+      let enclosingClass = null;
+      for (let i = targetLine - 1; i >= 0; i--) {
+        const funcMatch = lines[i].match(/(?:async\s+)?function\s+(\w+)/);
+        const classMatch = lines[i].match(/class\s+(\w+)/);
+        if (funcMatch && !enclosingFunction) enclosingFunction = funcMatch[1];
+        if (classMatch && !enclosingClass) enclosingClass = classMatch[1];
+      }
+      symbol = enclosingFunction || enclosingClass || null;
+      kind = enclosingFunction ? 'function' : enclosingClass ? 'class' : null;
+      enclosing = enclosingFunction ? (enclosingClass ? `${enclosingClass}.${enclosingFunction}` : enclosingFunction) : enclosingClass || null;
+    }
+
+    // Layer: the index layerMap (evidence) first, path heuristic second — both measured
+    // against the index root, never against process.cwd().
+    if (!layer) {
+      const p = norm(relPath);
+      layer = 'unknown';
+      if (/controllers?[/\\]/.test(p)) layer = 'API (Controller)';
+      else if (/services?[/\\]/.test(p)) layer = 'Business (Service)';
+      else if (/repositor(?:y|ies)[/\\]/.test(p)) layer = 'Data (Repository)';
+      else if (/middleware[/\\]/.test(p)) layer = 'Middleware';
+      else if (/config[/\\]/.test(p)) layer = 'Configuration';
+      else if (/models?[/\\]/.test(p)) layer = 'Model / Validation';
+      source = source === 'index' ? 'index+path' : 'path';
+    }
+
     return {
       type: 'whereami',
-      file: relPath,
+      file: norm(relPath),
       line: targetLine,
       content: lineContent?.trim(),
-      symbol: enclosingFunction || enclosingClass || null,
-      kind: enclosingFunction ? 'function' : enclosingClass ? 'class' : null,
-      enclosing: enclosingFunction ? (enclosingClass ? `${enclosingClass}.${enclosingFunction}` : enclosingFunction) : enclosingClass || null,
+      symbol,
+      kind,
+      enclosing,
       layer,
+      source,
+      ...(symbol ? {} : { note: 'no symbol at this position — not in the index, and the regex scan found no function/class' }),
     };
   },
 
