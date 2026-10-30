@@ -154,10 +154,13 @@ for (const rel of docFiles) {
 }
 
 // ---- 4c. the rule count is a claim too -------------------------------------
-// "61 rules" appears in README (twice, both languages) and in the handbook. It is the
-// size of the rule table — a number that silently rots the day someone adds a rule.
-const ruleTableCount = [...fs.readFileSync(path.join(ROOT, 'scripts', 'review-rules.mjs'), 'utf8')
-  .matchAll(/\{ id: '[a-z0-9-]+', group: '/g)].length;
+// "61 rules" appears in README (twice, both languages) and in the handbook. Count the
+// RULE_REGISTRY block itself (62): a `{ id: …, group: … }` regex under-counts it —
+// `vue-global-blast` is written with keys in another order and was silently skipped,
+// so docs claiming one number passed while the registry had another.
+const registryBlock = fs.readFileSync(path.join(ROOT, 'scripts', 'review-rules.mjs'), 'utf8')
+  .match(/const RULE_REGISTRY\s*=\s*\[([\s\S]*?)\n\];/);
+const ruleTableCount = registryBlock ? [...registryBlock[1].matchAll(/\bid:\s*'([^']+)'/g)].length : 0;
 for (const rel of ['README.md', 'docs/review-rules.md', ...mdFiles.map((f) => `skill/archnav/${f}`)]) {
   const full = path.join(ROOT, rel);
   if (!fs.existsSync(full)) continue;
@@ -166,7 +169,8 @@ for (const rel of ['README.md', 'docs/review-rules.md', ...mdFiles.map((f) => `s
     for (const m of line.matchAll(/(\d{2,3})\s+rules\b|(\d{2,3})\s*条规则/g)) {
       const claimed = Number(m[1] || m[2]);
       if (claimed !== ruleTableCount) {
-        once(`rules:${rel}`, 'error', `${rel}:${i + 1}`, 'doc claims a rule count that no longer matches the table', `says ${claimed}, table has ${ruleTableCount}`);
+        // keyed per line: one claim per file was hiding the other two in README
+        once(`rules:${rel}:${i + 1}`, 'error', `${rel}:${i + 1}`, 'doc claims a rule count that no longer matches the table', `says ${claimed}, table has ${ruleTableCount}`);
       }
     }
   }

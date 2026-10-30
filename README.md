@@ -32,7 +32,7 @@ attached to every answer**. Nothing in the pipeline requires a third-party binar
   guessing from filenames: a controller method surfaces its route, a component method
   surfaces the pages that render it. Every row carries `depth` / `via` / `source_kind` /
   `confidence`.
-- **Review layer (diff-scoped)** — 61 rules for PHP/Laravel, JS/Vue/uni-app, Python and Go,
+- **Review layer (diff-scoped)** — 62 rules for PHP/Laravel, JS/Vue/uni-app, Python and Go,
   plus a file-local taint tracker, an OSV dependency audit and an optional Semgrep pass for
   interprocedural taint,
   a front/back API-boundary check, affected-test selection, block-level duplication
@@ -188,6 +188,11 @@ Laravel 286 PHP + 76 Blade; uni-app 269 Vue + 64 JS — harness and raw numbers 
 | Index time (Laravel / uni-app) | **3.3s / 13.0s** | 23.0s / 45.4s | 7.7s / 16.6s |
 | License | **MIT** | PolyForm Noncommercial | MIT |
 
+> **CodeGraph column = archived evidence.** Re-running needs the `codegraph` CLI on
+> `PATH`, which is not installable from npm (the npm package of that name is a
+> different project). See [`bench/README.md`](bench/README.md) — ArchNav and GitNexus
+> re-run cleanly; CodeGraph reproduces only where the CLI is already present.
+
 ### 🚀 Quick start
 
 ```bash
@@ -285,7 +290,7 @@ every PHP repo reported `Layer: null`.
 │   ├── treewalker.js         # JS AST parser (acorn)
 │   └── parsers/              # dispatcher + TS / Python / WASM parsers
 ├── scripts/
-│   ├── review-rules.mjs      # 61 rules + task sheet + SARIF / markdown / gates
+│   ├── review-rules.mjs      # 62 rules + task sheet + SARIF / markdown / gates
 │   ├── impact.mjs            # entry points, blast radius, explainable risk
 │   ├── deep.mjs              # flows, clusters, cycles, module risk, cross-repo
 │   ├── duplication.mjs       # jscpd wrapper: clone kinds + baseline gate
@@ -321,7 +326,7 @@ ArchNav 为仓库建知识图谱，回答 Agent 最容易答错的问题 —— 
   （AI 新增文件正是未跟踪）；没有 git 时退回内容漂移并显式写进 `note`。
 - **纯图谱影响分析**：`impact` 沿真实 `DEPENDS_ON` 边反向走，不靠文件名猜；每行带
   `depth` / `via` / `source_kind` / `confidence`。
-- **审核层（diff 范围）**：61 条规则覆盖 PHP/Laravel、JS/Vue/uni-app、Python、Go；文件内污点
+- **审核层（diff 范围）**：62 条规则覆盖 PHP/Laravel、JS/Vue/uni-app、Python、Go；文件内污点
   追踪 + OSV 依赖漏洞审计（`--audit`，`deep` 默认开）+ 可选 Semgrep 跨函数污点；前后端接口
   边界核对；受影响测试选择；块级重复 + 基线门禁；一张清单同时列出**查过什么、跳过什么、为什么**。
 - **外部引擎降级为交叉验证**：CodeGraph / GitNexus 适配器仍在（显式 `engine`，或 MCP 的

@@ -1840,6 +1840,13 @@ const NOT_APPLICABLE = {
 export function buildChecklist({ findings = [], meta = {} }) {
   const byRule = new Map();
   for (const f of findings) byRule.set(f.rule, (byRule.get(f.rule) || 0) + 1);
+  // When the two indexes are not the same front/back pair, the path/method rows below
+  // have nothing to compare — but they used to report `pass` (0 findings) anyway, i.e.
+  // "we checked and found nothing" when in fact nothing was checked. Measured: the
+  // bench pair matches at 3.6%, `fe-be-pairing-suspect` fired, and all three sibling
+  // rows still said ✅ 通过. A row that was never checked must say so.
+  const pairingSuspect = findings.find((f) => f.rule === 'fe-be-pairing-suspect') || null;
+  const pairingDependent = new Set(['fe-be-path-not-found', 'fe-be-method-mismatch', 'fe-be-route-unused']);
   const rows = RULE_REGISTRY.map((r) => {
     let status = 'pass';
     let reason = null;
@@ -1853,6 +1860,10 @@ export function buildChecklist({ findings = [], meta = {} }) {
     else if ((r.needs || []).includes('composer') && !meta.hasComposer) { status = 'na'; reason = NOT_APPLICABLE.composer; }
     else if ((r.needs || []).includes('packageJson') && !meta.hasPackageJson) { status = 'na'; reason = NOT_APPLICABLE.packageJson; }
     else if ((r.needs || []).includes('tests') && !meta.hasTests) { status = 'na'; reason = NOT_APPLICABLE.tests; }
+    else if (pairingSuspect && pairingDependent.has(r.id)) {
+      status = 'na';
+      reason = `未核对：${pairingSuspect.message}`;
+    }
     return { ...r, hits: byRule.get(r.id) || 0, status: status === 'na' ? 'na' : (byRule.get(r.id) ? 'hit' : 'pass'), reason };
   });
   const summary = {

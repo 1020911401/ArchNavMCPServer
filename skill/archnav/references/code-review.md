@@ -87,10 +87,19 @@ node src/index.js analyze . --ignore "bench/**,**/vendor/**"          # 建索�
 - **PHP 动态调用 / JS 回调里的间接调用**：会漏。
 - **`:key` 表达式**（uni-app 非 H5 不支持）只查到“有没有 key”。
 - **测试覆盖图**依赖测试文件 import 被解析到；测试靠 CLI spawn 的覆盖路径看不到。
+- **API 响应形状核对（shape check，暂不做）**——2026-10-30 实测于本机唯一可信的前后端对
+  （`CRMEB/template/uni-app` ↔ `laravel_crmeb`，`pathMatches` 配对 20.8% = 48/231 条唯一路径，49 个对上的接口）：
+  - 后端 handler 里**只有 3/49（6%）**留下字面返回键（`$data['list']=…` 那种），**34/49（69%）**形状委托给
+    `app('json')->success($this->service->…)`——要再解析一层 service 才见得到；
+  - 前端 **141 个文件读 `<resp>.data*`，只有 18 个文件发请求**：端点定义在 api 层，字段读取在调用页，
+    中间还要一跳「端点 → api 函数 → 调用页」；
+  - 结论：**这条规则需要 service 返回解析 + 端点→调用页解析两跳，是一个项目，不是一条规则。** 先立项再做，
+    不先做后说。在那之前，前后端核对只到路径/方法边界（`fe-be-path-not-found` / `fe-be-method-mismatch`），
+    且配对率低于 20% 时这三行报 `未核对` 而不是 `通过`。
 
 ## 7. 凭什么信它
 
-- 单测：**220 run / 218 pass / 0 fail / 2 skipped**（跳过的 2 个需要 bench fixture，fixture 不进 git）；注册规则 **80+ 条**（含 taint；deep+audit+semgrep 模式下任务书 81 行）。
+- 单测：**381 run / 379 pass / 0 fail / 2 skipped**（2026-10-30 实测；跳过的 2 个需要 bench fixture，fixture 不进 git）；注册规则 **62 条**（`RULE_REGISTRY.length`：`brief` 跑 55、`standard` 跑 62，`harness.rules.enabled` 可当场核对；`ext` 的 7 条要显式开）。复现：`npm test`、`node scripts/audit-skill.mjs`。
 - **外部工具接入**：`--audit`（OSV 依赖漏洞）与 `--semgrep`（跨函数污点）都不在默认模式里，要显式加旗标；两者不依赖本地安装（OSV 是 HTTP；semgrep 不在就明说）。
 - 自测：`scripts/selftest.mjs` 造一个含全部栈的临时仓、注入真实缺陷、逐项验证并打印 ✅/❌ 与证据（含“brief 输出不含深查分组”这条边界断言）。
 - CI：PR 与 push 两类事件都跑（push 用 `--base HEAD~1`），PR 评论贴任务书、SARIF 进 code scanning。

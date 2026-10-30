@@ -56,6 +56,16 @@ printed, so piping through `head` can never lose it.
 | `codegraph` | external CLI `codegraph` (must be on `PATH`) |
 | `gitnexus` | external CLI `gitnexus` (must be on `PATH`) |
 
+> **`codegraph` is not re-installable from npm.** Verified 2026-10-30: no `codegraph`
+> binary on this machine (PATH, npm global, `hermes/tools`, `~/Projects`), and the npm
+> package named `codegraph` is a *different* project (jonschlinkert's graph library,
+> 1.0.0, 2024-09-09) — not this code-index CLI. So the `codegraph` column in the
+> committed `report.json` / `multi_dim_report.json` (zero `n/a` cells, 19 mentions) is
+> a **historical snapshot from a machine that had the CLI**: on a machine without it
+> the harness emits `n/a (not on PATH)` cells for that engine and the column cannot be
+> reproduced until the CLI's source is known. Treat CodeGraph numbers as archived
+> evidence, not as a re-runnable comparison. GitNexus and ArchNav both re-run cleanly.
+
 ### Query → command mapping
 
 Each symbol is benchmarked on the fixture it actually lives in (a symbol only

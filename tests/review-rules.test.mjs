@@ -1438,3 +1438,33 @@ test('git diff never pages and never prompts (large compare diffs), via the inje
   assert.equal(seen.opts.env.GIT_TERMINAL_PROMPT, '0', 'no credential prompt on a non-tty');
   assert.deepEqual(seen.opts.stdio, ['ignore', 'pipe', 'pipe']);
 });
+
+test('fe-be rows say 未核对 (not 通过) while the two indexes are not a pair', () => {
+  const meta = {
+    dir: '.', changedTotal: 3, changedPhp: 0, changedFront: 3, changedPy: 0, changedGo: 0, changedOther: 0, hasChanges: true,
+    hasBackend: true, hasComposer: false, hasPackageJson: true, hasTests: false, hasIndex: true,
+    symbols: 10, freshness: 'via=git',
+  };
+  const suspect = {
+    rule: 'fe-be-pairing-suspect', severity: 'warn', file: null, line: null,
+    message: '前后端匹配率只有 3.6%（298 个前端调用 vs 158 条后端路由）——这两个索引很可能不是同一对前后端。',
+    why: 'w', evidence: 'e',
+  };
+  const dependents = ['fe-be-path-not-found', 'fe-be-method-mismatch', 'fe-be-route-unused'];
+
+  // measured on the bench pair: pairing 3.6%, suspect fired, and all three rows
+  // reported ✅ 通过 — i.e. "checked and clean" for a comparison that never happened
+  const withSuspect = buildChecklist({ findings: [suspect], meta }).rows;
+  for (const id of dependents) {
+    const row = withSuspect.find((r) => r.id === id);
+    assert.equal(row.status, 'na', `${id} must be na while pairing is suspect`);
+    assert.match(row.reason, /未核对/, `${id} must say it was not checked`);
+    assert.match(row.reason, /3\.6%/, `${id} carries the measured rate as evidence`);
+  }
+
+  // same rows, no suspect → genuinely checked and clean → pass
+  const clean = buildChecklist({ findings: [], meta }).rows;
+  for (const id of dependents) {
+    assert.equal(clean.find((r) => r.id === id).status, 'pass', `${id} returns to pass when the pair is real`);
+  }
+});
