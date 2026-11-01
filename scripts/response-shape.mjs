@@ -32,12 +32,28 @@ function walk(dir, out = [], depth = MAX_DEPTH) {
   for (const e of entries) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (/^(node_modules|vendor|\.git|storage|bootstrap)$/.test(e.name)) continue;
+      // build output must not be scanned: on the real uni-app pair a hit was attributed
+      // to `unpackage/dist/dev/mp-weixin/pages/…` — the same read counted twice, once
+      // from source and once from the bundle
+      if (/^(node_modules|vendor|\.git|storage|bootstrap|unpackage|dist|build|coverage|\.hbuilderx|\.svn)$/.test(e.name)) continue;
       walk(p, out, depth - 1);
     } else if (e.isFile()) out.push(p);
   }
   return out;
 }
+
+/**
+ * Array/collection/string members — never response fields: `res.data.length` is the
+ * payload's own length, `res.data.map(...)` a method (guarded separately). Measured on
+ * the real pair: `length` was reported as a "missing field" for two handlers before
+ * this list existed (2026-11-01).
+ */
+const NON_FIELD = new Set([
+  'length', 'size', 'constructor', 'map', 'filter', 'find', 'findIndex', 'includes',
+  'slice', 'concat', 'sort', 'join', 'reverse', 'reduce', 'reduceRight', 'some',
+  'every', 'indexOf', 'lastIndexOf', 'flat', 'flatMap', 'keys', 'values', 'entries',
+  'push', 'pop', 'shift', 'unshift', 'splice', 'isArray', 'toString', 'charAt',
+]);
 
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -314,6 +330,7 @@ export function collectFrontendReads({ root, method, path: endpoint }) {
           // fields — a lookahead inside the window does not work (`\w*` backtracks:
           // `map` fails, `ma` succeeds), so ask explicitly once the name is whole.
           if (/^\s*\(/.test(src.slice(absEnd + tail.length, absEnd + tail.length + 12))) continue;
+          if (NON_FIELD.has(field)) continue;          // payload members (length, map…) are not fields
           const key = `${field}@${f}`;
           if (seen.has(key)) continue;
           seen.add(key);
@@ -361,9 +378,27 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   if (!del) return stop('no-literal-shape-no-delegate');
   if (maxDepth < 2) return stop('depth-cap');
 
-  const serviceFile = findMethodFile({ root, method: del.method, index, preferService: true });
+  // Depth-1 delegate: pick the service the CONTROLLER actually injected (constructor
+  // type-hint), not "the first *Service.php that happens to declare a method this
+  // name". Measured 2026-11-01: `KefuV2Controller` injects `V2KefuService`, while 8+
+  // services declare `record()` — name order picked a stranger, and its keys
+  // (`list, count`) became the "backend shape" for an endpoint whose real handler
+  // returns `serviceList`. The hint comes from the CLASS source (picked.src): a method
+  // body never contains `__construct`, which is why every earlier hint attempt fell
+  // silently back to name order.
+  const hintedClass = constructorTypeOf(picked.src, del.receiver);
+  let serviceFile = null;
+  let usedHint = false;
+  if (hintedClass) {
+    const candidate = findPhpFileByClass(root, hintedClass, index);
+    if (candidate) {
+      const src = read(candidate);
+      if (src && methodBody(src, del.method)) { serviceFile = candidate; usedHint = true; }
+    }
+  }
+  if (!serviceFile) serviceFile = findMethodFile({ root, method: del.method, index, preferService: true });
   if (!serviceFile) return stop('service-method-not-found');
-  via.push(`${norm(path.relative(root, serviceFile))}::${del.method}`);
+  via.push(`${norm(path.relative(root, serviceFile))}::${del.method}${usedHint ? ` [ctor hint: ${hintedClass}]` : ''}`);
 
   const serviceSrc = read(serviceFile);
   const second = serviceSrc && methodBody(serviceSrc, del.method);
@@ -381,7 +416,7 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   // is — then the file that declares the method. Returned as level `repo`, which the
   // comparability gate only accepts once the measured agreement between these keys and
   // what clients read supports it (docs/shape-check.md §2.3).
-  const hinted = constructorTypeOf(second.body, del2.receiver);
+  const hinted = constructorTypeOf(serviceSrc, del2.receiver);
   const hop3File = (hinted && findPhpFileByClass(root, hinted, index))
     || findMethodFile({ root, method: del2.method, index, preferService: false });
   if (!hop3File || norm(hop3File) === norm(serviceFile)) return stop('depth-cap');

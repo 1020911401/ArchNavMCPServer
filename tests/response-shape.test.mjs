@@ -249,8 +249,48 @@ test('shapeIsComparable is the single gate — rule and coverage cannot drift', 
 
 const BACKEND = path.join(ROOT, 'bench', 'fe-be-pair', 'backend');
 
-test('M4: with maxDepth 3 the resolver reaches the injected repository', () => {
-  const capped = resolveHandlerShape({ root: BACKEND, controller: 'CouponController', action: 'fromRepo' });
+test('the injected service wins over a stranger with the same method name', (t) => {
+  // measured on the real pair (2026-11-01): `KefuV2Controller` injects `V2KefuService`,
+  // 8+ services declare `record()`, and name order picked `AdminFlowStatisticService`
+  // — whose keys (`list, count`) became the "shape" of an endpoint that really returns
+  // `serviceList`, fabricating a missing-field finding
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shape-hint-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  const w = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  };
+  // same method name, different shapes — alphabetically the wrong one comes first
+  w('app/Services/AAAFirstService.php', [
+    '<?php',
+    'class AAAFirstService {',
+    '  public function record() { return ["list" => 1, "count" => 2]; }',
+    '}',
+    '',
+  ].join('\n'));
+  w('app/Services/ZedTargetService.php', [
+    '<?php',
+    'class ZedTargetService {',
+    '  public function record() { return ["serviceList" => []]; }',
+    '}',
+    '',
+  ].join('\n'));
+  w('app/Http/FakeController.php', [
+    '<?php',
+    'class FakeController {',
+    '  public function __construct(private readonly ZedTargetService $service) {}',
+    '  public function record() { return app("json")->success($this->service->record()); }',
+    '}',
+    '',
+  ].join('\n'));
+
+  const r = resolveHandlerShape({ root: dir, controller: 'FakeController', action: 'record' });
+  assert.equal(r.level, 'service', JSON.stringify(r));
+  assert.deepEqual(r.keys, ['serviceList'], 'the injected service, not the alphabetical first');
+  assert.match(r.via.join(' -> '), /ctor hint: ZedTargetService/, `the hint is the evidence: ${r.via.join(' -> ')}`);
+});
+
+test('M4: with maxDepth 3 the resolver reaches the injected repository', () => {  const capped = resolveHandlerShape({ root: BACKEND, controller: 'CouponController', action: 'fromRepo' });
   assert.equal(capped.level, 'unresolved', JSON.stringify(capped));
   assert.equal(capped.reason, 'depth-cap', 'the default cap (controller -> service) holds');
 
