@@ -173,3 +173,58 @@ test('M3 pairing rule: shape + reads decide a missing field', () => {
   const missing = reads.reads.map((x) => x.field).filter((f) => !shape.keys.includes(f));
   assert.deepEqual(missing, ['nope'], 'the field the backend never returns');
 });
+
+// ── regressions from measuring the rule on the real pair (2026-11-01) ────────────
+
+test('a read at the window edge is not cut into a phantom field', (t) => {
+  // measured: a read at abs 2272 inside a window ending at 2289 turned
+  // `res.data.customer_url` into a field `customer` that the file never contains
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'read-window-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  fs.writeFileSync(path.join(dir, 'api.js'), "export const fetchType = () => request.get('/type');\n");
+
+  const callToken = 'fetchType(';
+  const pre = "import { fetchType } from './api.js';\nexport function show() {\n  return " + callToken;
+  const mid = ').then((res) => {\n  ';
+  const callPos = pre.indexOf(callToken);
+  const phantom = 'res.data.customer';                       // what a 600-char window cuts to
+  const marker = 'res.data.customer_url';
+  const markerStart = callPos + 600 - phantom.length;        // so the window ends *inside* the name
+  const filler = ' '.repeat(Math.max(0, markerStart - (pre.length + mid.length)));
+  fs.writeFileSync(path.join(dir, 'caller.js'), pre + mid + filler + marker + ';\n});\n}\n');
+
+  const r = collectFrontendReads({ root: dir, method: 'GET', path: '/type' });
+  assert.equal(r.level, 'resolved', JSON.stringify(r));
+  assert.deepEqual(r.reads.map((x) => x.field), ['customer_url'], 'the whole identifier, re-assembled past the window edge');
+  assert.ok(!r.reads.some((x) => x.field === 'customer'), 'the phantom must not exist');
+});
+
+test('an unexpandable return makes the shape partial; a `data` payload stays identifiable', (t) => {
+  // review-rules refuses to compare BOTH: a partial backend shape (the union is only a
+  // lower bound) and a payload carrying `data` (`res.data.x` may read the nested object)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shape-partial-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  fs.mkdirSync(path.join(dir, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'app', 'MixedController.php'), [
+    '<?php',
+    'class MixedController {',
+    '  public function mixed() {',
+    '    if ($x) { return ["a" => 1]; }',
+    '    return $this->service->other();',
+    '  }',
+    '  public function wrapped() {',
+    '    return ["type" => "x", "data" => []];',
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+
+  const mixed = resolveHandlerShape({ root: dir, controller: 'MixedController', action: 'mixed' });
+  assert.equal(mixed.level, 'local');
+  assert.deepEqual(mixed.keys, ['a'], 'keys read from the branch we could model');
+  assert.equal(mixed.partial, true, 'a return we cannot expand makes the union a lower bound');
+
+  const wrapped = resolveHandlerShape({ root: dir, controller: 'MixedController', action: 'wrapped' });
+  assert.equal(wrapped.partial, undefined, 'every branch was modelled');
+  assert.deepEqual([...wrapped.keys].sort(), ['data', 'type'], 'the rule detects the wrapper by this key');
+});

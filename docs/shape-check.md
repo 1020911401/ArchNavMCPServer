@@ -51,6 +51,33 @@
 **复现**：`node scripts/shape-coverage.mjs <frontendDir> <backendDir>`（只读，自动打时间戳）。
 真值 fixture 上同一条命令给 **91%（10/11）**——resolver 本身没问题，差的是真实代码的形状风格。
 
+### 2.2 端到端核验：规则在真实配对上会报什么（2026-11-01）
+
+把 M3 规则整条链路搬到真实配对上跑，并对每条命中**人工核对源码**。命中数的轨迹，
+每一步都是一个具体缺陷被修掉：
+
+| 阶段 | 命中 | 修掉的东西 |
+| --- | --- | --- |
+| 原始 | **7** | — |
+| 方法调用守卫 | 4 | `res.data.map/filter` 是方法不是字段；负向预查被 `\w*` **回溯**骗过（`map` 失败退成 `ma`）→ 改为显式判断后面是否 `(` |
+| 窗口截断修复 | 3 | 600 字符窗口把 `res.data.customer_url` **从中间切断**成幻影字段 `customer`（该文件全文 0 处裸 `.data.customer`）→ 从完整源码拼回标识符尾部 |
+| partial + 包裹守卫 | **1** | `localShape` 只读第一个 return → 改为**所有 return 取并集 + 无法展开的分支标 `partial`**；payload 含 `data` 键（经典包裹）拒绝比较 |
+
+**最终 1 条命中，且已人工核过源码**：
+
+```
+GET v2/user/service/record  ->  KefuV2Controller@record
+  客户端 chat.vue:515,518,534,541,546  共 5 处 res.data.serviceList.length
+  后端只返回 list, count      →  运行时 serviceList 为 undefined，.length 直接抛
+```
+
+配套核验：后端包装器 `CrmebApiResponse::success($message,$data,$replace)` **只包装不注入键**
+（我们未传 `$replace`），所以「客户端读的字段后端没返回」在机制上成立。
+可比 6 对、沉默 56 对——`partial`/`data` 守卫拦掉的 `bindName`、`id` 两条都是**可能的假阳**
+（`bindName` 完全可能由另一个 return 分支返回），宁可沉默也不编造。
+
+**结论**：这条规则现在是「少而准」——1 条经过人工核对的命中，胜过 7 条含 3 个已知假阳的命中。
+
 ## 3. 设计
 
 ### 3.1 复用既有的诚实性基建（硬约束）

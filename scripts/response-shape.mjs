@@ -154,21 +154,34 @@ function keysInBracket(text) {
  * L0 — a shape the method body itself states:
  *   (a) `return [ 'k' => … ]` / `return response()->json([ 'k' => … ])` (depth-1 keys)
  *   (b) `$data['k'] = …` assignments when the returned statement names `$data`
+ *
+ * Every `return` contributes (early `return ['id' => …]` branches are real shapes the
+ * client can read), and a return we cannot expand (an expression, a collection, a
+ * variable with no `[…]` assignments) marks the result `partial`: the union is then a
+ * lower bound, not the truth — the caller must not compare it as if it were the shape.
  */
 function localShape(body) {
-  for (const st of returnStatements(body)) {
+  const stmts = returnStatements(body);
+  if (!stmts.length) return null;
+  const keys = new Set();
+  let partial = false;
+  for (const st of stmts) {
     const bracket = keysInBracket(st.text);
-    if (bracket.length) return { keys: [...new Set(bracket)] };
+    if (bracket.length) { for (const k of bracket) keys.add(k); continue; }
 
     const returned = st.text.match(/\$([A-Za-z_]\w*)/);
     if (returned) {
       const varName = returned[1];
       const assigns = [...body.matchAll(new RegExp(`\\$${escapeRe(varName)}\\s*\\[\\s*['"]([^'"]+)['"]\\s*\\]`, 'g'))]
         .map((m) => m[1]);
-      if (assigns.length) return { keys: [...new Set(assigns)] };
+      if (assigns.length) { for (const k of assigns) keys.add(k); continue; }
+      partial = true;                 // returns a variable we cannot expand into keys
+      continue;
     }
+    partial = true;                   // returns an expression (collection / object / call chain)
   }
-  return null;
+  if (!keys.size) return null;
+  return { keys: [...keys], ...(partial ? { partial: true } : {}) };
 }
 
 /** A shape the method delegates: `$this->service->foo(...)` or `FooService::foo(...)`. */
@@ -289,13 +302,25 @@ export function collectFrontendReads({ root, method, path: endpoint }) {
       while ((m = re.exec(src))) {
         const window = src.slice(m.index, m.index + 600);   // the call + its handler chain
         for (const r of window.matchAll(/(?:res|response|result|\br\b|x|d)\.data\.([A-Za-z_]\w*)/g)) {
-          const key = `${r[1]}@${f}`;
+          // The window can CUT an identifier at its edge: a read at abs 2272 inside a
+          // window ending at 2289 turned `res.data.customer_url` into a phantom field
+          // `customer` (measured on the real pair, 2026-11-01 — the whole file contained
+          // no bare `.data.customer`). Re-assemble the tail from the full source first.
+          const absStart = m.index + r.index;
+          const absEnd = absStart + r[0].length;
+          const tail = (src.slice(absEnd).match(/^[A-Za-z0-9_]*/) || [''])[0];
+          const field = r[1] + tail;
+          // `res.data.map(...)` / `.filter(...)` are method calls on the payload, not
+          // fields — a lookahead inside the window does not work (`\w*` backtracks:
+          // `map` fails, `ma` succeeds), so ask explicitly once the name is whole.
+          if (/^\s*\(/.test(src.slice(absEnd + tail.length, absEnd + tail.length + 12))) continue;
+          const key = `${field}@${f}`;
           if (seen.has(key)) continue;
           seen.add(key);
           reads.push({
-            field: r[1],
+            field,
             file: norm(path.relative(root, f)),
-            line: src.slice(0, m.index + r.index).split('\n').length,
+            line: src.slice(0, absStart).split('\n').length,
           });
         }
       }
@@ -330,7 +355,7 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   via.push(`${norm(path.relative(root, picked.file))}::${action}`);
 
   const local = localShape(picked.body.body);
-  if (local) return { level: 'local', keys: local.keys, via, depth: 1 };
+  if (local) return { level: 'local', keys: local.keys, ...(local.partial ? { partial: true } : {}), via, depth: 1 };
 
   const del = delegate(picked.body.body);
   if (!del) return stop('no-literal-shape-no-delegate');
@@ -345,7 +370,7 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   if (!second) return stop('service-method-not-found');
 
   const local2 = localShape(second.body);
-  if (local2) return { level: 'service', keys: local2.keys, via, depth: 2 };
+  if (local2) return { level: 'service', keys: local2.keys, ...(local2.partial ? { partial: true } : {}), via, depth: 2 };
 
   // a service that delegates again: beyond the charter's depth cap — say so instead of
   // inventing keys from a layer we were not asked to model

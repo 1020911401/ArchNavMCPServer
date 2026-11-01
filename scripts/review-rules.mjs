@@ -1574,7 +1574,13 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
           if (!route.controller || !route.action) { if (shapeStats) shapeStats.unresolved += 1; continue; }
           const shape = resolveHandlerShape({ root: backDir, controller: route.controller, action: route.action });
           const reads = collectFrontendReads({ root: frontDir, method: call.method, path: call.path });
-          if (shape.level === 'unresolved' || reads.level === 'unresolved') {
+          // Two backend shapes we refuse to compare: an *incomplete* one (some return
+          // branch we could not expand, so the key union is only a lower bound) and a
+          // payload containing `data` (classic wrapper — `res.data.id` may read the nested
+          // object we never opened). Both count as unresolved: the row says 未核对 and no
+          // "missing field" is invented from a shape we did not actually read.
+          const backendUsable = shape.level !== 'unresolved' && !shape.partial && !shape.keys.includes('data');
+          if (!backendUsable || reads.level === 'unresolved') {
             if (shapeStats) shapeStats.unresolved += 1;
             continue;
           }
