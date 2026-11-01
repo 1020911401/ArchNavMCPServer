@@ -87,6 +87,30 @@ GET v2/user/service/record  ->  KefuV2Controller@record
 
 **结论**：这条规则现在是「少而准」——1 条经过人工核对的命中，胜过 7 条含 3 个已知假阳的命中。
 
+## 2.3 M4 判定：第 3 跳（repository 层）——被证据否决（2026-11-01）
+
+resolver 已支持 `maxDepth: 3`（默认仍 2，只在被显式要求时多走一跳：先用构造器
+类型提示定位 `$this->repository` 对应的类，再找方法体）。实测（**260 条路由、93 个
+配对接口**，`node scripts/shape-coverage.mjs <front> <back> --depth3` 可复现）：
+
+| 指标 | 数字 |
+| --- | --- |
+| depth-2 因 `depth-cap` 拒绝 | 29 |
+| 第 3 跳能解析出字面键 | **3**（= 收益上限 +3%） |
+| 这 3 条里**前端读取可解析** | **0** → 吻合率证据为零 |
+| 其余 26 条去向 | 11 条仓库方法本身无字面形状（返回查询构建器）· 15 条又再委托一跳 / 找不到跳目标 |
+
+**判定：不放行 `repo`。** `shapeIsComparable` 的 `COMPARABLE_LEVELS` 只有 `local|service`，
+并由 `tests/response-shape.test.mjs` 钉住。理由两条：
+
+1. **收益天花板 3%**（3/93），而守卫本身的代价几乎为零；
+2. 放行的唯一依据——hop-3 键与前端读取的**吻合率**——**一条样本都拿不到**。
+   拿不到证据就放行，等于重演「报 7 条、3 条假阳」那一版。
+
+重启 M4 的证据条件（写死，不靠临场判断）：`--depth3` 输出里 `agreement evidence` 非 NONE，
+且**完全吻合率 ≥ 80%**，再人工核对其中若干条（照 §2.2 的做法）通过后，才允许把 `'repo'`
+加进 `COMPARABLE_LEVELS`——加之前必须同时改 `shapeIsComparable` 的单元测试。
+
 ## 3. 设计
 
 ### 3.1 复用既有的诚实性基建（硬约束）
@@ -147,6 +171,7 @@ L1  委托：return app('json')->success($this->service->foo(…))
 | ~~M1.1~~ | 把 44% 推过 60% 的判断题 | **已完成 2026-11-01，判定：目标下修** | ✅ 见下 |
 | ~~M2~~ | 前端两跳字段收集 + 测试 | **已完成 2026-11-01** | ✅ `collectFrontendReads`：端点 → api 函数 → 调用方的 `res.data.*`；没有调用方 = `unresolved`（不是空 pass） |
 | ~~M3~~ | 规则 + checklist 行 + 文档回填 | **已完成 2026-11-01** | ✅ `fe-be-shape-field-missing`（第 63 条规则）；两侧任一解析不到 → 行 `未核对`；fixture 真值 1 条 |
+| ~~M4~~ | 第 3 跳（repository 层键语义） | **已完成 2026-11-01，判定：否决** | ✅ 见 §2.3：`maxDepth: 3` 机械可复现（`--depth3`），但收益 +3% 且吻合率证据为零 → 门禁保持关闭 |
 
 ### M1.1 判定（2026-11-01，实测两条路线）
 

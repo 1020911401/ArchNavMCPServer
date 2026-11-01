@@ -241,4 +241,27 @@ test('shapeIsComparable is the single gate — rule and coverage cannot drift', 
     'wrapper payload: res.data.x may read the nested object');
   assert.equal(shapeIsComparable({ level: 'local' }), false, 'no keys array is not comparable');
   assert.equal(shapeIsComparable(null), false, 'null-safe');
+  assert.equal(shapeIsComparable({ level: 'repo', keys: ['rows', 'count'] }), false,
+    'M4 verdict: hop-3 keys stay outside the gate until §2.3 agreement evidence exists');
+});
+
+// ── M4: the third hop works mechanically, and stays outside the gate ──────────────
+
+const BACKEND = path.join(ROOT, 'bench', 'fe-be-pair', 'backend');
+
+test('M4: with maxDepth 3 the resolver reaches the injected repository', () => {
+  const capped = resolveHandlerShape({ root: BACKEND, controller: 'CouponController', action: 'fromRepo' });
+  assert.equal(capped.level, 'unresolved', JSON.stringify(capped));
+  assert.equal(capped.reason, 'depth-cap', 'the default cap (controller -> service) holds');
+
+  const hop3 = resolveHandlerShape({ root: BACKEND, controller: 'CouponController', action: 'fromRepo', maxDepth: 3 });
+  assert.equal(hop3.level, 'repo', JSON.stringify(hop3));
+  assert.deepEqual(hop3.keys, ['rows', 'count'], 'keys read from OrderRepository::rows');
+  assert.equal(hop3.depth, 3);
+  assert.ok(hop3.via.some((v) => /OrderRepository\.php/.test(v)), `via shows the third file: ${hop3.via.join(' -> ')}`);
+
+  // …and the gate still refuses it: measured 2026-11-01, only 3/29 depth-cap pairs
+  // resolve at hop 3 and NONE of them had a readable frontend, so agreement evidence
+  // is zero (docs/shape-check.md §2.3)
+  assert.equal(shapeIsComparable(hop3), false, 'level repo is not admitted without §2.3 evidence');
 });

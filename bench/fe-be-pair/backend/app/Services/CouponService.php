@@ -24,4 +24,10 @@ class CouponService
     {
         return ['never' => 'reached'];
     }
+
+    /** M4: one more hop, into an injected repository (resolved only with maxDepth: 3). */
+    public function viaRepo()
+    {
+        return $this->repository->rows();
+    }
 }

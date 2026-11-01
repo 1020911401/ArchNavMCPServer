@@ -372,10 +372,46 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   const local2 = localShape(second.body);
   if (local2) return { level: 'service', keys: local2.keys, ...(local2.partial ? { partial: true } : {}), via, depth: 2 };
 
-  // a service that delegates again: beyond the charter's depth cap — say so instead of
-  // inventing keys from a layer we were not asked to model
-  if (delegate(second.body)) return stop('depth-cap');
-  return stop('service-has-no-literal-shape');
+  const del2 = delegate(second.body);
+  if (!del2) return stop('service-has-no-literal-shape');
+  if (maxDepth < 3) return stop('depth-cap');
+
+  // M4 (charter §5): one more hop into the dependency the service injected. Evidence
+  // first — the constructor type-hint tells us which class `$this->repository` actually
+  // is — then the file that declares the method. Returned as level `repo`, which the
+  // comparability gate only accepts once the measured agreement between these keys and
+  // what clients read supports it (docs/shape-check.md §2.3).
+  const hinted = constructorTypeOf(second.body, del2.receiver);
+  const hop3File = (hinted && findPhpFileByClass(root, hinted, index))
+    || findMethodFile({ root, method: del2.method, index, preferService: false });
+  if (!hop3File || norm(hop3File) === norm(serviceFile)) return stop('depth-cap');
+  via.push(`${norm(path.relative(root, hop3File))}::${del2.method}`);
+
+  const hop3Src = read(hop3File);
+  const third = hop3Src && methodBody(hop3Src, del2.method);
+  if (!third) return stop('depth-cap');
+
+  const local3 = localShape(third.body);
+  if (local3) return { level: 'repo', keys: local3.keys, ...(local3.partial ? { partial: true } : {}), via, depth: 3 };
+  if (delegate(third.body)) return stop('depth-cap');
+  return stop('repo-has-no-literal-shape');
+}
+
+/** `__construct(UserRepository $repository)` → `UserRepository` for `$this->repository`. */
+function constructorTypeOf(body, prop) {
+  const ctor = /__construct\s*\(([^)]*)\)/s.exec(body);
+  if (!ctor) return null;
+  const hint = new RegExp(`([A-Z][A-Za-z0-9_]*)\\s+\\$${escapeRe(prop)}\\b`).exec(ctor[1]);
+  return hint ? hint[1] : null;
+}
+
+/** `<Class>` → its PHP file (index class symbol first, basename walk after). */
+function findPhpFileByClass(root, className, index) {
+  const short = String(className || '').split('\\').pop();
+  if (!short) return null;
+  const sym = (index?.symbols || []).find((s) => s.kind === 'class' && s.name === short);
+  if (sym) return path.join(root, sym.file);
+  return findPhpFiles(root, false).find((f) => path.basename(f) === `${short}.php`) || null;
 }
 
 /**
@@ -386,15 +422,20 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
  *
  * A backend shape is comparable only when we actually read it:
  *   - `unresolved`    we never saw a shape (controller/service/depth-cap failures)
+ *   - level whitelist `repo` is deliberately NOT in it: hop-3 (repository layer) keys are
+ *     only admitted after the measured agreement between those keys and what clients
+ *     read supports calling them response keys (docs/shape-check.md §2.3)
  *   - `partial`       some return branch could not be expanded — the key union is a
  *                     lower bound, not the response shape
  *   - `data` key      classic wrapper payload; `res.data.x` may read the nested object
  *                     we never opened
  * Anything else is not compared: the checklist says 未核对, no field is declared missing.
  */
+const COMPARABLE_LEVELS = new Set(['local', 'service']);   // 'repo' on evidence only
+
 export function shapeIsComparable(shape) {
   return Boolean(shape)
-    && shape.level !== 'unresolved'
+    && COMPARABLE_LEVELS.has(shape.level)
     && !shape.partial
     && Array.isArray(shape.keys)
     && !shape.keys.includes('data');

@@ -25,4 +25,11 @@ class CouponController
     {
         return app('json')->success($this->service->nested());
     }
+
+    /** M4: three hops — level `repo` only when maxDepth: 3 is asked for, and never
+     *  comparable (`shapeIsComparable` whitelists local|service) until §2.3 evidence. */
+    public function fromRepo()
+    {
+        return app('json')->success($this->service->viaRepo());
+    }
 }

@@ -17,15 +17,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { extractFrontCalls, pathMatches } from './review-rules.mjs';
 import { extractLaravelRoutes } from '../src/parsers/laravelRoutes.js';
-import { resolveHandlerShape, shapeIsComparable } from './response-shape.mjs';
+import { resolveHandlerShape, shapeIsComparable, collectFrontendReads } from './response-shape.mjs';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const JSON_OUT = process.argv.includes('--json');
+// `--depth3` adds the M4 section (charter §2.3): would a THIRD hop resolve the
+// depth-cap cases, and — the gate's actual question — do those keys agree with what
+// the client reads? Report only; the gate stays closed on this evidence.
+const DEPTH3 = process.argv.includes('--depth3');
 const FRONT = path.resolve(args[0] || '');
 const BACK = path.resolve(args[1] || '');
 
 if (!args[0] || !args[1] || !fs.existsSync(FRONT) || !fs.existsSync(BACK)) {
-  console.error('usage: node scripts/shape-coverage.mjs <frontendDir> <backendDir> [--json]');
+  console.error('usage: node scripts/shape-coverage.mjs <frontendDir> <backendDir> [--json] [--depth3]');
   process.exit(2);
 }
 
@@ -59,6 +63,48 @@ for (const p of pairs) {
 
 const total = pairs.length;
 const resolved = counts.local + counts.service;
+
+// `--depth3` — the M4 section (charter §2.3): does a THIRD hop resolve the depth-cap
+// cases, and — the gate's real question — do those keys agree with what the client
+// reads? Agreement is the only evidence that could open the gate; without it the hop
+// stays outside `COMPARABLE_LEVELS` no matter how many pairs it resolves.
+let m4 = null;
+if (DEPTH3) {
+  m4 = {
+    depthCapAt2: 0, repoAt3: 0, readable: 0,
+    fullAgreement: 0, partialAgreement: 0, noAgreement: 0,
+    fieldsTotal: 0, fieldsMatched: 0, stopReasons: {}, samples: [],
+  };
+  for (const p of pairs) {
+    const d2 = resolveHandlerShape({ root: BACK, controller: p.be.controller, action: p.be.action });
+    if (!(d2.level === 'unresolved' && d2.reason === 'depth-cap')) continue;
+    m4.depthCapAt2 += 1;
+    const d3 = resolveHandlerShape({ root: BACK, controller: p.be.controller, action: p.be.action, maxDepth: 3 });
+    if (d3.level !== 'repo') {
+      m4.stopReasons[d3.reason || '?'] = (m4.stopReasons[d3.reason || '?'] || 0) + 1;
+      continue;
+    }
+    m4.repoAt3 += 1;
+    const reads = collectFrontendReads({ root: FRONT, method: p.fe.method, path: p.fe.path });
+    if (reads.level !== 'resolved') continue;
+    m4.readable += 1;
+    const keySet = new Set(d3.keys);
+    const fields = [...new Set(reads.reads.map((r) => r.field))];
+    const hit = fields.filter((f) => keySet.has(f)).length;
+    m4.fieldsTotal += fields.length;
+    m4.fieldsMatched += hit;
+    if (hit === fields.length) m4.fullAgreement += 1;
+    else if (hit > 0) m4.partialAgreement += 1;
+    else m4.noAgreement += 1;
+    m4.samples.push({
+      endpoint: `${p.fe.method} ${p.fe.path}`,
+      handler: `${p.be.controller}@${p.be.action}`,
+      keys: d3.keys.slice(0, 8), reads: fields.slice(0, 8),
+      agreement: `${hit}/${fields.length}`, via: d3.via,
+    });
+  }
+}
+
 const report = {
   when: new Date().toISOString(),
   frontend: FRONT,
@@ -75,6 +121,7 @@ const report = {
   comparablePct: total ? Math.round((comparable * 100) / total) : 0,
   refused,
   reasons,
+  ...(m4 ? { depth3: m4 } : {}),
 };
 
 if (JSON_OUT) {
@@ -91,6 +138,27 @@ if (JSON_OUT) {
   console.log(`refused by guard: partial=${refused.partial}  wrapper-data=${refused.wrapper}`);
   console.log('\nunresolved reasons:');
   for (const [k, v] of Object.entries(reasons).sort((a, b) => b[1] - a[1])) console.log(`  ${String(v).padStart(3)}  ${k}`);
+
+  if (m4) {
+    console.log(`\n--- M4 / depth 3 (charter §2.3) ---`);
+    console.log(`depth-cap at depth 2:      ${m4.depthCapAt2}`);
+    console.log(`resolved by a 3rd hop:     ${m4.repoAt3}`);
+    console.log(`…with readable frontend:   ${m4.readable}   <- agreement needs at least one of these`);
+    if (m4.readable) {
+      const pct = Math.round((m4.fullAgreement * 100) / m4.readable);
+      console.log(`full agreement:            ${m4.fullAgreement}/${m4.readable} = ${pct}%  (partial=${m4.partialAgreement}, none=${m4.noAgreement})`);
+      console.log(`field agreement:           ${m4.fieldsMatched}/${m4.fieldsTotal}`);
+      for (const s of m4.samples.slice(0, 5)) {
+        console.log(`  ${s.endpoint}  agreement=${s.agreement}`);
+        console.log(`     keys:  ${s.keys.join(', ')}`);
+        console.log(`     reads: ${s.reads.join(', ')}`);
+      }
+    } else {
+      console.log('agreement evidence: NONE — the gate cannot be opened on this data (§2.3)');
+    }
+    console.log('other depth-cap pairs stay unresolved because:');
+    for (const [k, v] of Object.entries(m4.stopReasons).sort((a, b) => b[1] - a[1])) console.log(`  ${String(v).padStart(3)}  ${k}`);
+  }
 }
 process.exit(0);
 

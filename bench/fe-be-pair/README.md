@@ -25,6 +25,7 @@ against known numbers on every run (including CI, where the other fixtures are a
 | `CouponController@deep` | `level: unresolved`, `reason: depth-cap` | service delegates again — beyond controller → service |
 | `OrderController@index` | `level: local`, keys `ok, method` | literal array in the controller (the 6% case) |
 | `ReportController@nope` | `level: unresolved`, `reason: method-not-found` | the method does not exist |
+| `CouponController@fromRepo` | depth 2 → `unresolved/depth-cap`; `maxDepth: 3` → `level: repo`, keys `rows, count` | third hop into `OrderRepository::rows` (M4 mechanics work) — and `shapeIsComparable` **refuses** `repo` until §2.3 agreement evidence exists |
 | reads for `/api/coupons` | `list` (real) + `nope` (never returned) | two hops: `api/index.js` → `pages/coupons.js` |
 | reads for `/api/deep` | `unresolved` / `no-callsite-reads` | nobody calls it — an empty result must not become a pass |
 
