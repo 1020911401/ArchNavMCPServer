@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveHandlerShape, methodBody, collectFrontendReads } from '../scripts/response-shape.mjs';
+import { resolveHandlerShape, methodBody, collectFrontendReads, shapeIsComparable } from '../scripts/response-shape.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const FIXTURE = path.join(ROOT, 'bench', 'fe-be-pair', 'backend');
@@ -227,4 +227,18 @@ test('an unexpandable return makes the shape partial; a `data` payload stays ide
   const wrapped = resolveHandlerShape({ root: dir, controller: 'MixedController', action: 'wrapped' });
   assert.equal(wrapped.partial, undefined, 'every branch was modelled');
   assert.deepEqual([...wrapped.keys].sort(), ['data', 'type'], 'the rule detects the wrapper by this key');
+});
+
+test('shapeIsComparable is the single gate — rule and coverage cannot drift', () => {
+  // the guards were written inline in three places and drifted twice while this was
+  // verified; everything must go through this predicate
+  assert.equal(shapeIsComparable({ level: 'local', keys: ['a'] }), true, 'read shape, no wrapper');
+  assert.equal(shapeIsComparable({ level: 'service', keys: ['list', 'count'] }), true, 'service shape');
+  assert.equal(shapeIsComparable({ level: 'unresolved', keys: [] }), false, 'never read a shape');
+  assert.equal(shapeIsComparable({ level: 'local', keys: ['a'], partial: true }), false,
+    'an unmodelled return branch makes the union a lower bound');
+  assert.equal(shapeIsComparable({ level: 'local', keys: ['type', 'data'] }), false,
+    'wrapper payload: res.data.x may read the nested object');
+  assert.equal(shapeIsComparable({ level: 'local' }), false, 'no keys array is not comparable');
+  assert.equal(shapeIsComparable(null), false, 'null-safe');
 });

@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { extractFrontCalls, pathMatches } from './review-rules.mjs';
 import { extractLaravelRoutes } from '../src/parsers/laravelRoutes.js';
-import { resolveHandlerShape } from './response-shape.mjs';
+import { resolveHandlerShape, shapeIsComparable } from './response-shape.mjs';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const JSON_OUT = process.argv.includes('--json');
@@ -43,12 +43,18 @@ const pairs = uniq
 
 const counts = { local: 0, service: 0, unresolved: 0 };
 const reasons = {};
+const refused = { partial: 0, wrapper: 0 };
+let comparable = 0;
 const detail = [];
 for (const p of pairs) {
   const r = resolveHandlerShape({ root: BACK, controller: p.be.controller, action: p.be.action });
   counts[r.level] += 1;
   if (r.level === 'unresolved') reasons[r.reason] = (reasons[r.reason] || 0) + 1;
-  detail.push({ pair: `${p.fe.method} ${p.fe.path}`, handler: `${p.be.controller}@${p.be.action}`, level: r.level, keys: r.keys, via: r.via, reason: r.reason });
+  // the SAME predicate the rule uses — a coverage number the rule cannot act on is noise
+  if (shapeIsComparable(r)) comparable += 1;
+  else if (r.partial) refused.partial += 1;
+  else if (r.keys && r.keys.includes('data')) refused.wrapper += 1;
+  detail.push({ pair: `${p.fe.method} ${p.fe.path}`, handler: `${p.be.controller}@${p.be.action}`, level: r.level, comparable: shapeIsComparable(r), partial: !!r.partial, keys: r.keys, via: r.via, reason: r.reason });
 }
 
 const total = pairs.length;
@@ -63,6 +69,11 @@ const report = {
   service: counts.service,
   unresolved: counts.unresolved,
   resolvedPct: total ? Math.round((resolved * 100) / total) : 0,
+  // what `fe-be-shape-field-missing` can actually check backend-side (the frontend has
+  // to resolve too, so the rule's number is this one minus frontend-unresolved pairs)
+  comparable,
+  comparablePct: total ? Math.round((comparable * 100) / total) : 0,
+  refused,
   reasons,
 };
 
@@ -75,7 +86,9 @@ if (JSON_OUT) {
   console.log(`local      ${counts.local}  (${((counts.local * 100) / total).toFixed(0)}%)`);
   console.log(`service    ${counts.service}  (${((counts.service * 100) / total).toFixed(0)}%)`);
   console.log(`unresolved ${counts.unresolved}  (${((counts.unresolved * 100) / total).toFixed(0)}%)`);
-  console.log(`resolved   ${resolved}/${total} = ${report.resolvedPct}%`);
+  console.log(`resolved   ${resolved}/${total} = ${report.resolvedPct}%   <- resolver coverage (docs §2.1)`);
+  console.log(`comparable ${comparable}/${total} = ${report.comparablePct}%   <- the rule's own bar (shapeIsComparable)`);
+  console.log(`refused by guard: partial=${refused.partial}  wrapper-data=${refused.wrapper}`);
   console.log('\nunresolved reasons:');
   for (const [k, v] of Object.entries(reasons).sort((a, b) => b[1] - a[1])) console.log(`  ${String(v).padStart(3)}  ${k}`);
 }

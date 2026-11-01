@@ -377,3 +377,25 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   if (delegate(second.body)) return stop('depth-cap');
   return stop('service-has-no-literal-shape');
 }
+
+/**
+ * The ONE comparability predicate — every consumer (review-rules' shape check,
+ * `shape-coverage`, any future caller) must use it, because the guards were written
+ * inline in three places and the copies drifted twice while this was being verified
+ * (a measurement mirror without the guards reported 3 findings the rule would refuse).
+ *
+ * A backend shape is comparable only when we actually read it:
+ *   - `unresolved`    we never saw a shape (controller/service/depth-cap failures)
+ *   - `partial`       some return branch could not be expanded — the key union is a
+ *                     lower bound, not the response shape
+ *   - `data` key      classic wrapper payload; `res.data.x` may read the nested object
+ *                     we never opened
+ * Anything else is not compared: the checklist says 未核对, no field is declared missing.
+ */
+export function shapeIsComparable(shape) {
+  return Boolean(shape)
+    && shape.level !== 'unresolved'
+    && !shape.partial
+    && Array.isArray(shape.keys)
+    && !shape.keys.includes('data');
+}

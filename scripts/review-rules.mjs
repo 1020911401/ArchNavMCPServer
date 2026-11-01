@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
 import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES, vforMissingKeys } from './rules/index.mjs';
-import { resolveHandlerShape, collectFrontendReads } from './response-shape.mjs';
+import { resolveHandlerShape, collectFrontendReads, shapeIsComparable } from './response-shape.mjs';
 // The stub detector and the v-for/:key finder moved into their rule modules; re-exported
 // here because the tests (and one older caller) import them from this entry point.
 import { stubMarkerInComments } from './rules/stub.mjs';
@@ -1577,10 +1577,11 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
           // Two backend shapes we refuse to compare: an *incomplete* one (some return
           // branch we could not expand, so the key union is only a lower bound) and a
           // payload containing `data` (classic wrapper — `res.data.id` may read the nested
-          // object we never opened). Both count as unresolved: the row says 未核对 and no
-          // "missing field" is invented from a shape we did not actually read.
-          const backendUsable = shape.level !== 'unresolved' && !shape.partial && !shape.keys.includes('data');
-          if (!backendUsable || reads.level === 'unresolved') {
+          // object we never opened). The predicate lives in response-shape.mjs so the
+          // rule, `shape-coverage` and any measurement mirror cannot drift apart.
+          // Both refusals count as unresolved: the row says 未核对 and no "missing field"
+          // is invented from a shape we did not actually read.
+          if (!shapeIsComparable(shape) || reads.level === 'unresolved') {
             if (shapeStats) shapeStats.unresolved += 1;
             continue;
           }
