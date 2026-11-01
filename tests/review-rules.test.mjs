@@ -197,14 +197,19 @@ test('checklist marks every registry rule as 通过 / 命中 / 不适用(带原�
   assert.equal(boundary.status, 'na');
   assert.match(boundary.reason, /--backend/);
   assert.equal(summary.hit, 2);
-  assert.equal(summary.na, 5, 'the five boundary rules are 不适用 without a backend index');
+  // derived, not hardcoded: the boundary family grows with the surface (6 rules now),
+  // and every member must be 不适用 without a backend index
+  const boundaryCount = RULE_REGISTRY.filter((r) => r.family === 'boundary').length;
+  assert.equal(summary.na, boundaryCount, `all ${boundaryCount} boundary rules are 不适用 without a backend index`);
+  assert.equal(rows.find((r) => r.id === 'fe-be-shape-field-missing').status, 'na',
+    'the shape rule joins the family: no backend, nothing to shape-check');
 
   const out = renderChecklist(buildChecklist({ findings, meta: metaFull }));
   assert.match(out, /审核任务书/);
   assert.match(out, /✅ 通过/);
   assert.match(out, /⚠️\s+命中\(2\)/);
   assert.match(out, /➖ 不适用/);
-  assert.match(out, /未检查（5 条，附原因）/);
+  assert.match(out, /未检查（\d+ 条，附原因）/);   // count moves with the registry, format is what is pinned
 });
 
 test('checklist explains language and repo-shape skips instead of silently passing', () => {

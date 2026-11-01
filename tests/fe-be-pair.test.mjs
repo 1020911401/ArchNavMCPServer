@@ -28,6 +28,7 @@ const EXPECT = {
   'fe-be-route-unused': 3,        // health, legacy, and GET wrong-method
   'fe-be-pairing-suspect': 0,     // 6/9 unique paths = 67%, floor is 20%
   'fe-dynamic-request-path': 1,   // '/api/orders?status=' + status
+  'fe-be-shape-field-missing': 1, // pages/coupons.js reads res.data.nope (M3)
 };
 
 function hermeticCopy() {
@@ -74,6 +75,14 @@ test('the tracked pair produces the fe-be findings its README promises', (t) => 
   assert.equal(statusOf('fe-be-path-not-found'), 'hit', 'the two ghosts must be reported');
   assert.equal(statusOf('fe-be-method-mismatch'), 'hit', 'the wrong verb must be reported');
   assert.equal(statusOf('fe-be-route-unused'), 'hit', 'the uncalled routes must be reported');
+
+  // M3: the planted missing field is found, with both shapes as evidence
+  const shapeFinding = (result.findings || []).find((f) => f.rule === 'fe-be-shape-field-missing');
+  assert.ok(shapeFinding, 'res.data.nope must be reported');
+  assert.match(shapeFinding.evidence, /returns: list,image,show/, 'the backend shape is the evidence');
+  assert.match(shapeFinding.evidence, /reads: list,nope/, 'the frontend reads are the evidence');
+  assert.equal(shapeFinding.line, 7, 'points at the exact read');
+  assert.equal(statusOf('fe-be-shape-field-missing'), 'hit');
 });
 
 test('the same pair keeps 未核对 rows honest when the backend is swapped for an unrelated repo', (t) => {
@@ -98,4 +107,10 @@ test('the same pair keeps 未核对 rows honest when the backend is swapped for 
     assert.match(row.reason, /0 条路由/, `${id} says why: ${row.reason}`);
     assert.match(row.reason, /未核对/, `${id} explains itself`);
   }
+
+  // the shape check never ran either (0 comparable pairs) — it must say so, not pass
+  const shape = checklist.find((r) => r.id === 'fe-be-shape-field-missing');
+  assert.ok(shape, 'the shape row exists even when it cannot run');
+  assert.equal(shape.status, 'na', 'shape row is 未核对 when nothing was compared');
+  assert.match(shape.reason, /未核对/, `shape row explains itself: ${shape.reason}`);
 });

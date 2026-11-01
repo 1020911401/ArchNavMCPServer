@@ -246,6 +246,66 @@ function read(file) {
 }
 
 /**
+ * M2 (charter §3.3) — the frontend side: which response fields does the client read
+ * for `<method> <path>`?
+ *
+ * Two hops: (1) the call site in the api layer gives us a *binding* (`orders: () =>
+ * request.get(...)`, `export const orders = …`), (2) callers of that binding are where
+ * `res.data.<field>` is read — the api file itself usually only forwards.
+ * Returns `{level: 'resolved', reads:[{field,file,line}], via}` or
+ * `{level:'unresolved', reason}` — never guesses: no caller, no reads, no answer.
+ */
+export function collectFrontendReads({ root, method, path: endpoint }) {
+  const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return null; } };
+  const verbRe = new RegExp(`\\brequest\\s*\\.\\s*${String(method).toLowerCase()}\\s*\\(\\s*['"]${escapeRe(endpoint)}['"]`);
+  const files = walk(root, [], 8).filter((f) => /\.(vue|js|ts|mjs|cjs)$/i.test(f));
+  const hosts = [];
+  for (const f of files) {
+    const src = read(f);
+    if (!src || !verbRe.test(src)) continue;
+    // (1) binding: the nearest `name: () =>` / `function name` / `export const name` above the call.
+    // Captured with a group — re-matching `\\w*` over the whole match returned `export`
+    // for `export const coupons = () =>` and no caller was ever found.
+    const at = verbRe.exec(src);
+    const head = src.slice(0, at.index);
+    const fromDecl = [...head.matchAll(/(?:export\s+)?(?:const|let|var|function)\s+([A-Za-z_]\w*)\s*(?:=|\()/g)];
+    const fromProp = [...head.matchAll(/([A-Za-z_]\w*)\s*:\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_]\w*)\s*=>/g)];
+    const name = fromDecl.length ? fromDecl[fromDecl.length - 1][1] : (fromProp.length ? fromProp[fromProp.length - 1][1] : null);
+    hosts.push({ file: f, name, src });
+  }
+  if (!hosts.length) return { level: 'unresolved', reason: 'endpoint-not-found', reads: [], via: [] };
+
+  const via = hosts.map((h) => norm(path.relative(root, h.file)));
+  const reads = [];
+  const seen = new Set();
+  const callRe = (name) => new RegExp(`\\b${escapeRe(name)}\\s*\\(`, 'g');   // `g` or exec() loops forever
+  for (const h of hosts) {
+    if (!h.name) continue;
+    for (const f of files) {
+      const src = read(f);
+      if (!src) continue;
+      let m;
+      const re = callRe(h.name);
+      while ((m = re.exec(src))) {
+        const window = src.slice(m.index, m.index + 600);   // the call + its handler chain
+        for (const r of window.matchAll(/(?:res|response|result|\br\b|x|d)\.data\.([A-Za-z_]\w*)/g)) {
+          const key = `${r[1]}@${f}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          reads.push({
+            field: r[1],
+            file: norm(path.relative(root, f)),
+            line: src.slice(0, m.index + r.index).split('\n').length,
+          });
+        }
+      }
+    }
+  }
+  if (!reads.length) return { level: 'unresolved', reason: 'no-callsite-reads', reads: [], via };
+  return { level: 'resolved', reads, via: [...new Set([...via, ...reads.map((r) => r.file)])] };
+}
+
+/**
  * How much of the response shape is recoverable for `<controller>@<action>`?
  *
  * @param {{root: string, controller: string, action: string, index?: object, maxDepth?: number}} args

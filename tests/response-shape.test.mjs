@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveHandlerShape, methodBody } from '../scripts/response-shape.mjs';
+import { resolveHandlerShape, methodBody, collectFrontendReads } from '../scripts/response-shape.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const FIXTURE = path.join(ROOT, 'bench', 'fe-be-pair', 'backend');
@@ -99,8 +99,7 @@ test('methodBody is brace- and string-safe (a `}` inside a string cannot end a m
   assert.doesNotMatch(body.body, /never.*reached/, 'the next method is outside the body');
 });
 
-test('two classes with the same name: the one that declares the action wins', (t) => {
-  // measured on the real repo: 5 handlers of `System/.../ThemeController` resolved to
+test('two classes with the same name: the one that declares the action wins', (t) => {  // measured on the real repo: 5 handlers of `System/.../ThemeController` resolved to
   // `Admin/.../Diy/ThemeController` (same basename, different module) and reported
   // method-not-found — ambiguity must be settled by evidence, not by first hit
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'response-shape-ambig-'));
@@ -136,4 +135,41 @@ test('two classes with the same name: the one that declares the action wins', (t
   const none = resolveHandlerShape({ root: dir, controller: 'ThemeController', action: 'missing' });
   assert.equal(none.reason, 'method-not-found', 'neither candidate declares it');
   assert.ok(none.via.filter((v) => /no missing\(\)/.test(v)).length === 2, 'both were tried');
+});
+
+// ── M2: which response fields does the client read? ──────────────────────────────
+
+const FRONT = path.join(ROOT, 'bench', 'fe-be-pair', 'frontend');
+
+test('M2: an endpoint with a caller resolves the fields it reads', () => {
+  const r = collectFrontendReads({ root: FRONT, method: 'GET', path: '/api/coupons' });
+  assert.equal(r.level, 'resolved', JSON.stringify(r));
+  const fields = r.reads.map((x) => x.field).sort();
+  assert.deepEqual(fields, ['list', 'nope'], 'the planted pair: one real field, one impossible');
+  const nope = r.reads.find((x) => x.field === 'nope');
+  assert.match(nope.file, /pages\/coupons\.js$/, 'reads live in the caller, not the api layer');
+  assert.equal(nope.line, 7, 'exact line of the read');
+  assert.ok(r.via.includes('api/index.js') && r.via.some((v) => /pages\/coupons\.js/.test(v)),
+    `via shows both hops: ${r.via.join(', ')}`);
+});
+
+test('M2: an endpoint nobody calls is unresolved, not an empty pass', () => {
+  const r = collectFrontendReads({ root: FRONT, method: 'GET', path: '/api/deep' });
+  assert.equal(r.level, 'unresolved', JSON.stringify(r));
+  assert.equal(r.reason, 'no-callsite-reads');
+  assert.deepEqual(r.reads, [], 'no reads means no answer');
+});
+
+test('M2: an endpoint the frontend never declares is unresolved', () => {
+  const r = collectFrontendReads({ root: FRONT, method: 'GET', path: '/api/never-called' });
+  assert.equal(r.level, 'unresolved');
+  assert.equal(r.reason, 'endpoint-not-found');
+});
+
+test('M3 pairing rule: shape + reads decide a missing field', () => {
+  const reads = collectFrontendReads({ root: FRONT, method: 'GET', path: '/api/coupons' });
+  const shape = resolveHandlerShape({ root: path.join(ROOT, 'bench', 'fe-be-pair', 'backend'), controller: 'CouponController', action: 'lst' });
+  assert.equal(shape.level, 'service');
+  const missing = reads.reads.map((x) => x.field).filter((f) => !shape.keys.includes(f));
+  assert.deepEqual(missing, ['nope'], 'the field the backend never returns');
 });

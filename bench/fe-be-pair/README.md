@@ -15,8 +15,9 @@ against known numbers on every run (including CI, where the other fixtures are a
 | `fe-be-route-unused` | 3 | `health`, `legacy`, and `GET wrong-method` (never correctly called) |
 | `fe-be-pairing-suspect` | 0 | 6 of 9 unique paths match = 67% (floor is 20%) |
 | `fe-dynamic-request-path` | 1 | `'/api/orders?status=' + status` |
+| `fe-be-shape-field-missing` | 1 | `pages/coupons.js:7` reads `res.data.nope`, which `CouponService::issueList` never returns |
 
-### shape (M1 — `scripts/response-shape.mjs`, asserted by `tests/response-shape.test.mjs`)
+### shape (M1–M3 — `scripts/response-shape.mjs`, asserted by `tests/response-shape.test.mjs`)
 
 | target | expected | why |
 | --- | --- | --- |
@@ -24,10 +25,13 @@ against known numbers on every run (including CI, where the other fixtures are a
 | `CouponController@deep` | `level: unresolved`, `reason: depth-cap` | service delegates again — beyond controller → service |
 | `OrderController@index` | `level: local`, keys `ok, method` | literal array in the controller (the 6% case) |
 | `ReportController@nope` | `level: unresolved`, `reason: method-not-found` | the method does not exist |
+| reads for `/api/coupons` | `list` (real) + `nope` (never returned) | two hops: `api/index.js` → `pages/coupons.js` |
+| reads for `/api/deep` | `unresolved` / `no-callsite-reads` | nobody calls it — an empty result must not become a pass |
 
-Fe-be counts above are unchanged by this: unique static paths 9 → 11, matched 6 → 8
+Fe-be counts are unaffected by the shape work: 11 unique static paths, 8 matched
 (73% pairing), still 2 ghosts / 1 wrong verb / 3 unused routes / 1 dynamic call.
 
-Run: `node --test tests/response-shape.test.mjs` `'/api/orders?status=' + status` |
-
-Run: `node --test tests/fe-be-pair.test.mjs`
+```bash
+node --test tests/fe-be-pair.test.mjs tests/response-shape.test.mjs
+node scripts/shape-coverage.mjs <frontendDir> <backendDir>   # coverage on any pair
+```

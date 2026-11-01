@@ -25,6 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
 import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES, vforMissingKeys } from './rules/index.mjs';
+import { resolveHandlerShape, collectFrontendReads } from './response-shape.mjs';
 // The stub detector and the v-for/:key finder moved into their rule modules; re-exported
 // here because the tests (and one older caller) import them from this entry point.
 import { stubMarkerInComments } from './rules/stub.mjs';
@@ -1107,12 +1108,16 @@ export function taintFindings(file, src) {
   return out;
 }
 
-export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null, tier = 'all' }) {
+export function reviewFindings({ changes, index, readFile, backendIndex = null, boundary = null, tier = 'all', frontDir = null, backDir = null, shapeStats = null }) {
   const findings = [];
   const read = readFile || ((rel) => {
     try { return fs.readFileSync(rel, 'utf8'); } catch { return null; }
   });
   const add = (f) => findings.push(f);
+  // M3 (docs/shape-check.md §3.4): response-shape checking only runs where the pairing
+  // is trustworthy and both sides resolve; anything else counts as `unresolved` so the
+  // checklist row can say 未核对 instead of passing by silence.
+  if (shapeStats && typeof shapeStats === 'object') { shapeStats.checked = shapeStats.checked || 0; shapeStats.unresolved = shapeStats.unresolved || 0; }
 
   const changedFiles = (changes.changed_files || []).map((r) => norm(r.file));
   // corpus = every indexed file, not a diff: rules that describe *this change* have no
@@ -1556,6 +1561,41 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
           evidence: `sample: ${cmp.dynamic.slice(0, 3).map((c) => `${c.method} ${c.path}+…`).join('; ')}`,
         });
       }
+
+      // M3 — response-shape check (docs/shape-check.md §3.4). Path+method can both be
+      // right while the field the client reads is never returned; that only shows up by
+      // comparing the two shapes. Runs only when the pair is real: a suspect pairing
+      // would report ghost fields from the wrong backend. Anything that does not resolve
+      // on either side is counted into shapeStats so the checklist row says 未核对
+      // instead of passing by having nothing to say.
+      if (!cmp.pairSuspect && frontDir && backDir) {
+        const seenMissing = new Set();
+        for (const { call, route } of cmp.matched) {
+          if (!route.controller || !route.action) { if (shapeStats) shapeStats.unresolved += 1; continue; }
+          const shape = resolveHandlerShape({ root: backDir, controller: route.controller, action: route.action });
+          const reads = collectFrontendReads({ root: frontDir, method: call.method, path: call.path });
+          if (shape.level === 'unresolved' || reads.level === 'unresolved') {
+            if (shapeStats) shapeStats.unresolved += 1;
+            continue;
+          }
+          if (shapeStats) shapeStats.checked += 1;
+          const returned = new Set(shape.keys);
+          const readFields = [...new Set(reads.reads.map((r) => r.field))];
+          for (const r of reads.reads) {
+            if (returned.has(r.field)) continue;
+            const key = `${call.method} ${call.path}:${r.field}`;
+            if (seenMissing.has(key)) continue;
+            seenMissing.add(key);
+            add({
+              rule: 'fe-be-shape-field-missing', severity: 'warn',
+              file: r.file, line: r.line,
+              message: `前端读 res.data.${r.field}，但后端 ${route.controller}@${route.action} 从不返回这个字段。`,
+              why: '路径对、方法对，字段却不存在：运行时拿到 undefined，往下取值才炸——静态看接口签名永远发现不了，这正是响应形状核对存在的理由。',
+              evidence: `reads: ${readFields.join(',')} | returns: ${shape.keys.join(',')} | shape: ${shape.via.join(' -> ')} | reads: ${reads.via.join(', ')}`,
+            });
+          }
+        }
+      }
     }
   }
 
@@ -1821,6 +1861,7 @@ export const RULE_REGISTRY = [
   { id: 'fe-be-path-not-found', group: '边界', family: 'boundary', needs: ['backend'], title: '前端在调、后端无此路由' },
   { id: 'fe-be-method-mismatch', group: '边界', family: 'boundary', needs: ['backend'], title: '路径对、HTTP 方法错' },
   { id: 'fe-be-route-unused', group: '边界', family: 'boundary', needs: ['backend'], title: '后端路由无前端调用' },
+  { id: 'fe-be-shape-field-missing', group: '边界', family: 'boundary', needs: ['backend', 'shape'], title: '前端读后端从不返回的响应字段' },
   { id: 'fe-dynamic-request-path', group: '边界', family: 'boundary', needs: ['backend'], title: '请求路径动态拼接（无法静态核对）' },
 ];
 
@@ -1867,6 +1908,14 @@ export function buildChecklist({ findings = [], meta = {} }) {
     else if ((r.needs || []).includes('composer') && !meta.hasComposer) { status = 'na'; reason = NOT_APPLICABLE.composer; }
     else if ((r.needs || []).includes('packageJson') && !meta.hasPackageJson) { status = 'na'; reason = NOT_APPLICABLE.packageJson; }
     else if ((r.needs || []).includes('tests') && !meta.hasTests) { status = 'na'; reason = NOT_APPLICABLE.tests; }
+    else if ((r.needs || []).includes('shape') && !meta.shapeChecked) {
+      // `=== 0` vs undefined: a caller that never measured shapes is unknown (old
+      // behaviour), a measured 0 is "the check could not run here" — 未核对.
+      status = 'na';
+      reason = meta.shapeChecked === 0
+        ? `未核对：${meta.shapeUnresolved ? `${meta.shapeUnresolved} 对接口两侧解析不到响应形状（或配对不可信）` : '响应形状核对未生效（配对不可信 / 两侧未解析）'}`
+        : NOT_APPLICABLE.tests;
+    }
     else if (pairingSuspect && pairingDependent.has(r.id)) {
       status = 'na';
       reason = `未核对：${pairingSuspect.message}`;
@@ -2228,12 +2277,16 @@ async function main() {
     console.error(`No backend index in ${backendDir} — run \`archnav analyze ${backendDir}\` first`);
     process.exit(2);
   }
+  const shapeStats = { checked: 0, unresolved: 0 };
   const findings = reviewFindings({
     changes,
     index,
     backendIndex,
     tier: opts.tier,
     boundary: { pairingFloor: Number.isFinite(opts.pairingFloor) ? opts.pairingFloor : 0.2 },
+    frontDir: dir,
+    backDir: backendDir,
+    shapeStats,
     readFile: (rel) => {
       try { return fs.readFileSync(path.join(dir, rel), 'utf8'); } catch { return null; }
     },
@@ -2257,6 +2310,10 @@ async function main() {
     // `=== 0` deliberately: callers that do not measure it (unit fixtures) are unknown,
     // not zero, and keep their old behaviour.
     backendRouteCount: backendIndex ? backendRoutes(backendIndex).length : 0,
+    // response-shape check (M3): how many matched pairs had both sides resolvable.
+    // 0 means the check never ran — the fe-be-shape row must say 未核对, not 通过.
+    shapeChecked: shapeStats.checked,
+    shapeUnresolved: shapeStats.unresolved,
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),
     hasPackageJson: fs.existsSync(path.join(dir, 'package.json')),
     hasTests: indexedTests,

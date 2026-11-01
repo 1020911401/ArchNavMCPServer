@@ -98,7 +98,8 @@ L1  委托：return app('json')->success($this->service->foo(…))
 2. 两边任一解析不到时，形状行必须是 `未核对`（单测覆盖，不许 `通过`）。
 3. 真实配对上复测覆盖率并把数字写进本文件 §2：**L0+L1 目标 ≥ 60%**（起点 6%）。
    **实测判定：44%（见 §2.1），未达目标** —— 差距不是实现 bug，是 21 条无字面形状 + 13 条按策略不追的
-   深度。见 §5 的 M1.1：要过 60% 必须先回答「collection 形状能不能可信地解析」，否则目标本身要下修。
+   深度。见 §5 的 M1.1：**目标已下修至 L0+L1 的现实上限 45–50%**（真值 fixture 91% 证明解析器不是瓶颈）；
+   要在真实仓上过 60% 需要 repository 层键语义核验，属 M4。
 4. `npm test` / `selftest` / `audit` 全绿；`--mode standard` 输出体积不明显膨胀
    （形状只在 `--backend` 存在时出现）。
 
@@ -107,16 +108,34 @@ L1  委托：return app('json')->success($this->service->foo(…))
 | 里程碑 | 内容 | 估时 | 可独立交付 |
 | --- | --- | --- | --- |
 | ~~M1~~ | `resolveHandlerShape` L0+L1 + fixture 扩展 + 测试 | **已完成 2026-10-30** | ✅ 交付物：`scripts/response-shape.mjs`、`scripts/shape-coverage.mjs`、9 项测试、§2.1 覆盖率 44% |
-| M1.1 | 把 44% 推过 60%：① collection/`toArray()` 的形状（21 条）② `depth-cap` 是否放行第 3 跳（13 条） | 0.5 天判断 + 视结论 | ✅ 每条独立可测（fixture 已有 depth-cap 真值） |
-| M2 | 前端两跳字段收集 + 测试 | 1 天 | ✅ |
-| M3 | 规则 `fe-be-shape-field-missing` + checklist 行 + 文档回填 | 0.5 天 | ✅ |
+| ~~M1.1~~ | 把 44% 推过 60% 的判断题 | **已完成 2026-11-01，判定：目标下修** | ✅ 见下 |
+| ~~M2~~ | 前端两跳字段收集 + 测试 | **已完成 2026-11-01** | ✅ `collectFrontendReads`：端点 → api 函数 → 调用方的 `res.data.*`；没有调用方 = `unresolved`（不是空 pass） |
+| ~~M3~~ | 规则 + checklist 行 + 文档回填 | **已完成 2026-11-01** | ✅ `fe-be-shape-field-missing`（第 63 条规则）；两侧任一解析不到 → 行 `未核对`；fixture 真值 1 条 |
+
+### M1.1 判定（2026-11-01，实测两条路线）
+
+| 路线 | 实测 | 结论 |
+| --- | --- | --- |
+| ① 解析 collection/`toArray()` 形状（`service-has-no-literal-shape` 21 条） | **0/20 有任何数组痕迹**（`$var['k']=` 0、`->map/collect` 0、`->toArray` 0、什么都没有 20） | **放弃**：方法体里没有可读的东西，谈不上「解析」 |
+| ② `depth-cap` 放行第 3 跳（全量 155 路由里 57 条） | **19/57 有字面键**（抽样：`LegacyAppVersionRepository`、`AdminLangService` 等） | **不默认放行**：第 3 跳多在 repository 层，键语义（行字段 vs 响应字段）未核验；只值约 +5 个配对对（44% → ~51%），**仍到不了 60%** |
+
+**目标因此下修**：`L0+L1 的现实上限 ≈ 45–50%`（真值 fixture 上 91% 说明解析器本身没有瓶颈，
+差的是真实代码的形状风格）。要在真实仓上过 60%，需要的是「repository 层键语义核验」，
+那是 M4 级别的工作，不在本立项范围。
+
+**M2 顺手修掉的两个实现 bug**：① binding 取名把 `export const coupons = () =>` 的首词
+`export` 当成了函数名，导致所有调用方搜索落空；② `callRe` 少了 `g` 标志——`while (exec())`
+一旦命中就会死循环。两者都有回归测试。
 
 M1 过程中修掉的实现 bug：controller **同名类歧义**——真实仓有两个 `ThemeController`
 （`Admin/…/Diy/` 与 `System/…/`），按短名取第一个导致 5 个 handler 报 `method-not-found`；
 现在按「谁真的声明了该动作」择优，并把被否候选记进 `via`（有回归测试）。
 这与 §4.1 的「解析不到就报 unresolved」是同一条纪律：**歧义必须暴露，不许静默选边**。
 
-M1 单独就能给出「真实仓里多少 handler 可解析」的答案——**先做 M1 再决定 M2/M3 的优先级**。
+**当前状态（2026-11-01）**：M1–M3 全部完成并入主干。规则 `fe-be-shape-field-missing`
+在真值 fixture 上产出 1 条（`pages/coupons.js:7` 读 `res.data.nope`），
+`fe-be-pair.test.mjs` 与 `response-shape.test.mjs` 共 15 项断言；全量 `npm test`
+396 run / 394 pass / 0 fail。覆盖率口径见 §2.1，目标已按 M1.1 判定下修。
 
 ## 6. 风险
 

@@ -101,7 +101,7 @@ node src/index.js analyze . --ignore "bench/**,**/vendor/**"          # 建索�
 
 ## 7. 凭什么信它
 
-- 单测：**381 run / 379 pass / 0 fail / 2 skipped**（2026-10-30 实测；跳过的 2 个需要 bench fixture，fixture 不进 git）；注册规则 **62 条**（`RULE_REGISTRY.length`：`brief` 跑 55、`standard` 跑 62，`harness.rules.enabled` 可当场核对；`ext` 的 7 条要显式开）。复现：`npm test`、`node scripts/audit-skill.mjs`。
+- 单测：**396 run / 394 pass / 0 fail / 2 skipped**（2026-11-01 实测；跳过的 2 个需要 bench fixture，fixture 不进 git）；注册规则 **63 条**（`RULE_REGISTRY.length`：`brief` 跑 56、`standard` 跑 63，`harness.rules.enabled` 可当场核对；`ext` 的 7 条要显式开）。复现：`npm test`、`node scripts/audit-skill.mjs`。
 - **外部工具接入**：`--audit`（OSV 依赖漏洞）与 `--semgrep`（跨函数污点）都不在默认模式里，要显式加旗标；两者不依赖本地安装（OSV 是 HTTP；semgrep 不在就明说）。
 - 自测：`scripts/selftest.mjs` 造一个含全部栈的临时仓、注入真实缺陷、逐项验证并打印 ✅/❌ 与证据（含“brief 输出不含深查分组”这条边界断言）。
 - CI：PR 与 push 两类事件都跑（push 用 `--base HEAD~1`），PR 评论贴任务书、SARIF 进 code scanning。

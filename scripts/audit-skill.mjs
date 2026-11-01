@@ -166,8 +166,10 @@ for (const rel of ['README.md', 'docs/review-rules.md', ...mdFiles.map((f) => `s
   if (!fs.existsSync(full)) continue;
   for (const [i, line] of fs.readFileSync(full, 'utf8').split('\n').entries()) {
     if (!/rule/i.test(line) && !/规则/.test(line)) continue;
-    for (const m of line.matchAll(/(\d{2,3})\s+rules\b|(\d{2,3})\s*条规则/g)) {
-      const claimed = Number(m[1] || m[2]);
+    // two claim shapes: `62 rules` / `62 条规则` and `62 条（RULE_REGISTRY…` — but not
+    // the sample task-sheet output (`规则 54 条`), which is a rendered example, not a claim
+    for (const m of line.matchAll(/(\d{2,3})\s+rules\b|(\d{2,3})\s*条规则|(\d{2,3})\s*条\s*\*{0,2}（/g)) {
+      const claimed = Number(m[1] || m[2] || m[3]);
       if (claimed !== ruleTableCount) {
         // keyed per line: one claim per file was hiding the other two in README
         once(`rules:${rel}:${i + 1}`, 'error', `${rel}:${i + 1}`, 'doc claims a rule count that no longer matches the table', `says ${claimed}, table has ${ruleTableCount}`);
