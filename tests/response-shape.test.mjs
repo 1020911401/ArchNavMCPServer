@@ -293,8 +293,57 @@ test('the injected service wins over a stranger with the same method name', (t) 
   assert.match(r.via.join(' -> '), /ctor hint: ZedTargetService/, `the hint is the evidence: ${r.via.join(' -> ')}`);
 });
 
-test('M5 second stage: declaration search answers "does this key exist at all"', (t) => {
-  // the gate refuses ~60% of pairs; silence there hid a true defect (`bindName`: 0
+test('the window stops at this call: a neighbouring call\'s reads are not attributed', (t) => {
+  // measured 2026-11-02: `res.data.downloadBase64` belongs to `getInvoiceLink()`, but a
+  // fixed 600-char window reached it from `getOrderList()` — the rule reported a field
+  // missing from `order/list` that the order-list handler never had anything to do with
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'win-bound-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  fs.writeFileSync(path.join(dir, 'api.js'), [
+    "export const alpha = () => request.get('/alpha');",
+    "export const beta = () => request.get('/beta');",
+    '',
+  ].join('\n'));
+  fs.writeFileSync(path.join(dir, 'caller.js'), [
+    "import { alpha, beta } from './api.js';",
+    'export function run() {',
+    '  alpha().then((res) => res.data.keep);',
+    '  beta().then((res) => res.data.other);',
+    '}',
+    '',
+  ].join('\n'));
+
+  const a = collectFrontendReads({ root: dir, method: 'GET', path: '/alpha' });
+  assert.equal(a.level, 'resolved', JSON.stringify(a));
+  assert.deepEqual(a.reads.map((x) => x.field), ['keep'], 'only its own chain');
+  const b = collectFrontendReads({ root: dir, method: 'GET', path: '/beta' });
+  assert.deepEqual(b.reads.map((x) => x.field), ['other'], 'and the neighbour keeps its own');
+});
+
+test('compact() names are response keys — neither reader may miss them', (t) => {
+  // measured 2026-11-02: `DivisionService` returns `compact('list','count','codeUrl')`,
+  // so `codeUrl` looked undeclared and got reported as missing
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'compact-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  fs.mkdirSync(path.join(dir, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'app', 'C.php'), [
+    '<?php',
+    'class C {',
+    '  public function show() {',
+    "    return compact('list', 'count', 'codeUrl');",
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+
+  const shape = resolveHandlerShape({ root: dir, controller: 'C', action: 'show' });
+  assert.deepEqual([...shape.keys].sort(), ['codeUrl', 'count', 'list'], 'keys come from compact()');
+  assert.equal(shapeIsComparable(shape), true, 'and the pair is comparable, not "unreadable"');
+  assert.ok(searchResponseKey({ root: dir, field: 'codeUrl' }).declared > 0,
+    'the declaration index sees compact() too');
+});
+
+test('M5 second stage: declaration search answers "does this key exist at all"', (t) => {  // the gate refuses ~60% of pairs; silence there hid a true defect (`bindName`: 0
   // declarations in 909 PHP files). The fallback asks the declaration question instead.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decl-search-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));

@@ -185,6 +185,12 @@ function localShape(body) {
     const bracket = keysInBracket(st.text);
     if (bracket.length) { for (const k of bracket) keys.add(k); continue; }
 
+    // `compact('list','count','codeUrl')` — keys come from variable NAMES, so every
+    // literal-key reader misses them (measured 2026-11-02: `codeUrl` was reported as
+    // missing while `DivisionService` returns exactly that via compact()).
+    const compacted = compactKeys(st.text);
+    if (compacted.length) { for (const k of compacted) keys.add(k); continue; }
+
     const returned = st.text.match(/\$([A-Za-z_]\w*)/);
     if (returned) {
       const varName = returned[1];
@@ -200,9 +206,64 @@ function localShape(body) {
   return { keys: [...keys], ...(partial ? { partial: true } : {}) };
 }
 
+/**
+ * `compact('a','b')` / `compact(['a','b'])` — PHP builds the response keys from the
+ * variable NAMES, so neither a bracket reader nor a `$v['k']` reader sees them.
+ * Measured 2026-11-02: `DivisionService` returns `compact('list','count','codeUrl')`.
+ */
+function compactKeys(text) {
+  const out = [];
+  for (const m of String(text).matchAll(/\bcompact\s*\(([^)]*)\)/g)) {
+    for (const q of m[1].matchAll(/['"]([A-Za-z_]\w*)['"]/g)) out.push(q[1]);
+  }
+  return out;
+}
+
+/**
+ * The call expression starting at `start`, plus its own `.then/.catch/.finally` chain —
+ * string- and paren-aware. Replaces the fixed 600-char window, which crossed into the
+ * NEXT call and attributed that call's reads to this endpoint (measured 2026-11-02:
+ * `res.data.downloadBase64` belongs to `getInvoiceLink()`, but landed inside
+ * `getOrderList()`'s window).
+ *
+ * Trade-off, deliberately taken: `const res = await api(); …res.data.x` has no chain, so
+ * its reads are not collected — the pair stays unresolved and the declaration-search
+ * stage answers instead. A narrow window with an honest fallback beats a wide window
+ * that invents findings.
+ */
+function callWindow(src, start) {
+  const closeOf = (openIdx) => {
+    let depth = 0;
+    for (let i = openIdx; i < src.length; i += 1) {
+      const ch = src[i];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        i += 1;
+        while (i < src.length && src[i] !== ch) { if (src[i] === '\\') i += 1; i += 1; }
+        continue;
+      }
+      if (ch === '(') depth += 1;
+      else if (ch === ')') { depth -= 1; if (depth === 0) return i; }
+    }
+    return -1;
+  };
+  const open = src.indexOf('(', start);
+  if (open < 0) return src.slice(start, start + 600);
+  let end = closeOf(open);
+  if (end < 0) return src.slice(start, start + 600);
+  for (;;) {
+    const rest = src.slice(end + 1);
+    const m = /^\s*\.\s*(?:then|catch|finally)\s*\(/.exec(rest);
+    if (!m) break;
+    const open2 = end + m[0].length;
+    const end2 = closeOf(open2);
+    if (end2 < 0) break;
+    end = end2;
+  }
+  return src.slice(start, end + 1);
+}
+
 /** A shape the method delegates: `$this->service->foo(...)` or `FooService::foo(...)`. */
-function delegate(body) {
-  const svc = body.match(/\$this->(\w+)->(\w+)\s*\(/);
+function delegate(body) {  const svc = body.match(/\$this->(\w+)->(\w+)\s*\(/);
   if (svc) return { receiver: svc[1], method: svc[2] };
   const stat = body.match(/\b([A-Z][A-Za-z0-9_]*(?:Service|Repository))::(\w+)\s*\(/);
   if (stat) return { receiver: stat[1], method: stat[2] };
@@ -316,7 +377,7 @@ export function collectFrontendReads({ root, method, path: endpoint }) {
       let m;
       const re = callRe(h.name);
       while ((m = re.exec(src))) {
-        const window = src.slice(m.index, m.index + 600);   // the call + its handler chain
+        const window = callWindow(src, m.index);   // this call + its own .then/.catch chain
         for (const r of window.matchAll(/(?:res|response|result|\br\b|x|d)\.data\.([A-Za-z_]\w*)/g)) {
           // The window can CUT an identifier at its edge: a read at abs 2272 inside a
           // window ending at 2289 turned `res.data.customer_url` into a phantom field
@@ -515,6 +576,10 @@ export function backendDeclarationIndex(root) {
       // `'k' => …` / `"k" => …` (array literals) and `$v['k'] = …` (assignments)
       for (const m of line.matchAll(/['"]([A-Za-z_]\w*)['"]\s*=>/g)) add(m[1], rel, i + 1);
       for (const m of line.matchAll(/\$\w+\s*\[\s*['"]([A-Za-z_]\w*)['"]\s*\]/g)) add(m[1], rel, i + 1);
+      // `compact('a','b')` declares keys too — without this, a handler returning
+      // `compact('list','count','codeUrl')` looked like it declared nothing, and the
+      // second stage reported `codeUrl` as missing (measured 2026-11-02).
+      for (const k of compactKeys(line)) add(k, rel, i + 1);
     });
   }
 

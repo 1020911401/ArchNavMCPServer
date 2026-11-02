@@ -130,16 +130,31 @@ resolver 已支持 `maxDepth: 3`（默认仍 2，只在被显式要求时多走�
 
 | 状态 | 数量 |
 | --- | --- |
-| 门禁能比较 | 30 |
-| 门禁拒绝、前端可读（声明搜索生效） | 22 |
-| └ **0 声明 → 确认缺陷** | **7** |
-| └ 别处有声明 → 配对存疑（不报） | 60 |
-| 门禁拒绝、前端读不到 | 41 |
+| 门禁能比较 | 32 |
+| 门禁拒绝、前端可读（声明搜索生效） | 17 |
+| └ **0 声明 → 确认缺陷** | **6** |
+| └ 别处有声明 → 配对存疑（不报） | 55 |
+| 门禁拒绝、前端读不到 | 44 |
 
-7 条确认里最有代表性的一族：`bindName`（3 个登录端点：`login`、`v2/wechat/auth_login`、
-`v2/routine/auth_login`、`v2/routine/phone_login` 中 3 处）与 `bindPhone`（2 处）——
-前端绑定流程读的字段，后端 v2 鉴权端点从不返回。`declaredElsewhere` 的例子：
-`POST login` 读 `expires_time`，它声明在 `AdminLoginService.php:58`（另一个 handler）。
+6 条确认**全是同一族**：`bindName` ×4（`login`、`v2/routine/auth_login`、
+`v2/routine/auth_binding_phone`、`v2/routine/phone_login`）与 `bindPhone` ×2
+（`v2/wechat/auth_login`、`v2/routine/auth_type`）——前端手机/微信绑定流程读的字段，
+后端鉴权端点从不返回，909 个 PHP 文件里 0 处声明。抽验源码确认归属正确：
+`wechat_login/index.vue:220` 是 `wechatAuthLogin(d).then(res => res.data.bindPhone)`、
+`:309` 是 `authLogin({key}).then(res => res.data.bindName)`，都各自在自己的调用链里。
+
+`declaredElsewhere` 的例子：`POST login` 读 `expires_time`，声明在
+`AdminLoginService.php:58`（另一个 handler）。
+
+### 首轮 7 条里被证伪的 2 条（都已修掉 + 回归测试）
+
+| 字段 | 根因 | 修法 |
+| --- | --- | --- |
+| `downloadBase64` | **窗口越界**：`order/list` 的绑定是 `getOrderList`，而该读取属于紧邻的另一个调用 `getInvoiceLink()`（模板串路径），600 字符窗口把邻居的读取算了进来 | 窗口改为**按调用链界定**（`binding(...)` + 它自己的 `.then/.catch/.finally`，括号/字符串感知），不再固定 600 字符 |
+| `codeUrl` | **`compact()` 不可见**：`DivisionService.php:75` 是 `return compact('list','count','codeUrl')`，`localShape` 与声明索引都只认 `'k' =>` / `$v['k']` | 两个读者都识别 `compact(...)` 的实参 |
+
+两者的教训一致：**验证过的命中才是命中**——7 条里 2 条是工具缺陷，修完 6 条同族、
+同源、可复核。
 
 **诚实边界**：动态构造的键（`$row[$col]`、序列化器、DB 列名映射）不会留下静态声明，
 所以「0 声明」是**强但非绝对**的结论——finding 的 `why` 里写明仍需人工确认一次。
