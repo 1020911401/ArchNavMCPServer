@@ -1,21 +1,81 @@
-MIT License
+ArchNav 商用授权条款 / ArchNav Commercial License
+Copyright (c) 2026 1020911401. All rights reserved. 保留所有权利。
 
-Copyright (c) 2026 1020911401
+本软件 ArchNav（含源码、脚本、CLI/MCP 服务、文档，以及随仓库分发的 skill/ 内容）
+版权归 1020911401 所有。除下列明确授予的权利外，未授予任何其他权利。
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+────────────────────────────────────────────────────────
+一、免费许可（非商业用途）
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+在不收取任何费用、也不用于任何直接或间接获利活动的条件下，你可以：
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+1. 下载、安装并在本地运行本软件；
+2. 阅读与修改源码，用于个人学习、教学、学术研究、开源项目评估，
+   或你所在组织的内部非营利性使用；
+3. 在完整保留本许可文件与版权声明的前提下，随你的非商业项目一起
+   分发未经修改的原样副本。
+
+────────────────────────────────────────────────────────
+二、商业用途需书面授权
+
+有下列任一情形，即属「商业用途」，必须事先取得版权所有者的书面授权
+（含使用范围、期限与费用）：
+
+1. 将本软件（含修改版、衍生版或其中实质性部分）用于任何产品、服务、
+   SaaS、外包交付或客户项目，并从中直接或间接收费；
+2. 在公司或机构内部用于经营性业务（含降本增效型内部工具），
+   不论规模大小；
+3. 以本软件或其衍生品对外提供培训、咨询、代运维、二次销售、
+   集成打包等收费服务；
+4. 未按第一条保留许可与版权声明，即随任何产品分发本软件。
+
+────────────────────────────────────────────────────────
+三、禁止事项
+
+1. 移除、隐藏或修改本软件中的版权声明、许可声明与来源标识；
+2. 将本软件或其衍生版整体或部分，以任何名称重新发布、转售，
+   或作为竞争产品发布；
+3. 以本软件为基础训练或蒸馏同类商业产品；或在未获授权的情况下，
+   对外宣称已取得本项目的商业许可。
+
+────────────────────────────────────────────────────────
+四、第三方组件
+
+node_modules/ 下的依赖，以及 bench/ 下的第三方示例工程（含 CRMEB 演示代码）
+仍适用其各自的许可证，不受本许可约束；本许可也不扩大你对该类代码的权利。
+
+────────────────────────────────────────────────────────
+五、授权申请
+
+商业授权申请与报价咨询：通过项目主页
+https://github.com/1020911401/ArchNavMCPServer 提交 Issue，或直接联系仓库所有者。
+未取得书面确认前，任何口头约定或默认使用均视为未获授权。
+
+────────────────────────────────────────────────────────
+六、免责声明
+
+本软件按「现状」提供，不提供任何明示或默示担保，包括但不限于适格性、
+无缺陷、不侵权担保。因使用本软件产生的任何直接或间接损失，
+版权所有者不承担责任。
+
+本软件是代码分析工具：其输出（调用关系、影响面、风险评分、审查结论、
+测试选择）仅供导航与参考，不构成对代码正确性、安全性或合规性的保证。
+
+────────────────────────────────────────────────────────
+七、许可变更
+
+本许可对已发布的旧版本不溯及既往；版权所有者保留在后续版本中调整
+许可条款的权利。授权用户的授权范围以书面授权文件为准。
+
+════════════════════════════════════════════════════════
+English summary — for reference only; the Chinese text above prevails.
+
+ArchNav is proprietary software. It is free of charge for personal study,
+teaching, academic research, and internal non-commercial evaluation, provided
+this file and the copyright notices remain intact. Any commercial use —
+including use inside a for-profit product or service, paid client work, SaaS,
+resale, paid training or support — requires a prior written commercial license
+from the copyright holder (request via the repository issue tracker).
+
+Third-party components under node_modules/ and bench/ keep their own licenses.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

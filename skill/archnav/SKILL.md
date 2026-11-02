@@ -3,7 +3,7 @@ name: archnav
 description: Use when the question is about a codebase, not a file — locate a symbol, who calls it, what breaks if I change it, review this diff, which tests to run, repo-level flows/risk.
 version: 1.9.0
 author: Hermes Agent
-license: MIT
+license: Commercial
 metadata:
   hermes:
     tags: [code-navigation, code-review, mcp, sarif]

@@ -1,6 +1,7 @@
 {
   "name": "archnav",
   "version": "1.0.0",
+  "license": "UNLICENSED",
   "description": "ArchNav — Architecture-Aware Code Navigation for AI Agents",
   "main": "src/index.js",
   "bin": {

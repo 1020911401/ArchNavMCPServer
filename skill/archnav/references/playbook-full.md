@@ -3,7 +3,7 @@ name: archnav
 description: Use when navigating or reviewing code with ArchNav. Layers, change impact, Vue/PHP review rules, test selection, FE/BE boundary, repo-level deep analysis (flows/clusters/risk).
 version: 1.5.0
 author: Hermes Agent
-license: MIT
+license: Commercial
 metadata:
   hermes:
     tags: [code-navigation, code-review, vue, php, laravel, uni-app, mcp, sarif, flows, clustering, risk-scoring]

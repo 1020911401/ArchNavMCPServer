@@ -186,7 +186,7 @@ Laravel 286 PHP + 76 Blade; uni-app 269 Vue + 64 JS — harness and raw numbers 
 | Languages | **12** + SFC/template/route layers | JS/TS + C++ build | 20+ (Rust kernel) |
 | Windows | ✅ **no toolchain** | ⚠️ query tools crash | ✅ |
 | Index time (Laravel / uni-app) | **3.3s / 13.0s** | 23.0s / 45.4s | 7.7s / 16.6s |
-| License | **MIT** | PolyForm Noncommercial | MIT |
+| License | **商用授权**（非商业免费，商用需书面授权） | PolyForm Noncommercial | MIT |
 
 > **CodeGraph column = archived evidence.** Re-running needs the `codegraph` CLI on
 > `PATH`, which is not installable from npm (the npm package of that name is a
@@ -413,4 +413,15 @@ node scripts/test-select.mjs . --scope staged                         # 该跑�
 
 ### 📄 License
 
-MIT
+**商用授权（Commercial License）** — 非商业用途免费，商业用途需书面授权。完整条款见 [`LICENSE`](LICENSE)。
+
+| 使用场景 | 是否需要授权 |
+|---|---|
+| 个人学习 / 教学 / 学术研究 | 免费，保留 `LICENSE` 与版权声明即可 |
+| 开源项目评估、组织内部非营利性试用 | 免费 |
+| 任何产品、服务、SaaS、外包交付中的使用 | **需商业授权** |
+| 公司/机构内部经营性使用（含降本增效型内部工具） | **需商业授权** |
+| 收费培训、咨询、代运维、二次销售、集成打包 | **需商业授权** |
+
+- 授权申请与报价：通过 [Issues](https://github.com/1020911401/ArchNavMCPServer/issues) 联系仓库所有者，未取得书面确认前视为未获授权。
+- 第三方组件（`node_modules/` 依赖、`bench/` 下的示例工程如 CRMEB）仍适用其各自许可证，不在本授权范围内。
