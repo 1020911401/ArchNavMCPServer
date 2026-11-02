@@ -111,6 +111,43 @@ resolver 已支持 `maxDepth: 3`（默认仍 2，只在被显式要求时多走�
 且**完全吻合率 ≥ 80%**，再人工核对其中若干条（照 §2.2 的做法）通过后，才允许把 `'repo'`
 加进 `COMPARABLE_LEVELS`——加之前必须同时改 `shapeIsComparable` 的单元测试。
 
+## 2.4 M5 / 第二阶段：门禁拒绝时改问「这个键存在吗」（2026-11-01）
+
+问题：`shapeIsComparable` 会拒掉相当一部分配对（partial / 包裹型 / depth-cap）。
+之前那些配对是**沉默**的——而沉默会被读成「没问题」。实测里 `bindName` 就是被沉默吞掉的
+真缺陷（1099 个 PHP 文件 0 处声明）。
+
+办法（IDEA 的核心手段：**按声明/使用点解析**，而不是按层级做字符串比对）：门禁拒绝时，
+对前端读到的**每个字段**做一次全后端**声明搜索**（`'k' =>`、`$v['k']`、`"k":`），三态处理：
+
+| 结果 | 处理 |
+| --- | --- |
+| 全后端 **0 声明** | **报**（`fe-be-shape-field-missing`, warn），证据 = `declared: 0 of N php files` + 形状被拒原因 |
+| **别处有声明** | **不报**，计入 `declaredElsewhere`（配对/接线问题，不是字段缺失） |
+| 前端读不到 | 维持 `未核对` |
+
+实测（260 路由 / 93 对；`node scripts/shape-coverage.mjs <front> <back> --stage2` 可复现）：
+
+| 状态 | 数量 |
+| --- | --- |
+| 门禁能比较 | 30 |
+| 门禁拒绝、前端可读（声明搜索生效） | 22 |
+| └ **0 声明 → 确认缺陷** | **7** |
+| └ 别处有声明 → 配对存疑（不报） | 60 |
+| 门禁拒绝、前端读不到 | 41 |
+
+7 条确认里最有代表性的一族：`bindName`（3 个登录端点：`login`、`v2/wechat/auth_login`、
+`v2/routine/auth_login`、`v2/routine/phone_login` 中 3 处）与 `bindPhone`（2 处）——
+前端绑定流程读的字段，后端 v2 鉴权端点从不返回。`declaredElsewhere` 的例子：
+`POST login` 读 `expires_time`，它声明在 `AdminLoginService.php:58`（另一个 handler）。
+
+**诚实边界**：动态构造的键（`$row[$col]`、序列化器、DB 列名映射）不会留下静态声明，
+所以「0 声明」是**强但非绝对**的结论——finding 的 `why` 里写明仍需人工确认一次。
+索引构建 909 个 PHP 文件约 0.9 秒，每个 root 只建一次。
+
+fixture 真值（`tests/fe-be-pair.test.mjs` 钉住）：`/api/deep` 的形状是 depth-cap →
+`ghostField` 0 声明**即报**，`image` 在 `CouponService.php:12` 有声明则**不报**。
+
 ## 3. 设计
 
 ### 3.1 复用既有的诚实性基建（硬约束）
@@ -172,6 +209,7 @@ L1  委托：return app('json')->success($this->service->foo(…))
 | ~~M2~~ | 前端两跳字段收集 + 测试 | **已完成 2026-11-01** | ✅ `collectFrontendReads`：端点 → api 函数 → 调用方的 `res.data.*`；没有调用方 = `unresolved`（不是空 pass） |
 | ~~M3~~ | 规则 + checklist 行 + 文档回填 | **已完成 2026-11-01** | ✅ `fe-be-shape-field-missing`（第 63 条规则）；两侧任一解析不到 → 行 `未核对`；fixture 真值 1 条 |
 | ~~M4~~ | 第 3 跳（repository 层键语义） | **已完成 2026-11-01，判定：否决** | ✅ 见 §2.3：`maxDepth: 3` 机械可复现（`--depth3`），但收益 +3% 且吻合率证据为零 → 门禁保持关闭 |
+| ~~M5~~ | 第二阶段：门禁拒绝时走声明搜索（三态） | **已完成 2026-11-01** | ✅ 见 §2.4：93 对里 22 对走声明搜索 → **7 条确认缺陷**（`bindName`×3、`bindPhone`×2 等）+ 60 处「别处有声明」不报 |
 
 ### M1.1 判定（2026-11-01，实测两条路线）
 

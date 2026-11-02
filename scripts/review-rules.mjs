@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
 import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES, vforMissingKeys } from './rules/index.mjs';
-import { resolveHandlerShape, collectFrontendReads, shapeIsComparable } from './response-shape.mjs';
+import { resolveHandlerShape, collectFrontendReads, shapeIsComparable, searchResponseKey } from './response-shape.mjs';
 // The stub detector and the v-for/:key finder moved into their rule modules; re-exported
 // here because the tests (and one older caller) import them from this entry point.
 import { stubMarkerInComments } from './rules/stub.mjs';
@@ -1117,7 +1117,13 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
   // M3 (docs/shape-check.md §3.4): response-shape checking only runs where the pairing
   // is trustworthy and both sides resolve; anything else counts as `unresolved` so the
   // checklist row can say 未核对 instead of passing by silence.
-  if (shapeStats && typeof shapeStats === 'object') { shapeStats.checked = shapeStats.checked || 0; shapeStats.unresolved = shapeStats.unresolved || 0; }
+  if (shapeStats && typeof shapeStats === 'object') {
+    shapeStats.checked = shapeStats.checked || 0;
+    shapeStats.unresolved = shapeStats.unresolved || 0;
+    shapeStats.fallbackPairs = shapeStats.fallbackPairs || 0;          // gate refused, read field verified by declaration search
+    shapeStats.confirmedByDeclaration = shapeStats.confirmedByDeclaration || 0;  // 0 declarations anywhere → finding
+    shapeStats.declaredElsewhere = shapeStats.declaredElsewhere || 0;   // declared in another handler → pairing question, not a finding
+  }
 
   const changedFiles = (changes.changed_files || []).map((r) => norm(r.file));
   // corpus = every indexed file, not a diff: rules that describe *this change* have no
@@ -1579,26 +1585,53 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
           // payload containing `data` (classic wrapper — `res.data.id` may read the nested
           // object we never opened). The predicate lives in response-shape.mjs so the
           // rule, `shape-coverage` and any measurement mirror cannot drift apart.
-          // Both refusals count as unresolved: the row says 未核对 and no "missing field"
-          // is invented from a shape we did not actually read.
-          if (!shapeIsComparable(shape) || reads.level === 'unresolved') {
-            if (shapeStats) shapeStats.unresolved += 1;
+          const readable = reads.level === 'resolved';
+          const readFields = readable ? [...new Set(reads.reads.map((r) => r.field))] : [];
+
+          if (shapeIsComparable(shape)) {
+            if (!readable) { if (shapeStats) shapeStats.unresolved += 1; continue; }
+            if (shapeStats) shapeStats.checked += 1;
+            const returned = new Set(shape.keys);
+            for (const r of reads.reads) {
+              if (returned.has(r.field)) continue;
+              const key = `${call.method} ${call.path}:${r.field}`;
+              if (seenMissing.has(key)) continue;
+              seenMissing.add(key);
+              add({
+                rule: 'fe-be-shape-field-missing', severity: 'warn',
+                file: r.file, line: r.line,
+                message: `前端读 res.data.${r.field}，但后端 ${route.controller}@${route.action} 从不返回这个字段。`,
+                why: '路径对、方法对，字段却不存在：运行时拿到 undefined，往下取值才炸——静态看接口签名永远发现不了，这正是响应形状核对存在的理由。',
+                evidence: `reads: ${readFields.join(',')} | returns: ${shape.keys.join(',')} | shape: ${shape.via.join(' -> ')} | reads: ${reads.via.join(', ')}`,
+              });
+            }
             continue;
           }
-          if (shapeStats) shapeStats.checked += 1;
-          const returned = new Set(shape.keys);
-          const readFields = [...new Set(reads.reads.map((r) => r.field))];
+
+          // SECOND STAGE (charter §2.4 — "IDEA's method"): the shape is not comparable, so
+          // do NOT fall silent. Ask the declaration question instead — is this key declared
+          // anywhere in the backend at all? Measured 2026-11-01: `bindName` has 0
+          // declarations in 909 PHP files (a true defect the gate was hiding), while
+          // `serviceList` is declared in another handler (a pairing question, not a
+          // missing field). Three states, three behaviours; nothing is guessed.
+          if (!readable) { if (shapeStats) shapeStats.unresolved += 1; continue; }
+          if (shapeStats) shapeStats.fallbackPairs += 1;
           for (const r of reads.reads) {
-            if (returned.has(r.field)) continue;
             const key = `${call.method} ${call.path}:${r.field}`;
             if (seenMissing.has(key)) continue;
+            const decl = searchResponseKey({ root: backDir, field: r.field });
+            if (decl.declared > 0) {
+              if (shapeStats) shapeStats.declaredElsewhere += 1;
+              continue;
+            }
             seenMissing.add(key);
+            if (shapeStats) shapeStats.confirmedByDeclaration += 1;
             add({
               rule: 'fe-be-shape-field-missing', severity: 'warn',
               file: r.file, line: r.line,
-              message: `前端读 res.data.${r.field}，但后端 ${route.controller}@${route.action} 从不返回这个字段。`,
-              why: '路径对、方法对，字段却不存在：运行时拿到 undefined，往下取值才炸——静态看接口签名永远发现不了，这正是响应形状核对存在的理由。',
-              evidence: `reads: ${readFields.join(',')} | returns: ${shape.keys.join(',')} | shape: ${shape.via.join(' -> ')} | reads: ${reads.via.join(', ')}`,
+              message: `前端读 res.data.${r.field}：后端 ${route.controller}@${route.action} 的响应形状无法解析（${shape.reason || shape.level}${shape.partial ? '，有 return 分支无法展开' : ''}），而全后端 ${decl.scannedFiles} 个 PHP 文件里没有任何地方声明这个键。`,
+              why: '形状解析不了时代码不猜——改为查"这个键在后端有没有声明"。零声明是可复核的强结论：客户端读的字段在服务端根本不存在。注意动态构造的键（`$row[$col]`、序列化器、DB 列名映射）不会留下静态声明，因此仍需人工确认一次。',
+              evidence: `declared: 0 of ${decl.scannedFiles} php files | shape not comparable: ${shape.reason || shape.level}${shape.partial ? ' (partial)' : ''} | reads: ${readFields.join(',')} | reads via: ${reads.via.join(', ')}`,
             });
           }
         }
@@ -1918,9 +1951,14 @@ export function buildChecklist({ findings = [], meta = {} }) {
     else if ((r.needs || []).includes('shape') && !meta.shapeChecked) {
       // `=== 0` vs undefined: a caller that never measured shapes is unknown (old
       // behaviour), a measured 0 is "the check could not run here" — 未核对.
+      // The second stage may still have run (declaration search): say so, so 未核对 is
+      // never mistaken for "nothing was looked at".
       status = 'na';
       reason = meta.shapeChecked === 0
         ? `未核对：${meta.shapeUnresolved ? `${meta.shapeUnresolved} 对接口两侧解析不到响应形状（或配对不可信）` : '响应形状核对未生效（配对不可信 / 两侧未解析）'}`
+          + (meta.shapeFallbackPairs
+            ? `；另 ${meta.shapeFallbackPairs} 对已走声明搜索——${meta.shapeConfirmedByDeclaration || 0} 处字段全后端无声明、${meta.shapeDeclaredElsewhere || 0} 处字段在别处有声明（配对存疑）`
+            : '')
         : NOT_APPLICABLE.tests;
     }
     else if (pairingSuspect && pairingDependent.has(r.id)) {
@@ -2321,6 +2359,9 @@ async function main() {
     // 0 means the check never ran — the fe-be-shape row must say 未核对, not 通过.
     shapeChecked: shapeStats.checked,
     shapeUnresolved: shapeStats.unresolved,
+    shapeFallbackPairs: shapeStats.fallbackPairs,
+    shapeConfirmedByDeclaration: shapeStats.confirmedByDeclaration,
+    shapeDeclaredElsewhere: shapeStats.declaredElsewhere,
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),
     hasPackageJson: fs.existsSync(path.join(dir, 'package.json')),
     hasTests: indexedTests,
@@ -2600,6 +2641,7 @@ async function main() {
         mode: opts.mode,
         tier: opts.tier,
         harness: { preset: harness.preset, tier: harness.tier, ruleset: harness.rules.ruleset },
+        shape: { checked: shapeStats.checked, confirmedByDeclaration: shapeStats.confirmedByDeclaration, declaredElsewhere: shapeStats.declaredElsewhere },
         summary: { ...checklist.summary, duplication: dupResult?.summary ?? null, risk: impactResult?.risk?.level ?? null, waived: waiverResult.waived.length },
         anchor: anchorResult ? {
           level: anchorResult.level,
@@ -2615,6 +2657,16 @@ async function main() {
         schemaVersion: REVIEW_SCHEMA_VERSION,
         scope: changes.scope, via: changes.via, backend: backendDir,
         harness,
+        // The response-shape ledger, three states included: pairs the gate could compare,
+        // pairs whose shape it refused, and how the declaration search resolved those
+        // (0 declarations anywhere = confirmed; declared elsewhere = pairing question).
+        shape: {
+          checked: shapeStats.checked,
+          unresolved: shapeStats.unresolved,
+          fallbackPairs: shapeStats.fallbackPairs,
+          confirmedByDeclaration: shapeStats.confirmedByDeclaration,
+          declaredElsewhere: shapeStats.declaredElsewhere,
+        },
         checklist: { summary: checklist.summary, rows: checklist.rows },
         duplication: dupResult ? { summary: dupResult.summary } : null,
         anchor: anchorResult ? {

@@ -475,3 +475,62 @@ export function shapeIsComparable(shape) {
     && Array.isArray(shape.keys)
     && !shape.keys.includes('data');
 }
+
+/**
+ * M5 (charter §2.4) — the second stage: when the shape gate refuses to compare, do not
+ * fall silent. Ask the declaration question instead: does this key exist ANYWHERE in
+ * the backend (`'k' =>`, `$v['k']`, `"k":`)?
+ *
+ * Measured 2026-11-01 on the real pair: `bindName` has **0 declarations in 1099 PHP
+ * files** — a true defect the gate was hiding as 未核对 — while `serviceList` has 3
+ * array-key declarations plus a contract test, i.e. "declared elsewhere", which is a
+ * pairing question, not a missing field.
+ *
+ * The index is built once per root and memoised: the rule asks for many fields.
+ */
+const DECL_CACHE = new Map();
+const MAX_SITES_PER_KEY = 5;
+const DECL_SKIP = /\/(vendor|node_modules|tests|test|storage|bootstrap|public|resources|\.git)\//;
+
+export function backendDeclarationIndex(root) {
+  const key = path.resolve(root);
+  const cached = DECL_CACHE.get(key);
+  if (cached) return cached;
+
+  const sites = new Map();
+  let scanned = 0;
+  const add = (field, rel, line) => {
+    const list = sites.get(field);
+    if (!list) { sites.set(field, [{ file: rel, line }]); return; }
+    if (list.length < MAX_SITES_PER_KEY) list.push({ file: rel, line });
+  };
+
+  const files = walk(key, [], MAX_DEPTH).filter((f) => /\.php$/i.test(f) && !DECL_SKIP.test(norm(f)));
+  for (const f of files) {
+    const src = read(f);
+    if (!src) continue;
+    scanned += 1;
+    const rel = norm(path.relative(key, f));
+    src.split(/\r?\n/).forEach((line, i) => {
+      // `'k' => …` / `"k" => …` (array literals) and `$v['k'] = …` (assignments)
+      for (const m of line.matchAll(/['"]([A-Za-z_]\w*)['"]\s*=>/g)) add(m[1], rel, i + 1);
+      for (const m of line.matchAll(/\$\w+\s*\[\s*['"]([A-Za-z_]\w*)['"]\s*\]/g)) add(m[1], rel, i + 1);
+    });
+  }
+
+  const index = { root: key, keys: sites, scannedFiles: scanned };
+  DECL_CACHE.set(key, index);
+  return index;
+}
+
+/**
+ * Is `<field>` declared as a response key anywhere in the backend?
+ * Returns `{declared, sites, scannedFiles}` — `declared: 0` is the strong claim the
+ * second stage reports, and it is honest about its own limit: a key built dynamically
+ * (`$row[$col]`, a serializer, a DB column mapping) leaves no static declaration.
+ */
+export function searchResponseKey({ root, field }) {
+  const index = backendDeclarationIndex(root);
+  const sites = index.keys.get(field) || [];
+  return { declared: sites.length, sites: sites.slice(0, 3), scannedFiles: index.scannedFiles };
+}

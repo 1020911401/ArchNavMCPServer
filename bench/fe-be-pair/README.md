@@ -27,7 +27,16 @@ against known numbers on every run (including CI, where the other fixtures are a
 | `ReportController@nope` | `level: unresolved`, `reason: method-not-found` | the method does not exist |
 | `CouponController@fromRepo` | depth 2 → `unresolved/depth-cap`; `maxDepth: 3` → `level: repo`, keys `rows, count` | third hop into `OrderRepository::rows` (M4 mechanics work) — and `shapeIsComparable` **refuses** `repo` until §2.3 agreement evidence exists |
 | reads for `/api/coupons` | `list` (real) + `nope` (never returned) | two hops: `api/index.js` → `pages/coupons.js` |
-| reads for `/api/deep` | `unresolved` / `no-callsite-reads` | nobody calls it — an empty result must not become a pass |
+| reads for `/api/deep` | `ghostField` + `image` (called from `pages/deep.js`) | the endpoint *does* have a caller — this is the M5 second-stage case, not the "nobody calls it" case |
+| reads for `/api/wrong-method` | `unresolved` / `no-callsite-reads` | binding exists, nobody calls it — an empty result must not become a pass |
+
+### second stage (M5 — the gate refuses, so ask the declaration question)
+
+| target | expected | why |
+| --- | --- | --- |
+| `/api/deep` → `ghostField` | **reported**, `declared: 0 of N php files` | `/api/deep`'s shape is `depth-cap`, so the rule falls back to the declaration search; `ghostField` is declared nowhere in this backend |
+| `/api/deep` → `image` | **not reported**, counted as `declaredElsewhere` | `image` is declared at `app/Services/CouponService.php:12` (another handler) — a pairing question, not a missing field |
+| ledger (`result.shape`) | `checked ≥ 1`, `fallbackPairs ≥ 1`, `confirmedByDeclaration: 1`, `declaredElsewhere ≥ 1` | the three states are visible in the machine output |
 
 Fe-be counts are unaffected by the shape work: 11 unique static paths, 8 matched
 (73% pairing), still 2 ghosts / 1 wrong verb / 3 unused routes / 1 dynamic call.

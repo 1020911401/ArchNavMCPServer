@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { extractFrontCalls, pathMatches } from './review-rules.mjs';
 import { extractLaravelRoutes } from '../src/parsers/laravelRoutes.js';
-import { resolveHandlerShape, shapeIsComparable, collectFrontendReads } from './response-shape.mjs';
+import { resolveHandlerShape, shapeIsComparable, collectFrontendReads, searchResponseKey } from './response-shape.mjs';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const JSON_OUT = process.argv.includes('--json');
@@ -25,11 +25,15 @@ const JSON_OUT = process.argv.includes('--json');
 // depth-cap cases, and — the gate's actual question — do those keys agree with what
 // the client reads? Report only; the gate stays closed on this evidence.
 const DEPTH3 = process.argv.includes('--depth3');
+// `--stage2` adds the M5 section (charter §2.4): of the pairs the gate refuses, how many
+// frontend reads resolve — and of those fields, how many are declared NOWHERE in the
+// backend (confirmed defect) vs declared in another handler (pairing question)?
+const STAGE2 = process.argv.includes('--stage2');
 const FRONT = path.resolve(args[0] || '');
 const BACK = path.resolve(args[1] || '');
 
 if (!args[0] || !args[1] || !fs.existsSync(FRONT) || !fs.existsSync(BACK)) {
-  console.error('usage: node scripts/shape-coverage.mjs <frontendDir> <backendDir> [--json] [--depth3]');
+  console.error('usage: node scripts/shape-coverage.mjs <frontendDir> <backendDir> [--json] [--depth3] [--stage2]');
   process.exit(2);
 }
 
@@ -105,6 +109,36 @@ if (DEPTH3) {
   }
 }
 
+// `--stage2` — the M5 section (charter §2.4): of the pairs the gate refuses, which
+// frontend reads resolve, and does the field exist anywhere in the backend at all?
+let stage2 = null;
+if (STAGE2) {
+  stage2 = {
+    comparablePairs: 0, refusedWithReads: 0, refusedNoReads: 0,
+    confirmed: [], declaredElsewhere: [], scannedFiles: 0,
+  };
+  for (const p of pairs) {
+    const shape = resolveHandlerShape({ root: BACK, controller: p.be.controller, action: p.be.action });
+    if (shapeIsComparable(shape)) { stage2.comparablePairs += 1; continue; }
+    const reads = collectFrontendReads({ root: FRONT, method: p.fe.method, path: p.fe.path });
+    if (reads.level !== 'resolved') { stage2.refusedNoReads += 1; continue; }
+    stage2.refusedWithReads += 1;
+    for (const field of [...new Set(reads.reads.map((x) => x.field))]) {
+      const decl = searchResponseKey({ root: BACK, field });
+      stage2.scannedFiles = decl.scannedFiles;
+      const base = {
+        endpoint: `${p.fe.method} ${p.fe.path}`,
+        handler: `${p.be.controller}@${p.be.action}`,
+        field,
+        readAt: reads.reads.find((x) => x.field === field),
+        shapeReason: shape.reason || shape.level,
+      };
+      if (decl.declared === 0) stage2.confirmed.push(base);
+      else stage2.declaredElsewhere.push({ ...base, sites: decl.sites.slice(0, 2) });
+    }
+  }
+}
+
 const report = {
   when: new Date().toISOString(),
   frontend: FRONT,
@@ -122,6 +156,7 @@ const report = {
   refused,
   reasons,
   ...(m4 ? { depth3: m4 } : {}),
+  ...(stage2 ? { stage2 } : {}),
 };
 
 if (JSON_OUT) {
@@ -158,6 +193,22 @@ if (JSON_OUT) {
     }
     console.log('other depth-cap pairs stay unresolved because:');
     for (const [k, v] of Object.entries(m4.stopReasons).sort((a, b) => b[1] - a[1])) console.log(`  ${String(v).padStart(3)}  ${k}`);
+  }
+
+  if (stage2) {
+    console.log(`\n--- M5 / second stage (charter §2.4) ---`);
+    console.log(`gate could compare:        ${stage2.comparablePairs}`);
+    console.log(`gate refused, reads ok:    ${stage2.refusedWithReads}   <- declaration search applies`);
+    console.log(`gate refused, no reads:    ${stage2.refusedNoReads}`);
+    console.log(`confirmed (0 declarations in ${stage2.scannedFiles} php files): ${stage2.confirmed.length}`);
+    for (const c of stage2.confirmed.slice(0, 8)) {
+      console.log(`  ${c.endpoint}  ->  ${c.handler}  field=${c.field}   (shape: ${c.shapeReason})`);
+      console.log(`     read at ${c.readAt.file}:${c.readAt.line}`);
+    }
+    console.log(`declared elsewhere (pairing question): ${stage2.declaredElsewhere.length}`);
+    for (const d of stage2.declaredElsewhere.slice(0, 6)) {
+      console.log(`  ${d.endpoint}  field=${d.field}  declared at ${d.sites.map((s) => `${s.file}:${s.line}`).join(', ')}`);
+    }
   }
 }
 process.exit(0);

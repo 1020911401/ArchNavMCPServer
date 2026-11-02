@@ -28,7 +28,7 @@ const EXPECT = {
   'fe-be-route-unused': 3,        // health, legacy, and GET wrong-method
   'fe-be-pairing-suspect': 0,     // 6/9 unique paths = 67%, floor is 20%
   'fe-dynamic-request-path': 1,   // '/api/orders?status=' + status
-  'fe-be-shape-field-missing': 1, // pages/coupons.js reads res.data.nope (M3)
+  'fe-be-shape-field-missing': 2, // nope (M3) + ghostField (M5 second stage: 0 declarations backend-wide)
 };
 
 function hermeticCopy() {
@@ -83,6 +83,23 @@ test('the tracked pair produces the fe-be findings its README promises', (t) => 
   assert.match(shapeFinding.evidence, /reads: list,nope/, 'the frontend reads are the evidence');
   assert.equal(shapeFinding.line, 7, 'points at the exact read');
   assert.equal(statusOf('fe-be-shape-field-missing'), 'hit');
+
+  // M5 second stage: /api/deep's shape is NOT comparable (depth-cap), so the rule asks
+  // the declaration question instead. `ghostField` is declared nowhere in the fixture;
+  // `image` is declared in another handler — one is reported, the other is not.
+  const shapeFindings = (result.findings || []).filter((f) => f.rule === 'fe-be-shape-field-missing');
+  const ghost = shapeFindings.find((f) => /res\.data\.ghostField/.test(f.message));
+  assert.ok(ghost, 'a field declared nowhere must be reported even when the shape is unreadable');
+  assert.match(ghost.evidence, /declared: 0 of \d+ php files/, `declaration search is the evidence: ${ghost.evidence}`);
+  assert.match(ghost.evidence, /depth-cap/, 'names why the shape could not be compared');
+  assert.ok(!shapeFindings.some((f) => /res\.data\.image/.test(f.message)),
+    'a field declared elsewhere is a pairing question, not a missing field');
+
+  const ledger = result.shape || {};
+  assert.ok(ledger.checked >= 1, `comparable pairs are counted: ${JSON.stringify(ledger)}`);
+  assert.ok(ledger.fallbackPairs >= 1, `the second stage ran and says so: ${JSON.stringify(ledger)}`);
+  assert.equal(ledger.confirmedByDeclaration, 1, 'exactly one field had zero declarations');
+  assert.ok(ledger.declaredElsewhere >= 1, 'the read declared elsewhere is counted, not reported');
 });
 
 test('the same pair keeps 未核对 rows honest when the backend is swapped for an unrelated repo', (t) => {

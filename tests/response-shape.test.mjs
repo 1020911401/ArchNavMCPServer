@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveHandlerShape, methodBody, collectFrontendReads, shapeIsComparable } from '../scripts/response-shape.mjs';
+import { resolveHandlerShape, methodBody, collectFrontendReads, shapeIsComparable, searchResponseKey } from '../scripts/response-shape.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const FIXTURE = path.join(ROOT, 'bench', 'fe-be-pair', 'backend');
@@ -154,7 +154,10 @@ test('M2: an endpoint with a caller resolves the fields it reads', () => {
 });
 
 test('M2: an endpoint nobody calls is unresolved, not an empty pass', () => {
-  const r = collectFrontendReads({ root: FRONT, method: 'GET', path: '/api/deep' });
+  // `/api/wrong-method` has a binding in the api layer but nobody calls it — and now that
+  // pages/deep.js calls /api/deep (M5 second-stage fixture), the "nobody calls it" case
+  // needs an endpoint that is genuinely uncalled.
+  const r = collectFrontendReads({ root: FRONT, method: 'POST', path: '/api/wrong-method' });
   assert.equal(r.level, 'unresolved', JSON.stringify(r));
   assert.equal(r.reason, 'no-callsite-reads');
   assert.deepEqual(r.reads, [], 'no reads means no answer');
@@ -288,6 +291,34 @@ test('the injected service wins over a stranger with the same method name', (t) 
   assert.equal(r.level, 'service', JSON.stringify(r));
   assert.deepEqual(r.keys, ['serviceList'], 'the injected service, not the alphabetical first');
   assert.match(r.via.join(' -> '), /ctor hint: ZedTargetService/, `the hint is the evidence: ${r.via.join(' -> ')}`);
+});
+
+test('M5 second stage: declaration search answers "does this key exist at all"', (t) => {
+  // the gate refuses ~60% of pairs; silence there hid a true defect (`bindName`: 0
+  // declarations in 909 PHP files). The fallback asks the declaration question instead.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decl-search-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  const w = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  };
+  w('app/A.php', [
+    '<?php',
+    '$result = ["present" => 1];',
+    '$row["assigned"] = 2;',
+    '',
+  ].join('\n'));
+  w('app/B.php', '<?php // nothing declared here\n');
+  fs.mkdirSync(path.join(dir, 'vendor', 'x'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'vendor', 'x', 'C.php'), '<?php $v = ["vendorOnly" => 1];\n');
+
+  assert.ok(searchResponseKey({ root: dir, field: 'present' }).declared > 0, 'array-literal key');
+  assert.ok(searchResponseKey({ root: dir, field: 'assigned' }).declared > 0, 'index assignment');
+  assert.equal(searchResponseKey({ root: dir, field: 'ghostField' }).declared, 0, 'nowhere: the strong claim');
+  assert.equal(searchResponseKey({ root: dir, field: 'vendorOnly' }).declared, 0, 'vendor is not the project');
+  const ghost = searchResponseKey({ root: dir, field: 'ghostField' });
+  assert.ok(ghost.scannedFiles >= 2, `scanned count is evidence: ${ghost.scannedFiles}`);
+  assert.ok(Array.isArray(ghost.sites), 'sites are returned for declared keys');
 });
 
 test('M4: with maxDepth 3 the resolver reaches the injected repository', () => {  const capped = resolveHandlerShape({ root: BACKEND, controller: 'CouponController', action: 'fromRepo' });
