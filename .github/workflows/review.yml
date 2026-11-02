@@ -47,6 +47,8 @@ jobs:
             tests/navigation.test.mjs \
             tests/review-rules.test.mjs \
             tests/fe-be-pair.test.mjs \
+            tests/laravel-routes.test.mjs \
+            tests/response-shape.test.mjs \
             tests/skill-claims.test.mjs \
             tests/skill-flow.test.mjs \
             tests/test-select.test.mjs \

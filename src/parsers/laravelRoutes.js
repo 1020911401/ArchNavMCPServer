@@ -74,7 +74,14 @@ export function extractLaravelRoutes(repoDir, symbols = []) {
   const unresolved = [];
   const resolve = buildControllerResolver(symbols);
 
-  for (const relFile of discoverRouteFiles(repoDir)) {
+  // Prefixes applied by a service provider are invisible in the route file itself, and
+  // bootstrap files (`routes/kefuapi.php`) only `require` the real one. Without this,
+  // `kefuapi/login` was read as plain `login` and collided with the customer frontend's
+  // `POST login` — which then got paired to the kefu handler (measured 2026-11-02).
+  const routeFiles = discoverRouteFiles(repoDir);
+  const inherited = discoverInheritedPrefixes(repoDir, routeFiles);
+
+  for (const relFile of routeFiles) {
     let src;
     try {
       src = fs.readFileSync(path.join(repoDir, relFile), 'utf-8');
@@ -86,6 +93,7 @@ export function extractLaravelRoutes(repoDir, symbols = []) {
     const masked = maskComments(src);
     if (!masked.includes('Route::')) continue;
 
+    const mountPrefix = inherited.get(relFile) || '';
     const state = {
       masked,
       relFile,
@@ -94,13 +102,198 @@ export function extractLaravelRoutes(repoDir, symbols = []) {
       routes,
       unresolved,
       resolve,
+      mountPrefix,
     };
 
-    // Top level of the file is just another block.
-    visitBlock(state, 0, masked.length, { prefix: '' });
+    // Top level of the file is just another block, seeded with the provider's prefix.
+    visitBlock(state, 0, masked.length, { prefix: mountPrefix });
   }
 
   return { edges, routes, unresolved };
+}
+
+/**
+ * Effective `prefix` for every route file, following provider mounts and `require`
+ * chains. Three shapes are supported, because they are what real Laravel repos use:
+ *
+ *   Route::prefix('x')->group(base_path('routes/x.php'))          // literal
+ *   Route::group(['prefix' => 'x'], base_path('routes/x.php'))    // array option
+ *   foreach (['x' => base_path('routes/x.php')] as $p => $f) {    // variable (this repo)
+ *       Route::middleware('api')->prefix($p)->group($f);
+ *   }
+ *
+ * The last one is why a naive "read the prefix literal" cannot work: `$prefix` is a loop
+ * variable and its value lives in the array literal above it.
+ */
+function discoverInheritedPrefixes(repoDir, routeFiles) {
+  const mounted = new Map();      // route file -> prefix
+  const known = new Set(routeFiles);
+
+  for (const relProvider of discoverProviderFiles(repoDir)) {
+    let src;
+    try {
+      src = fs.readFileSync(path.join(repoDir, relProvider), 'utf-8');
+    } catch {
+      continue;
+    }
+    const masked = maskComments(src);
+
+    // ── shape 3: foreach (['prefix' => base_path('file')] as $p => $f) { … } ──
+    for (const loop of masked.matchAll(/foreach\s*\(([\s\S]*?)\bas\s+\$(\w+)\s*=>\s*\$(\w+)\s*\)\s*\{/g)) {
+      const bodyStart = loop.index + loop[0].length;
+      const bodyEnd = matchBrace(masked, bodyStart - 1);
+      if (bodyEnd < 0) continue;
+      const body = masked.slice(bodyStart, bodyEnd);
+      const prefixVar = loop[2];
+      const fileVar = loop[3];
+      if (!new RegExp(`->\\s*prefix\\s*\\(\\s*\\$${prefixVar}\\s*\\)`).test(body)) continue;
+      if (!new RegExp(`->\\s*group\\s*\\(\\s*\\$${fileVar}\\s*\\)`).test(body)) continue;
+      for (const entry of arrayEntries(loop[1])) {
+        const target = resolveRoutePath(entry.value, relProvider, repoDir);
+        if (target && known.has(target)) mounted.set(target, jointPrefix('', entry.key));
+      }
+    }
+
+    // ── shapes 1 & 2: explicit prefix beside the group() call ──
+    // `Route::group(...)` (array option, second arg is a file) and `->group(...)`
+    // (chained modifiers) both appear in real providers.
+    for (const g of masked.matchAll(/(?:::|->)\s*group\s*\(/g)) {
+      const stmtStart = statementStart(masked, g.index);
+      const modifiers = masked.slice(stmtStart, g.index);
+      const argStart = g.index + g[0].length;
+      const argEnd = matchParen(masked, argStart - 1);
+      if (argEnd < 0) continue;
+      const arg = masked.slice(argStart, argEnd);
+      // `->prefix('x')->group(f)` keeps the prefix in the modifiers; the array-option
+      // form `Route::group(['prefix' => 'x'], f)` keeps it in the FIRST argument.
+      const prefix = chainedArg(modifiers, 'prefix')
+        || arrayOption(modifiers, 'prefix')
+        || arrayOption(arg, 'prefix');
+      if (!prefix || !prefix.ok) continue;
+      const target = resolveRoutePath(arg, relProvider, repoDir);
+      if (target && known.has(target)) mounted.set(target, jointPrefix('', prefix.value));
+    }
+  }
+
+  // `require` chains: a bootstrap file passes its prefix down to the files it pulls in.
+  const edges = routeIncludes(repoDir, routeFiles, known);
+  const effective = new Map();
+  const queue = [...mounted.keys()];
+  for (const file of queue) effective.set(file, mounted.get(file));
+  while (queue.length) {
+    const file = queue.shift();
+    for (const child of edges.get(file) || []) {
+      if (effective.has(child)) continue;          // first mount wins, like Laravel
+      effective.set(child, effective.get(file));
+      queue.push(child);
+    }
+  }
+  return effective;
+}
+
+/** `['k' => base_path('f'), 'k2' => 'f2']` → [{key, value}] (literal keys only). */
+function arrayEntries(head) {
+  const out = [];
+  const body = /\[([\s\S]*)\]/.exec(head);
+  if (!body) return out;
+  for (const m of body[1].matchAll(/'([^']+)'\s*=>\s*([^,]+?)(?:,|$)/g)) out.push({ key: m[1], value: m[2].trim() });
+  return out;
+}
+
+/** Resolve `base_path('x')` / `app_path('x')` / `__DIR__.'/x'` / `'x'` to a repo-relative posix path. */
+function resolveRoutePath(expr, fromFile, repoDir) {
+  const e = String(expr || '').trim();
+  let resolved = null;
+  let m;
+  if ((m = /base_path\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(e))) resolved = m[1];
+  else if ((m = /app_path\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(e))) resolved = `app/${m[1]}`;
+  else if ((m = /__DIR__\s*\.\s*['"]\/([^'"]+)['"]/.exec(e))) resolved = path.posix.join(path.posix.dirname(fromFile), m[1]);
+  else if ((m = /['"]([^'"]+\.php)['"]/.exec(e))) resolved = m[1];
+  if (!resolved) return null;
+  const norm = path.posix.normalize(resolved.replace(/^\.\//, '')).replace(/\/$/, '');
+  return norm.startsWith('routes/') ? norm : null;
+}
+
+/** Nested `require`/`include` edges between route files, repo-relative posix. */
+function routeIncludes(repoDir, routeFiles, known) {
+  const out = new Map();
+  for (const rel of routeFiles) {
+    let src;
+    try { src = fs.readFileSync(path.join(repoDir, rel), 'utf-8'); } catch { continue; }
+    const masked = maskComments(src);
+    const children = new Set();
+    for (const m of masked.matchAll(/\b(?:require|require_once|include|include_once)\b\s*\(?/g)) {
+      const after = masked.slice(m.index + m[0].length, m.index + m[0].length + 160);
+      const hit = /(__DIR__\s*\.\s*['"]\/?([^'"]+)['"])|(base_path\s*\(\s*['"]([^'"]+)['"]\s*\))/.exec(after);
+      if (!hit) continue;
+      const raw = hit[2] ? path.posix.join(path.posix.dirname(rel), hit[2]) : hit[4];
+      const child = path.posix.normalize(raw);
+      if (known.has(child)) children.add(child);
+    }
+    if (children.size) out.set(rel, [...children]);
+  }
+  return out;
+}
+
+/** Every service provider that might register routes: `*Provider.php`, or any file
+ *  under an `Providers/` directory (providers are not always named `*Provider`). */
+function discoverProviderFiles(repoDir) {
+  const out = [];
+  const walk = (abs, rel, depth) => {
+    if (depth < 0) return;
+    let entries;
+    try { entries = fs.readdirSync(abs, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (/^(node_modules|vendor|storage)$/.test(entry.name)) continue;
+        walk(path.join(abs, entry.name), childRel, depth - 1);
+      } else if (entry.isFile() && /\.php$/i.test(entry.name)) {
+        if (/Provider\.php$/i.test(entry.name) || /\/Providers\//.test(`/${childRel}`)) out.push(childRel);
+      }
+    }
+  };
+  walk(path.join(repoDir, 'app'), 'app', 6);
+  return out.sort();
+}
+
+/** Index of the `}` matching the `{` at `open` (−1 when unbalanced). */
+function matchBrace(src, open) {
+  if (src[open] !== '{') return -1;
+  let depth = 0;
+  for (let i = open; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === "'" || c === '"') { i = skipString(src, i); continue; }
+    if (c === '{') depth += 1;
+    else if (c === '}') { depth -= 1; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** Index of the `)` matching the `(` at `open` (−1 when unbalanced). */
+function matchParen(src, open) {
+  if (src[open] !== '(') return -1;
+  let depth = 0;
+  for (let i = open; i < src.length; i += 1) {
+    const c = src[i];
+    if (c === "'" || c === '"') { i = skipString(src, i); continue; }
+    if (c === '(') depth += 1;
+    else if (c === ')') { depth -= 1; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** Start of the statement containing `idx` (after the previous `;`, `{` or line break run). */
+function statementStart(src, idx) {
+  for (let i = idx; i >= 0; i -= 1) {
+    if (src[i] === ';' || src[i] === '{' || src[i] === '}') return i + 1;
+  }
+  return 0;
+}
+
+function jointPrefix(parent, child) {
+  return joinUri(parent || '', child || '');
 }
 
 // ═══════════════════════════════════════════════

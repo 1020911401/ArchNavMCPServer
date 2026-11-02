@@ -126,42 +126,34 @@ resolver 已支持 `maxDepth: 3`（默认仍 2，只在被显式要求时多走�
 | **别处有声明** | **不报**，计入 `declaredElsewhere`（配对/接线问题，不是字段缺失） |
 | 前端读不到 | 维持 `未核对` |
 
-实测（260 路由 / 93 对；`node scripts/shape-coverage.mjs <front> <back> --stage2` 可复现）：
+实测（260 路由 / **73 对**；`node scripts/shape-coverage.mjs <front> <back> --stage2` 可复现）：
 
 | 状态 | 数量 |
 | --- | --- |
-| 门禁能比较 | 32 |
-| 门禁拒绝、前端可读（声明搜索生效） | 12 |
-| └ **0 声明 → 确认** | **1** |
-| └ 别处有声明 → 配对存疑（不报） | 44 |
-| 门禁拒绝、前端读不到 | 37 |
-| **恒失败桩端点（已排除）** | **12** |
+| 门禁能比较 | 29 |
+| 门禁拒绝、前端可读（声明搜索生效） | 5 |
+| └ **0 声明 → 确认** | **0** |
+| └ 别处有声明 → 配对存疑（不报） | 7 |
+| 门禁拒绝、前端读不到 | 28 |
+| **恒失败桩端点（已排除）** | **11** |
 
-那 1 条确认（`POST login` → `bindName`）经复核是 **路由前缀缺陷造成的错配**：
-`routes/api/kefu.php` 由 `LegacyApiRouteServiceProvider` 以 `prefix('kefuapi')` 挂载，
-前缀写在 **service provider** 里、不在路由文件里，静态解析读成 `login`，于是客户前端的
-`POST login` 被配到了客服的 `KefuLoginController@login`（它返回 `{token, exp_time, kefuInfo}`，
-见其 docblock）。→ **真实后端字段缺陷 0 条**。
+**真实后端字段缺陷：0 条。** 这个 0 有依据：首轮报出的 6 条「确认」逐条核对源码后全部证伪
+（4 条桩端点、2 条解析缺陷），修完再测归零；最后一轮（§2.5 的最后一行，provider 前缀）
+还发现配对本身也从 93 对修正到 73 对——此前 20 对是拿裸 uri 硬配上的**幻影配对**。
 
-### 2.5 「确认」这一类的三种假阳模式（都被实测抓到过，逐一修/记）
+### 2.5 「确认」这一类的假阳模式（每一条都是实测抓到的，逐条修掉）
 
 | 模式 | 实例 | 处理 |
 | --- | --- | --- |
 | **窗口越界**：读取属于紧邻的另一个调用 | `downloadBase64`（属于 `getInvoiceLink()`，模板串路径） | 窗口改为按调用链界定（§2.4） |
 | **动态造键**：`compact()` / 序列化器 | `codeUrl`（`DivisionService` 用 `compact('list','count','codeUrl')`） | `localShape` 与声明索引都展开 `compact(...)` |
-| **恒失败桩端点**：service 体只有 `throw` | `V2AuthService` 的 4 个鉴权方法（「旧 xxx」降级桩） | resolver 新增 `reason: handler-throws`；`shapeIsStub` 谓词，规则与工具都排除（12 对） |
+| **恒失败桩端点**：service 体只有 `throw` | `V2AuthService` 的 4–5 个鉴权方法（「旧 xxx」降级桩） | resolver 新增 `reason: handler-throws`；`shapeIsStub` 谓词，规则与工具都排除（11 对） |
 | **委托取错**：方法体第一个 `$this->x->y(` 是守卫调用 | `phoneLogin` 的 `verifySmsCode` 被当成形状来源 | `delegate()` 优先取 `return` 语句里的调用 |
-| **路由前缀在 provider 里**（未修，已记录） | `kefuapi/login` 被读成 `login` | 静态解析看不到 provider 前缀；`fe-be-path-not-found`/形状核对都会因此错配，需在 `src/parsers/laravelRoutes.js` 补 provider 前缀识别 |
+| **路由前缀在 provider 里** | `kefuapi/login` 被读成 `login`，客户前端的 `POST login` 因此配到客服 handler | 解析器从 provider 读挂载前缀（含 `foreach (['x' => base_path(...)] as $p => $f)` 变量形态），并沿 `require` 链继承；**92 条路由**恢复正确前缀，覆盖 `tests/laravel-routes.test.mjs` 5 项 |
 
-6 条确认**全是同一族**：`bindName` ×4（`login`、`v2/routine/auth_login`、
-`v2/routine/auth_binding_phone`、`v2/routine/phone_login`）与 `bindPhone` ×2
-（`v2/wechat/auth_login`、`v2/routine/auth_type`）——前端手机/微信绑定流程读的字段，
-后端鉴权端点从不返回，909 个 PHP 文件里 0 处声明。抽验源码确认归属正确：
-`wechat_login/index.vue:220` 是 `wechatAuthLogin(d).then(res => res.data.bindPhone)`、
-`:309` 是 `authLogin({key}).then(res => res.data.bindName)`，都各自在自己的调用链里。
-
-`declaredElsewhere` 的例子：`POST login` 读 `expires_time`，声明在
-`AdminLoginService.php:58`（另一个 handler）。
+修完之后，客户前端的 `POST login` 在本后端里**匹配不到任何路由**（`routes matching POST login: NONE`）——
+它是一条真实的路径级问题（该接口不在这个服务里，或前端 baseURL 指错），而不是「字段缺失」。
+这正是修正后的正确结论：**配对错了，就不该继续谈字段**。
 
 ### 首轮 7 条里被证伪的 2 条（都已修掉 + 回归测试）
 
