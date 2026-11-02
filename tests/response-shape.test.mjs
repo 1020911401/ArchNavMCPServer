@@ -343,6 +343,80 @@ test('compact() names are response keys — neither reader may miss them', (t) =
     'the declaration index sees compact() too');
 });
 
+test('a stub endpoint (service only throws) is named, not mis-read as "no shape"', (t) => {
+  // measured 2026-11-02: V2AuthService's auth methods all `throw` (legacy degraded
+  // endpoints). Treating them as "no literal shape" let 4 dead frontend branches be
+  // reported as confirmed missing fields.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'stub-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  const w = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  };
+  w('app/Services/StubAuthService.php', [
+    '<?php',
+    'class StubAuthService {',
+    '  public function login(): array {',
+    "    if (! Cache::has('k')) { throw new LegacyApiException('用户信息获取失败'); }",
+    "    throw new LegacyApiException('登录失败');",
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+  w('app/StubController.php', [
+    '<?php',
+    'class StubController {',
+    '  public function __construct(private readonly StubAuthService $service) {}',
+    '  public function login() {',
+    '    if ($err = $this->service->verifyCode()) { return app("json")->fail($err); }',
+    '    return app("json")->success($this->service->login());',
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+
+  const r = resolveHandlerShape({ root: dir, controller: 'StubController', action: 'login' });
+  assert.equal(r.level, 'unresolved', JSON.stringify(r));
+  assert.equal(r.reason, 'handler-throws', 'a documented stub, not an unreadable shape');
+});
+
+test('the delegate is the call inside `return`, not the first guard call', (t) => {
+  // measured 2026-11-02: a handler doing
+  //   if ($err = $this->service->verifySmsCode(...)) return fail($err);
+  //   return success($this->service->phoneLogin(...));
+  // had `verifySmsCode` read as the shape source — the guard, not the builder.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-call-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }));
+  const w = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  };
+  w('app/Services/GuardService.php', [
+    '<?php',
+    'class GuardService {',
+    '  public function verifyCode(): string { return ""; }',
+    '  public function build(): array { return ["ok" => 1, "payload" => 2]; }',
+    '}',
+    '',
+  ].join('\n'));
+  w('app/GuardController.php', [
+    '<?php',
+    'class GuardController {',
+    '  public function __construct(private readonly GuardService $service) {}',
+    '  public function handle() {',
+    '    if ($err = $this->service->verifyCode()) { return app("json")->fail($err); }',
+    '    return app("json")->success($this->service->build());',
+    '  }',
+    '}',
+    '',
+  ].join('\n'));
+
+  const r = resolveHandlerShape({ root: dir, controller: 'GuardController', action: 'handle' });
+  assert.equal(r.level, 'service', JSON.stringify(r));
+  assert.deepEqual([...r.keys].sort(), ['ok', 'payload'], 'the response builder, not the guard');
+  assert.match(r.via.join(' -> '), /build/, `via names the builder: ${r.via.join(' -> ')}`);
+});
+
 test('M5 second stage: declaration search answers "does this key exist at all"', (t) => {  // the gate refuses ~60% of pairs; silence there hid a true defect (`bindName`: 0
   // declarations in 909 PHP files). The fallback asks the declaration question instead.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'decl-search-'));

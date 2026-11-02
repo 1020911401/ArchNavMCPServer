@@ -207,6 +207,15 @@ function localShape(body) {
 }
 
 /**
+ * No return path at all, but `throw` statements: a stub / degraded endpoint. The client's
+ * success handler is unreachable, so nothing may be reported about the fields it reads.
+ */
+function isThrowingStub(body) {
+  if (returnStatements(body).length > 0) return false;
+  return /\bthrow\b/.test(body);
+}
+
+/**
  * `compact('a','b')` / `compact(['a','b'])` — PHP builds the response keys from the
  * variable NAMES, so neither a bracket reader nor a `$v['k']` reader sees them.
  * Measured 2026-11-02: `DivisionService` returns `compact('list','count','codeUrl')`.
@@ -262,12 +271,29 @@ function callWindow(src, start) {
   return src.slice(start, end + 1);
 }
 
-/** A shape the method delegates: `$this->service->foo(...)` or `FooService::foo(...)`. */
-function delegate(body) {  const svc = body.match(/\$this->(\w+)->(\w+)\s*\(/);
-  if (svc) return { receiver: svc[1], method: svc[2] };
-  const stat = body.match(/\b([A-Z][A-Za-z0-9_]*(?:Service|Repository))::(\w+)\s*\(/);
-  if (stat) return { receiver: stat[1], method: stat[2] };
-  return null;
+/**
+ * The service call that PRODUCES the response: `$this->service->foo(...)` or
+ * `FooService::foo(...)`.
+ *
+ * `return` statements win over the rest of the body. Measured 2026-11-02: a handler
+ * shaped like
+ *     if ($err = $this->service->verifySmsCode(...)) { return fail($err); }
+ *     return success($this->service->phoneLogin(...));
+ * had its *guard* call read as the shape source, so the resolver described
+ * `verifySmsCode`'s body instead of the response builder — and with a stub service that
+ * turned a "always throws" endpoint into a "no literal shape" one.
+ */
+function delegate(body) {
+  const pick = (text) => {
+    if (!text) return null;
+    const svc = /\$this->(\w+)->(\w+)\s*\(/.exec(text);
+    if (svc) return { receiver: svc[1], method: svc[2] };
+    const stat = /\b([A-Z][A-Za-z0-9_]*(?:Service|Repository))::(\w+)\s*\(/.exec(text);
+    if (stat) return { receiver: null, method: stat[2] };
+    return null;
+  };
+  const fromReturns = returnStatements(body).map((s) => s.text).join('\n');
+  return pick(fromReturns) || pick(body);
 }
 
 function findPhpFiles(root, preferService) {
@@ -435,6 +461,8 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
   const local = localShape(picked.body.body);
   if (local) return { level: 'local', keys: local.keys, ...(local.partial ? { partial: true } : {}), via, depth: 1 };
 
+  if (isThrowingStub(picked.body.body)) return stop('handler-throws');
+
   const del = delegate(picked.body.body);
   if (!del) return stop('no-literal-shape-no-delegate');
   if (maxDepth < 2) return stop('depth-cap');
@@ -467,6 +495,13 @@ export function resolveHandlerShape({ root, controller, action, index = null, ma
 
   const local2 = localShape(second.body);
   if (local2) return { level: 'service', keys: local2.keys, ...(local2.partial ? { partial: true } : {}), via, depth: 2 };
+
+  // A service body with NO return path but `throw` statements is a deliberate stub /
+  // degraded endpoint ("旧 xxx → 一律失败"). Its success handler cannot run, so neither
+  // shape comparison nor declaration search may report against the client's dead branch.
+  // Measured 2026-11-02: `V2AuthService`'s five auth methods all throw, and they produced
+  // 4 of the 6 "confirmed" missing-field findings.
+  if (isThrowingStub(second.body)) return stop('handler-throws');
 
   const del2 = delegate(second.body);
   if (!del2) return stop('service-has-no-literal-shape');
@@ -535,6 +570,15 @@ export function shapeIsComparable(shape) {
     && !shape.partial
     && Array.isArray(shape.keys)
     && !shape.keys.includes('data');
+}
+
+/**
+ * A stub / degraded endpoint: the handler or its service never returns and always
+ * throws, so the client's success branch is unreachable. Nothing may be reported about
+ * the fields read there — not by the rule, not by `shape-coverage`, not by any mirror.
+ */
+export function shapeIsStub(shape) {
+  return Boolean(shape) && shape.reason === 'handler-throws';
 }
 
 /**

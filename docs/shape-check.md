@@ -131,10 +131,27 @@ resolver 已支持 `maxDepth: 3`（默认仍 2，只在被显式要求时多走�
 | 状态 | 数量 |
 | --- | --- |
 | 门禁能比较 | 32 |
-| 门禁拒绝、前端可读（声明搜索生效） | 17 |
-| └ **0 声明 → 确认缺陷** | **6** |
-| └ 别处有声明 → 配对存疑（不报） | 55 |
-| 门禁拒绝、前端读不到 | 44 |
+| 门禁拒绝、前端可读（声明搜索生效） | 12 |
+| └ **0 声明 → 确认** | **1** |
+| └ 别处有声明 → 配对存疑（不报） | 44 |
+| 门禁拒绝、前端读不到 | 37 |
+| **恒失败桩端点（已排除）** | **12** |
+
+那 1 条确认（`POST login` → `bindName`）经复核是 **路由前缀缺陷造成的错配**：
+`routes/api/kefu.php` 由 `LegacyApiRouteServiceProvider` 以 `prefix('kefuapi')` 挂载，
+前缀写在 **service provider** 里、不在路由文件里，静态解析读成 `login`，于是客户前端的
+`POST login` 被配到了客服的 `KefuLoginController@login`（它返回 `{token, exp_time, kefuInfo}`，
+见其 docblock）。→ **真实后端字段缺陷 0 条**。
+
+### 2.5 「确认」这一类的三种假阳模式（都被实测抓到过，逐一修/记）
+
+| 模式 | 实例 | 处理 |
+| --- | --- | --- |
+| **窗口越界**：读取属于紧邻的另一个调用 | `downloadBase64`（属于 `getInvoiceLink()`，模板串路径） | 窗口改为按调用链界定（§2.4） |
+| **动态造键**：`compact()` / 序列化器 | `codeUrl`（`DivisionService` 用 `compact('list','count','codeUrl')`） | `localShape` 与声明索引都展开 `compact(...)` |
+| **恒失败桩端点**：service 体只有 `throw` | `V2AuthService` 的 4 个鉴权方法（「旧 xxx」降级桩） | resolver 新增 `reason: handler-throws`；`shapeIsStub` 谓词，规则与工具都排除（12 对） |
+| **委托取错**：方法体第一个 `$this->x->y(` 是守卫调用 | `phoneLogin` 的 `verifySmsCode` 被当成形状来源 | `delegate()` 优先取 `return` 语句里的调用 |
+| **路由前缀在 provider 里**（未修，已记录） | `kefuapi/login` 被读成 `login` | 静态解析看不到 provider 前缀；`fe-be-path-not-found`/形状核对都会因此错配，需在 `src/parsers/laravelRoutes.js` 补 provider 前缀识别 |
 
 6 条确认**全是同一族**：`bindName` ×4（`login`、`v2/routine/auth_login`、
 `v2/routine/auth_binding_phone`、`v2/routine/phone_login`）与 `bindPhone` ×2

@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { extractFrontCalls, pathMatches } from './review-rules.mjs';
 import { extractLaravelRoutes } from '../src/parsers/laravelRoutes.js';
-import { resolveHandlerShape, shapeIsComparable, collectFrontendReads, searchResponseKey } from './response-shape.mjs';
+import { resolveHandlerShape, shapeIsComparable, shapeIsStub, collectFrontendReads, searchResponseKey } from './response-shape.mjs';
 
 const args = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const JSON_OUT = process.argv.includes('--json');
@@ -114,12 +114,14 @@ if (DEPTH3) {
 let stage2 = null;
 if (STAGE2) {
   stage2 = {
-    comparablePairs: 0, refusedWithReads: 0, refusedNoReads: 0,
+    comparablePairs: 0, refusedWithReads: 0, refusedNoReads: 0, stubPairs: 0,
     confirmed: [], declaredElsewhere: [], scannedFiles: 0,
   };
   for (const p of pairs) {
     const shape = resolveHandlerShape({ root: BACK, controller: p.be.controller, action: p.be.action });
     if (shapeIsComparable(shape)) { stage2.comparablePairs += 1; continue; }
+    // stubs come first: an endpoint that only throws has no success branch to inspect
+    if (shapeIsStub(shape)) { stage2.stubPairs += 1; continue; }
     const reads = collectFrontendReads({ root: FRONT, method: p.fe.method, path: p.fe.path });
     if (reads.level !== 'resolved') { stage2.refusedNoReads += 1; continue; }
     stage2.refusedWithReads += 1;
@@ -200,6 +202,7 @@ if (JSON_OUT) {
     console.log(`gate could compare:        ${stage2.comparablePairs}`);
     console.log(`gate refused, reads ok:    ${stage2.refusedWithReads}   <- declaration search applies`);
     console.log(`gate refused, no reads:    ${stage2.refusedNoReads}`);
+    console.log(`stub endpoints (only throw, excluded): ${stage2.stubPairs}`);
     console.log(`confirmed (0 declarations in ${stage2.scannedFiles} php files): ${stage2.confirmed.length}`);
     for (const c of stage2.confirmed.slice(0, 8)) {
       console.log(`  ${c.endpoint}  ->  ${c.handler}  field=${c.field}   (shape: ${c.shapeReason})`);

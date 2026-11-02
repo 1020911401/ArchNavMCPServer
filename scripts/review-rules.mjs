@@ -25,7 +25,7 @@ import { spawnSync } from 'node:child_process';
 import { archNav } from '../src/navigation.js';
 import { getIndex } from '../src/analyzer.js';
 import { runRules, GO_RULES, ANY_RULES, VUE_RULES, BINDING_RULES, PHP_RULES, STUB_RULES, vforMissingKeys } from './rules/index.mjs';
-import { resolveHandlerShape, collectFrontendReads, shapeIsComparable, searchResponseKey } from './response-shape.mjs';
+import { resolveHandlerShape, collectFrontendReads, shapeIsComparable, shapeIsStub, searchResponseKey } from './response-shape.mjs';
 // The stub detector and the v-for/:key finder moved into their rule modules; re-exported
 // here because the tests (and one older caller) import them from this entry point.
 import { stubMarkerInComments } from './rules/stub.mjs';
@@ -1123,6 +1123,7 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
     shapeStats.fallbackPairs = shapeStats.fallbackPairs || 0;          // gate refused, read field verified by declaration search
     shapeStats.confirmedByDeclaration = shapeStats.confirmedByDeclaration || 0;  // 0 declarations anywhere → finding
     shapeStats.declaredElsewhere = shapeStats.declaredElsewhere || 0;   // declared in another handler → pairing question, not a finding
+    shapeStats.stubPairs = shapeStats.stubPairs || 0;                   // endpoint only throws → client's success branch is dead code
   }
 
   const changedFiles = (changes.changed_files || []).map((r) => norm(r.file));
@@ -1608,6 +1609,16 @@ export function reviewFindings({ changes, index, readFile, backendIndex = null, 
             continue;
           }
 
+          // Stub / degraded endpoints (the service body only throws) never produce a
+          // success payload, so the client's `.then` branch is unreachable: reporting a
+          // missing field — or even running the declaration search — would be a finding
+          // against dead code. Measured 2026-11-02: `V2AuthService`'s auth methods are
+          // documented stubs and accounted for 4 of the 6 "confirmed" findings.
+          if (shapeIsStub(shape)) {
+            if (shapeStats) shapeStats.stubPairs += 1;
+            continue;
+          }
+
           // SECOND STAGE (charter §2.4 — "IDEA's method"): the shape is not comparable, so
           // do NOT fall silent. Ask the declaration question instead — is this key declared
           // anywhere in the backend at all? Measured 2026-11-01: `bindName` has 0
@@ -1958,6 +1969,9 @@ export function buildChecklist({ findings = [], meta = {} }) {
         ? `未核对：${meta.shapeUnresolved ? `${meta.shapeUnresolved} 对接口两侧解析不到响应形状（或配对不可信）` : '响应形状核对未生效（配对不可信 / 两侧未解析）'}`
           + (meta.shapeFallbackPairs
             ? `；另 ${meta.shapeFallbackPairs} 对已走声明搜索——${meta.shapeConfirmedByDeclaration || 0} 处字段全后端无声明、${meta.shapeDeclaredElsewhere || 0} 处字段在别处有声明（配对存疑）`
+            : '')
+          + (meta.shapeStubPairs
+            ? `；${meta.shapeStubPairs} 对是恒失败的桩端点（响应永不成功，前端读取分支不可达，已排除）`
             : '')
         : NOT_APPLICABLE.tests;
     }
@@ -2362,6 +2376,7 @@ async function main() {
     shapeFallbackPairs: shapeStats.fallbackPairs,
     shapeConfirmedByDeclaration: shapeStats.confirmedByDeclaration,
     shapeDeclaredElsewhere: shapeStats.declaredElsewhere,
+    shapeStubPairs: shapeStats.stubPairs,
     hasComposer: fs.existsSync(path.join(dir, 'composer.json')),
     hasPackageJson: fs.existsSync(path.join(dir, 'package.json')),
     hasTests: indexedTests,
@@ -2666,6 +2681,7 @@ async function main() {
           fallbackPairs: shapeStats.fallbackPairs,
           confirmedByDeclaration: shapeStats.confirmedByDeclaration,
           declaredElsewhere: shapeStats.declaredElsewhere,
+          stubPairs: shapeStats.stubPairs,
         },
         checklist: { summary: checklist.summary, rows: checklist.rows },
         duplication: dupResult ? { summary: dupResult.summary } : null,
