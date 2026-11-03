@@ -463,8 +463,17 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
   const symbolByName = new Map();
   const classByName = new Map();
   const classParentByFile = new Map(); // file → [{ cls, parent }]
+  // Every class/trait declaration per file, INCLUDING ones with no base class (the map
+  // above only records `extends`). Trait resolution needs the class identity even when
+  // there is no parent — a controller that only does `use SomeTrait;` has no superClass,
+  // and requiring one made the trait hop a no-op for exactly those fixtures.
+  const classDeclsByFile = new Map(); // file → [{ cls, parent }]
   for (const sym of (symbols || [])) {
     if (!symbolByName.has(sym.name)) symbolByName.set(sym.name, sym); // first match wins (previous linear-scan semantics)
+    if (sym.kind === 'class' || sym.kind === 'trait') {
+      if (!classDeclsByFile.has(sym.file)) classDeclsByFile.set(sym.file, []);
+      classDeclsByFile.get(sym.file).push({ cls: sym.name, parent: sym.superClass || null });
+    }
     if (sym.kind === 'class') {
       if (!classByName.has(sym.name)) classByName.set(sym.name, sym);
       if (sym.superClass) {
@@ -484,14 +493,49 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
   const LOOKUP_KINDS = new Set(['function', 'method']);
   const findInFile = (file, name) => (symbols || []).find((s) => s.file === file && s.name === name && LOOKUP_KINDS.has(s.kind || 'function')) || (symbols || []).find((s) => s.file === file && s.name === name) || null;
   const primaryClassOf = (file) => {
-    const decls = classParentByFile.get(file);
+    const decls = classDeclsByFile.get(file) || classParentByFile.get(file);
     if (!decls || !decls.length) return null;
     const base = String(file).split('/').pop().replace(/\.php$/i, '');
     return decls.find((d) => d.cls === base) || decls[0];
   };
   const unresolvedScopedCalls = [];
   const scopedUnresolved = [];
-  const scopedStats = { total: 0, resolved: 0, unresolved: 0, byReceiver: {} };
+  const scopedStats = { total: 0, resolved: 0, unresolved: 0, resolvedViaTrait: 0, byReceiver: {} };
+
+  // Trait hops. `use LegacyRequestParams;` makes the trait's methods part of the class,
+  // so `$this->stringParam()` inside a trait-using class has a real target — in the
+  // trait's file. Before this, such calls fell through to the parent-class check, found
+  // nothing (the parent is usually a framework class that is not indexed) and were
+  // reported as unresolved: measured on crmeb-laravel, 6 of 19 `stringParam` call sites
+  // and 10 of 21 `intParam` call sites were invisible, while `impact` still graded the
+  // symbol LOW.
+  const traitByName = new Map();
+  const traitsByFile = new Map(); // file → [trait short names]
+  for (const sym of (symbols || [])) {
+    if (sym.kind === 'trait' && !traitByName.has(sym.name)) traitByName.set(sym.name, sym);
+    if (Array.isArray(sym.traits) && sym.traits.length
+        && (sym.kind === 'class' || sym.kind === 'trait')) {
+      if (!traitsByFile.has(sym.file)) traitsByFile.set(sym.file, []);
+      for (const t of sym.traits) if (!traitsByFile.get(sym.file).includes(t)) traitsByFile.get(sym.file).push(t);
+    }
+  }
+  const findInTraits = (traitNames, name, depth = 0, seen = new Set()) => {
+    if (!traitNames || !traitNames.length || depth > 3) return null;
+    for (const tn of traitNames) {
+      if (seen.has(tn)) continue;
+      seen.add(tn);
+      const tsym = traitByName.get(tn) || classByName.get(tn);   // `use SomeClass;` is legal too
+      if (!tsym) continue;
+      const hit = findInFile(tsym.file, name);
+      if (hit) return hit;
+      const nested = traitsByFile.get(tsym.file);
+      if (nested && nested.length) {
+        const deep = findInTraits(nested, name, depth + 1, seen);
+        if (deep) return deep;
+      }
+    }
+    return null;
+  };
 
   // Receiver-aware resolution. A member call `svc.m()` is resolved inside the module
   // the file actually imported, not against "the first symbol called m in the repo".
@@ -566,18 +610,35 @@ function buildKnowledgeGraph(files, baseDir, architecture, communities, flows, d
         if (own) target = own;
         else {
           const prim = primaryClassOf(call.file);
-          const parentSym = prim ? classByName.get(prim.parent) : null;
-          if (parentSym) target = findInFile(parentSym.file, call.callee);
+          // Traits before the parent: `use X;` puts X's methods in this class, and that
+          // is the shape most legacy PHP takes (helper traits in controllers/services).
+          if (prim) {
+            const viaTrait = findInTraits(traitsByFile.get(call.file), call.callee);
+            if (viaTrait) { target = viaTrait; scopedStats.resolvedViaTrait += 1; }
+          }
+          if (!target) {
+            const parentSym = prim ? classByName.get(prim.parent) : null;
+            if (parentSym) {
+              target = findInFile(parentSym.file, call.callee)
+                || findInTraits(traitsByFile.get(parentSym.file), call.callee);
+            }
+          }
         }
         if (target) scopedStats.resolved += 1;
         if (!target) {
           scopedStats.unresolved += 1;
           scopedStats.byReceiver[recv] = (scopedStats.byReceiver[recv] || 0) + 1;
           const prim = primaryClassOf(call.file);
+          const fileTraits = traitsByFile.get(call.file) || [];
           scopedUnresolved.push({
             file: call.file, line: call.line, caller: call.caller, callee: call.callee,
             receiver: recv, cls: prim?.cls ?? null, parent: prim?.parent ?? null,
-            reason: recv === 'parent' ? 'parent 类不在索引内（框架/外部类）或被子类未定义' : '本文件与其父类都没有同名方法',
+            ...(fileTraits.length ? { traits: fileTraits } : {}),
+            reason: recv === 'parent'
+              ? 'parent 类不在索引内（框架/外部类）或被子类未定义'
+              : (fileTraits.length
+                ? `本文件、其 trait（${fileTraits.join('/')}）与父类都没有同名方法`
+                : '本文件与其父类都没有同名方法'),
           });
           continue;
         }

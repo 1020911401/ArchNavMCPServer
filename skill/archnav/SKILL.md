@@ -35,7 +35,7 @@ metadata:
 2. **未跟踪文件已算改动**，不用 `git add -N`；但 `--scope staged` 只含「已暂存 + 未跟踪」，审工作区改动要用 `unstaged`。
 3. **旧索引会撒谎**：新文件的 import 会被报成 `js-unresolved-local-import`；改前先 `analyze`，重建后同一条命令归零。
 4. **输出粒度**：`--json` 默认压缩（无 message/evidence）→ triage 用 `--json --no-compact`；`brief` 只跑 core（55/62），`--mode standard` 或 `--all-rules` 才含 extended。
-5. **作用域调用**（`$this->` / `self::` / `parent::`）不按裸名跨文件解析（见 `unresolvedScopedCalls`）：`parent::` 大量 unresolved 正常；`$this->m()` 落到**别的文件**才是 bug。
+5. **作用域调用**（`$this->` / `self::` / `parent::`）按文件 → trait → 父类的顺序解析（见 `unresolvedScopedCalls`）：`parent::` 大量 unresolved 正常；`$this->m()` 落到**别的文件**才是 bug。**trait 里的方法现在会建边**（`use X;` 引入后 `$this->m()` 落到 X 的定义），所以 `callers`/`impact` 不再对 trait 方法返回 `(none)`；若仍有同名 scoped 调用未解析，`Risk` 最高只能给 `UNKNOWN` 并注明「需 rg 复核」——**不要把它读成 LOW**。
 
 ## 接口（MCP）
 

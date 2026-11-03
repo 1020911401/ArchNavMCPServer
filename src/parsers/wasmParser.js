@@ -336,10 +336,28 @@ export async function parseWasmFile(filePath, baseDir, fileContent) {
           // resolution needs it (resolving by bare method name attached calls to
           // unrelated classes). Read it off the declaration text instead of adding a
           // grammar-dependent capture.
-          if (langName === 'php' && kind === 'class') {
+          if (langName === 'php' && (kind === 'class' || kind === 'trait')) {
             const decl = fileContent.slice(mainNode.startIndex, mainNode.endIndex);
             const ext = /\bextends\s+([^\s{,]+)/.exec(decl);
             if (ext) sym.superClass = ext[1].split(String.fromCharCode(92)).pop();
+            // Trait `use` inside the body (`use LegacyRequestParams;`, `use A, B;`).
+            // Read off the declaration text for the same reason as `extends`: without
+            // it the resolver cannot follow `$this->m()` into a trait, so those call
+            // sites are invisible and impact() grades a symbol with 19 real callers
+            // as LOW. Closure `use ($x)` and namespace imports never match (the
+            // pattern requires an identifier run ending in `;`).
+            const traits = [];
+            const useRe = /\buse\s+([A-Za-z_][\w\\]*(?:\s*,\s*[A-Za-z_][\w\\]*)*)\s*;/g;
+            let tm;
+            while ((tm = useRe.exec(decl))) {
+              for (const part of tm[1].split(',')) {
+                const short = part.trim().replace(/^\\+/, '').split(String.fromCharCode(92)).pop();
+                if (short && short !== 'function' && short !== 'const' && !traits.includes(short)) {
+                  traits.push(short);
+                }
+              }
+            }
+            if (traits.length) sym.traits = traits;
           }
           if (captures.return_type && captures.return_type.length > 0) {
             sym.returnType = fileContent.substring(captures.return_type[0].startIndex, captures.return_type[0].endIndex);

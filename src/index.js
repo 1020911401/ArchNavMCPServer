@@ -37,28 +37,42 @@ program
     const target = dir || process.cwd();
     const result = await analyze(path.resolve(target), options);
     saveIndex(path.resolve(target), result._raw || result);
-    console.log(JSON.stringify(result, null, options.json ? 2 : undefined));
-    
-    if (!options.json) {
-      console.log(`\n📊 ArchNav Analysis Complete`);
-      console.log(`   Files: ${Array.isArray(result.files) ? result.files.length : result.files}`);
-      console.log(`   Symbols: ${Array.isArray(result.symbols) ? result.symbols.length : result.symbols}`);
-      console.log(`   Layers: ${result.architecture?.layers?.length || 0}`);
-      console.log(`   Dependencies: ${result.dependencies}`);
-      console.log(`\n   Try: archnav arch .        (show architecture map)`);
-      console.log(`        archnav locate <name>  (find a symbol)`);
-      console.log(`        archnav read <name>    (read a symbol's code)`);
-      console.log(`        archnav trace <a> <b>  (trace call path)`);
+
+    // 默认只印摘要。整份分析结果（含 symbols/edges/fileHashes）已经是
+    // `.archnav/index.json` 的内容；把它 JSON.stringify 到 stdout，接管的 agent
+    // 会把整份索引读进上下文——实测 1154 文件的 Laravel 仓 = 44.7 MB / 1158 万 token，
+    // 一次 analyze 就把上下文打爆。要机器可读的完整结果，显式加 --json。
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
     }
+
+    console.log(`📊 ArchNav Analysis Complete`);
+    console.log(`   Files: ${Array.isArray(result.files) ? result.files.length : result.files}`);
+    console.log(`   Symbols: ${Array.isArray(result.symbols) ? result.symbols.length : result.symbols}`);
+    console.log(`   Layers: ${result.architecture?.layers?.length || 0}`);
+    console.log(`   Dependencies: ${result.dependencies}`);
+    console.log(`   Index: ${path.join(path.resolve(target), '.archnav', 'index.json')}`);
+    if (result.knowledgeGraph?.scopedCallStats) {
+      const s = result.knowledgeGraph.scopedCallStats;
+      console.log(`   Scoped calls: ${s.resolved}/${s.total} resolved`
+        + (s.resolvedViaTrait ? ` (${s.resolvedViaTrait} via traits)` : '')
+        + `, ${s.unresolved} unresolved`);
+    }
+    console.log(`\n   Try: archnav arch .        (show architecture map)`);
+    console.log(`        archnav locate <name>  (find a symbol)`);
+    console.log(`        archnav read <name>    (read a symbol's code)`);
+    console.log(`        archnav trace <a> <b>  (trace call path)`);
   });
 
 // === arch ===
 program
   .command('arch [dir]')
   .description('Show architecture map (layers, modules, dependencies)')
+  .option('--dir <dir>', 'Project directory (same option every other command takes)')
   .option('--json', 'Output raw JSON')
   .action(async (dir, options) => {
-    const target = dir || process.cwd();
+    const target = options.dir || dir || process.cwd();
     const result = await archNav.architecture(path.resolve(target));
     outputResult(result, options.json);
   });
@@ -191,11 +205,12 @@ program
 program
   .command('changes [dir]')
   .description('Change-impact analysis: map a diff (or content drift) to the symbols it touches and what breaks')
+  .option('--dir <dir>', 'Project directory (same option every other command takes)')
   .option('--scope <scope>', 'unstaged | staged | all | compare | corpus', 'unstaged')
   .option('--base <ref>', 'Base ref for --scope compare (e.g. main)')
   .option('--json', 'Output raw JSON')
   .action(async (dir, options) => {
-    const target = dir || process.cwd();
+    const target = options.dir || dir || process.cwd();
     const result = await archNav.changes(path.resolve(target), {
       scope: options.scope,
       base: options.base,

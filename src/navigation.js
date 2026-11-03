@@ -491,18 +491,26 @@ const isTestPath = (f) => /(^|\/)(tests?|__tests__|specs?|fixtures?)\//i.test(St
  * @returns {{level: string, files: number, apps: number, appList: string[],
  *            symbols: number, indirect: number, reasons: string[], note?: string}}
  */
-export function gradeRisk({ direct = [], indirect = [], ambiguous = false } = {}) {
+export function gradeRisk({ direct = [], indirect = [], ambiguous = false, unresolvedSameName = 0 } = {}) {
   const rows = (direct || []).filter(Boolean);
   const files = [...new Set(rows.map((r) => r.file).filter(Boolean))];
   const apps = [...new Set(files.map(appRootOf).filter(Boolean))];
   const nIndirect = (indirect || []).length;
   const base = { files: files.length, apps: apps.length, appList: apps, symbols: rows.length, indirect: nIndirect };
+  const unresolvedNote = unresolvedSameName > 0
+    ? `另有 ${unresolvedSameName} 处同名 $this/self 调用未解析（trait / 动态派发），结论须 rg 复核。`
+    : null;
+  if (unresolvedSameName > 0) base.unresolvedSameName = unresolvedSameName;
 
   if (!files.length) {
     const note = ambiguous
       ? '多个同名定义、且聚合后没有任何可解析的调用方 —— 无法判定，不等于安全。'
       : '没有解析到调用方。动态派发 / 跨语言字段 / 反射在这个图里不可见，结论须 grep 复核。';
-    return { ...base, level: ambiguous ? 'UNKNOWN' : 'LOW', reasons: [note], note };
+    // 「一个调用点都没解析到」永远不能读成「安全」：只要还有同名未解析调用，
+    // 就给 UNKNOWN 而不是 LOW（实测 stringParam 曾报 LOW，实际有 19 处调用点）。
+    const level = ambiguous || unresolvedSameName > 0 ? 'UNKNOWN' : 'LOW';
+    return { ...base, level, reasons: [note, ...(unresolvedNote ? [unresolvedNote] : [])],
+             note: [note, unresolvedNote].filter(Boolean).join(' ') };
   }
 
   const reasons = [];
@@ -530,8 +538,17 @@ export function gradeRisk({ direct = [], indirect = [], ambiguous = false } = {}
 
   const confs = rows.map((r) => r.confidence).filter((c) => typeof c === 'number');
   const avgConf = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null;
+  // Same-name unresolved scoped calls cap the verdict: reporting LOW while N call sites
+  // are invisible is the one failure mode that makes an agent ship a breaking change.
+  if (unresolvedSameName > 0 && idx === 0) {
+    const out = { ...base, level: 'UNKNOWN', reasons: [...reasons, unresolvedNote] };
+    const a = ambiguityNote(ambiguous);
+    out.note = [a, unresolvedNote].filter(Boolean).join(' ');
+    return out;
+  }
   const out = { ...base, level: RISK_LEVELS[idx], reasons };
   if (ambiguityNote(ambiguous)) out.note = ambiguityNote(ambiguous);
+  if (unresolvedNote) out.note = `${out.note ? `${out.note} ` : ''}${unresolvedNote}`;
   if (avgConf !== null && avgConf < 0.6) {
     out.note = `${out.note ? `${out.note} ` : ''}边缘置信度偏低（均值 ${avgConf.toFixed(2)}），受影响面可能更大。`;
   }
@@ -542,6 +559,17 @@ function ambiguityNote(ambiguous) {
   return ambiguous
     ? '同名符号有多个定义，本结论已跨全部定义聚合；单看某一个定义的影响面更小。'
     : null;
+}
+
+/**
+ * How many `$this->m()` / `self::m()` call sites in this index carry the same callee
+ * name but resolved to nothing. They are the blind spot of every list this module
+ * returns, so callers/impact must report the count instead of looking authoritative.
+ * The list is capped (200) at analyze time; the count is therefore a floor.
+ */
+function countUnresolvedSameName(index, name) {
+  const list = index?.unresolvedScopedCalls || [];
+  return list.filter((c) => c && c.callee === name).length;
 }
 
 export const archNav = {
@@ -832,11 +860,17 @@ export const archNav = {
     
     let outRelations = defs.length > 1 ? dedupeRelations(relations) : relations;
     if (filter) outRelations = applyResultFilter(outRelations, filter, index);
-    
+
+    // An empty list is not proof of "nobody calls it". Scoped calls that failed to
+    // resolve (trait/dynamic dispatch/framework base class) are invisible here, and a
+    // bare `(none)` made `callers` look authoritative when it was blind.
+    const unresolvedSameName = countUnresolvedSameName(index, name);
+
     return {
       type: 'callers',
       symbol: name,
       file: defs[0].file,
+      ...(unresolvedSameName ? { unresolved_same_name: unresolvedSameName } : {}),
       line: defs[0].line_start,
       ...(resolved.ambiguous ? { ambiguous: true, candidates: resolved.candidates } : {}),
       ...(defs.length > 1 ? { definitions: defs.map(toCandidate) } : {}),
@@ -897,10 +931,16 @@ export const archNav = {
       layer: index.layerMap?.[sym.id] || null,
       // Four-tier verdict (LOW/MEDIUM/HIGH/CRITICAL/UNKNOWN) with the reasons that
       // produced it, so "why is this HIGH" never needs a second tool call.
+      // `unresolvedSameName` caps the verdict: same-named scoped calls that resolved to
+      // nothing are blind spots, and a blind spot must never come out as LOW.
+      ...(countUnresolvedSameName(index, name)
+        ? { unresolved_same_name: countUnresolvedSameName(index, name) }
+        : {}),
       risk: gradeRisk({
         direct: directImpact,
         indirect: indirectRelations,
         ambiguous: !!resolved.ambiguous,
+        unresolvedSameName: countUnresolvedSameName(index, name),
       }),
       direct_impact: directImpact,
       indirect_relations: indirectRelations,

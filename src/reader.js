@@ -19,18 +19,41 @@ export async function readCode(name, dirPath, options = {}) {
       confidence: 0,
     };
   }
+
+  // `Class.method` / `Class::method` — the form every agent writes first, and the one
+  // the old matcher could not answer: it compared the whole dotted string against
+  // `sym.name`, found nothing, fell back to grep and reported "not found anywhere"
+  // while the class and the method were both indexed. Split it, then read the method
+  // inside the class' own line range.
+  const dotted = String(name).match(/^([\w\\]+)(?:\.|::)([\w$]+)$/);
+  const findByClassScope = (className, methodName) => {
+    const short = className.split('\\').pop();
+    const owner = index.symbols.find((s) => s.name === short && (s.kind === 'class' || s.kind === 'trait' || s.kind === 'interface'));
+    if (!owner) return null;
+    const sameFile = index.symbols.filter((s) => s.file === owner.file && s.name === methodName);
+    if (!sameFile.length) return null;
+    // Innermost span wins: a method declared inside the class body.
+    const inScope = sameFile.filter((s) => (s.line_start || 0) >= (owner.line_start || 0) && (s.line_end || 0) <= (owner.line_end || 0));
+    return inScope[0] || sameFile[0];
+  };
+
+  // Exact name first: `includes()` used to win for short names ("list" matched
+  // "blackList"), so asking for a method could return an unrelated symbol.
+  const exact = index.symbols.filter((s) => s.name === name);
+  const matches = exact.length ? exact : index.symbols.filter((s) =>
+    s.name.toLowerCase().includes(String(name).toLowerCase()));
+
+  const dottedSym = dotted ? findByClassScope(dotted[1], dotted[2]) : null;
+  if (dotted && !dottedSym && !matches.length) {
+    return await fallbackRead(name, dirPath, options);
+  }
   
-  // Find the symbol in the index
-  const matches = index.symbols.filter(s => 
-    s.name === name || s.name.toLowerCase().includes(name.toLowerCase())
-  );
-  
-  if (matches.length === 0) {
+  if (!matches.length && !dottedSym) {
     // Fallback: grep the codebase for the name
     return await fallbackRead(name, dirPath, options);
   }
   
-  const sym = matches[0];
+  const sym = dottedSym || matches[0];
   const freshness = await checkStaleness(dirPath);
   const confidence = computeConfidence(sym.file, index.fileHashes, freshness, dirPath);
   
